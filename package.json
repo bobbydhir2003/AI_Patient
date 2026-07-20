@@ -1,0 +1,27 @@
+{
+  "name": "pt-ai-unmc",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "test:voice": "tsc src/hooks/voiceStateMachine.ts src/services/interruptionJudge.ts src/services/voicePlaybackState.ts src/services/patientVoiceService.ts src/services/streamingQueueState.ts --ignoreConfig --outDir .test-build --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --types vite/client && node --test scripts/test-voice-state.mjs scripts/test-interruption-judge.mjs scripts/test-voice-playback.mjs scripts/test-progressive-playback.mjs scripts/test-streaming-queue.mjs"
+  },
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-router-dom": "^7.18.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "oxlint": "^1.71.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1"
+  }
+}

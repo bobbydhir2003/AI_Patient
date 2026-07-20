@@ -1,0 +1,41 @@
+.layout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr) 300px;
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.sideCard {
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.patientRow { display: flex; align-items: center; gap: var(--space-3); }
+.patientImage { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; }
+.patientName { font-weight: 700; }
+.patientMeta { font-size: 0.8rem; color: var(--color-text-secondary); }
+
+.stepList { display: flex; flex-direction: column; gap: var(--space-2); }
+.stepRow { display: flex; align-items: center; gap: var(--space-2); font-size: 0.85rem; color: var(--color-text-secondary); }
+.stepDone { color: #4caf7d; font-weight: 700; }
+.stepCurrent { color: var(--color-text-primary); font-weight: 700; }
+
+.metaLine { font-size: 0.8rem; color: var(--color-text-secondary); }
+
+@media (max-width: 1200px) {
+  .layout { grid-template-columns: 240px minmax(0, 1fr); }
+  .rightColumn { grid-column: 1 / -1; }
+}
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+}

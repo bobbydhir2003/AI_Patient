@@ -1,0 +1,41 @@
+.card {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-5);
+  gap: var(--space-3);
+  transition: border-color var(--transition-fast),
+    background-color var(--transition-fast);
+}
+
+.card:hover {
+  border-color: var(--color-border-strong);
+  background-color: var(--color-bg-card-hover);
+}
+
+.image {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  object-position: center top;
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  display: block;
+}
+
+.name {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.age {
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.description {
+  color: var(--color-text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.5;
+  flex: 1;
+}

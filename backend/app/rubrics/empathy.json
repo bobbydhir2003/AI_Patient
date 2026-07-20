@@ -1,0 +1,15 @@
+{
+  "rubric_id": "empathy",
+  "domain": "Empathy & Patient-Centeredness",
+  "version": "1.0",
+  "student_facing_description": "Measures how well you demonstrated empathy, respect, and focus on the patient's priorities and goals.",
+  "what_it_evaluates": "Emotional attunement and patient-centeredness: responding to emotional cues, validating experiences, adapting communication to the patient's age and situation, respecting autonomy, and organizing the conversation around what matters to the patient.",
+  "criteria": [
+    "Emotional cues and disclosures are acknowledged and explored, not bypassed.",
+    "Validation and empathy statements are specific and genuine.",
+    "Communication style is appropriate to the patient's age, developmental stage, and situation as described in the case reference.",
+    "The patient's priorities, worries, and goals shape the conversation.",
+    "The student checks understanding and invites the patient to add what matters to them.",
+    "Judgmental, dismissive, or minimizing responses are absent."
+  ]
+}

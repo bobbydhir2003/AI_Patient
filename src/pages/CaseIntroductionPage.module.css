@@ -1,0 +1,67 @@
+.layout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.infoGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-5);
+}
+
+.section {
+  padding: var(--space-5);
+}
+
+.sectionTitle {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--space-3);
+}
+
+.sectionBody {
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+
+.infoList {
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.taskPanel {
+  padding: var(--space-5);
+  border-color: var(--color-accent-border);
+  background-color: var(--color-accent-soft);
+}
+
+.actions {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.notFound {
+  text-align: center;
+  padding: var(--space-7) var(--space-4);
+  color: var(--color-text-secondary);
+}
+
+@media (max-width: 768px) {
+  .infoGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .actions {
+    flex-direction: column-reverse;
+  }
+}

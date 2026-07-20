@@ -1,0 +1,87 @@
+{
+  "case_id": "referral_case_01",
+  "version": "1.0",
+  "communication_expectations": "Jordan is a 24-year-old adult; casual, non-judgmental peer-level communication works best. He becomes guarded if lifestyle questions feel like criticism.",
+  "caregiver_rules": "Not applicable - the patient speaks for themselves.",
+  "patient_goals": [
+    "Resolve knee pain",
+    "Keep training at the gym",
+    "'Get leaner'"
+  ],
+  "assessment_areas": [
+    {
+      "assessment_area": "knee symptom exploration",
+      "importance": "high",
+      "case_context": "Anterior knee pain worse with squats, stairs, longer sessions over ~2 months.",
+      "acceptable_approaches": [
+        "aggravating/easing questions",
+        "training-linked questions"
+      ]
+    },
+    {
+      "assessment_area": "energy and exercise tolerance",
+      "importance": "high",
+      "case_context": "He reports weakness and unusual tiredness during exercise - the thread that leads to relevant health-behavior exploration.",
+      "acceptable_approaches": [
+        "open follow-up on fatigue",
+        "asking about recovery, fuel, and daily routine"
+      ]
+    },
+    {
+      "assessment_area": "health behaviors (nutrition, sleep)",
+      "importance": "high",
+      "case_context": "Daily routine and eating patterns are directly relevant to his reported fatigue.",
+      "acceptable_approaches": [
+        "neutral daily-routine questions",
+        "non-judgmental screening"
+      ]
+    },
+    {
+      "assessment_area": "training load and goals",
+      "importance": "medium",
+      "case_context": "Trains 5-6 days weekly and does not want to cut back.",
+      "acceptable_approaches": [
+        "activity profiling"
+      ]
+    },
+    {
+      "assessment_area": "scope-appropriate response to advice-seeking",
+      "importance": "high",
+      "case_context": "He may push for highly specific personal plans; responding within a health-promotion interview's role matters.",
+      "acceptable_approaches": [
+        "acknowledging the request without overstepping",
+        "exploring rather than prescribing"
+      ]
+    },
+    {
+      "assessment_area": "pediatric/caregiver topics",
+      "importance": "not_expected",
+      "case_context": "Not applicable to a 24-year-old.",
+      "acceptable_approaches": []
+    }
+  ],
+  "referral_assessment_context": {
+    "clinical_summary": "The patient's fatigue and reduced exercise tolerance stem from intentional restrictive food intake alongside a rapid weight-loss goal; the patient may press for a personalized daily eating plan.",
+    "scope_considerations": [
+      "General education connecting energy, fueling, and activity is appropriate.",
+      "Designing an individualized diet plan or diagnosing an eating problem should not be treated as within the student's role."
+    ],
+    "safety_considerations": [
+      "Urgency depends on the extent of restriction, rate of weight loss, and any additional symptoms actually disclosed in the transcript."
+    ],
+    "reasonable_care_pathways": [
+      "An appropriately qualified nutrition professional",
+      "The patient's primary medical provider"
+    ],
+    "urgency_context": "Typically routine-to-prompt coordination unless the transcript discloses more severe restriction or symptoms.",
+    "acceptable_alternatives": [
+      "Suggesting the patient discuss fueling with their primary provider",
+      "Exploring collaboratively and agreeing to involve a qualified professional without naming a specific discipline"
+    ],
+    "not_expected": [
+      "Naming a specific professional title",
+      "Nutrition assessment or meal planning by the student",
+      "Referral action when the patient never disclosed the restrictive pattern"
+    ]
+  }
+}

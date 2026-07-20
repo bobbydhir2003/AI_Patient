@@ -1,0 +1,84 @@
+{
+  "case_id": "referral_case_03",
+  "version": "1.0",
+  "communication_expectations": "Marcus is 61, good-humoured, deflects embarrassment with jokes; a patient, unhurried style draws him out.",
+  "caregiver_rules": "Not applicable - the patient speaks for themselves.",
+  "patient_goals": [
+    "Regain energy",
+    "Walk the dog again",
+    "Feel like himself at family dinners"
+  ],
+  "assessment_areas": [
+    {
+      "assessment_area": "endurance and fatigue exploration",
+      "importance": "high",
+      "case_context": "Rapid exhaustion with short walks and self-care.",
+      "acceptable_approaches": [
+        "open fatigue questions",
+        "activity-linked questions"
+      ]
+    },
+    {
+      "assessment_area": "daily function after stroke",
+      "importance": "high",
+      "case_context": "Dressing and kitchen tasks slowed by right-hand clumsiness.",
+      "acceptable_approaches": [
+        "daily-routine exploration"
+      ]
+    },
+    {
+      "assessment_area": "mealtime and nutrition exploration",
+      "importance": "high",
+      "case_context": "Meals have become slow with coughing fits; clothes looser - relevant health-behavior territory.",
+      "acceptable_approaches": [
+        "asking about eating, drinking, mealtimes, weight"
+      ]
+    },
+    {
+      "assessment_area": "family and participation context",
+      "importance": "medium",
+      "case_context": "Family meals matter to him; he has begun withdrawing from them.",
+      "acceptable_approaches": [
+        "participation questions",
+        "following up on withdrawal cues"
+      ]
+    },
+    {
+      "assessment_area": "medication context",
+      "importance": "medium",
+      "case_context": "Blood-pressure tablet and blood thinner post-stroke.",
+      "acceptable_approaches": [
+        "standard medication questions"
+      ]
+    },
+    {
+      "assessment_area": "pediatric topics",
+      "importance": "not_expected",
+      "case_context": "Not applicable.",
+      "acceptable_approaches": []
+    }
+  ],
+  "referral_assessment_context": {
+    "clinical_summary": "Coughing during meals and liquids with a recent choking episode after stroke suggests a possible unassessed swallowing concern; the patient is embarrassed and has begun avoiding family meals; clothes fit more loosely.",
+    "scope_considerations": [
+      "Endurance and daily-activity work is appropriate PT territory.",
+      "Swallowing assessment or dietary-texture prescriptions should not be treated as the student's role."
+    ],
+    "safety_considerations": [
+      "Coughing/choking with intake after stroke can carry aspiration risk; a recent frightening choking episode raises the priority of timely coordination."
+    ],
+    "reasonable_care_pathways": [
+      "An appropriate swallowing/communication professional",
+      "The patient's stroke team or primary medical provider"
+    ],
+    "urgency_context": "Prompt coordination is generally warranted once the choking episode is disclosed; routine if only mild mealtime coughing surfaced.",
+    "acceptable_alternatives": [
+      "Recommending the stroke team be informed",
+      "Framing it as something worth checking before it causes harm, without naming a discipline"
+    ],
+    "not_expected": [
+      "Swallowing screening maneuvers by the student",
+      "Referral action when mealtime symptoms were never disclosed"
+    ]
+  }
+}

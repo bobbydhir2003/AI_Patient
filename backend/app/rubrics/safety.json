@@ -1,0 +1,15 @@
+{
+  "rubric_id": "safety",
+  "domain": "Red Flags / Safety Screening",
+  "version": "1.0",
+  "student_facing_description": "Evaluates identification and appropriate exploration of safety concerns relevant to this specific case.",
+  "what_it_evaluates": "Whether the student recognized and appropriately explored the safety-relevant areas defined in the case reference (for example symptom red flags, infection risk during immunosuppressive treatment, unsafe activity progression, or concerning disclosures), and whether the student avoided unsafe interviewing behavior such as premature reassurance, unsupported conclusions, or advice beyond the interview's scope.",
+  "criteria": [
+    "Safety-relevant areas from the case reference are meaningfully explored when the conversation makes them relevant.",
+    "Patient disclosures with potential safety significance are followed up rather than passed over.",
+    "The student avoids leading questions that could suppress symptom reporting.",
+    "The student avoids premature diagnosis, false reassurance, or advice that exceeds a health-promotion interview.",
+    "Screening is proportionate: the student is not expected to interrogate areas the case reference does not support.",
+    "Any acceptable alternative approach listed in the case reference counts as valid screening."
+  ]
+}

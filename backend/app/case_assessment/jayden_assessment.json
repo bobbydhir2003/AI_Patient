@@ -1,0 +1,18 @@
+{
+  "case_id": "jayden",
+  "version": "1.0",
+  "communication_expectations": "Jayden is a 45-year-old professional, friendly and direct. Adult peer-level communication is expected. He is motivated and community-minded; connecting questions to his goals and roles (father, coach, athlete) works well.",
+  "caregiver_rules": "Not applicable - Jayden speaks for himself.",
+  "patient_goals": ["Stay active with his kids, friends, and weights - 'all of the above for as long as I can'", "Continue leading the after-school running program", "Get wellness guidance for living with a new chronic condition"],
+  "assessment_areas": [
+    {"assessment_area": "symptom behavior of joint pain", "importance": "high", "case_context": "Morning pain and fullness (4/10) in the small joints of both hands lasting 30-60 minutes. Timing, pattern, and impact should be characterized.", "acceptable_approaches": ["asking when and how it hurts", "asking what it stops him doing", "asking how it changes through the day"]},
+    {"assessment_area": "understanding of the new SLE diagnosis and his concerns", "importance": "high", "case_context": "Recently diagnosed systemic lupus erythematosus; his stated concern is being unable to continue his lifestyle. Exploring what he understands and worries about is central to this visit.", "acceptable_approaches": ["open questions about what the diagnosis means to him", "asking what he has been told and what concerns him"]},
+    {"assessment_area": "activity profile and exercise goals", "importance": "high", "case_context": "Active 6 days/week 60-120 min (basketball, running, weights, gardening, playing with kids); leads a junior-high running program. His priorities should drive the plan.", "acceptable_approaches": ["asking what he does and loves", "asking what he wants to protect most", "exploring the running program role"]},
+    {"assessment_area": "safe activity progression with a new systemic condition", "importance": "high", "case_context": "With new SLE and a corticosteroid taper (Medrol, one more week), safety-relevant exploration includes how symptoms respond to activity, fatigue or systemic symptoms, and pacing - without prescribing or alarming.", "acceptable_approaches": ["asking how his body responds after hard activity", "asking about fatigue, fevers, or new symptoms", "asking what happens on harder days"]},
+    {"assessment_area": "medication context", "importance": "medium", "case_context": "Medrol (one more week) and Plaquenil. Reasonable to confirm and ask how they are going.", "acceptable_approaches": ["standard medication questions", "asking about side effects in plain language"]},
+    {"assessment_area": "family and community roles", "importance": "medium", "case_context": "Supportive husband, involved father of two, duplex garden with neighbors, volunteer coach - roles that motivate him and shape feasibility.", "acceptable_approaches": ["asking about family and what staying active means for them"]},
+    {"assessment_area": "family history", "importance": "medium", "case_context": "Father has a history of heart disease and stroke.", "acceptable_approaches": ["standard family-history screening"]},
+    {"assessment_area": "health behaviors (nutrition, alcohol, sleep)", "importance": "medium", "case_context": "About 3 fruit/vegetable servings and 4 processed servings daily (STC 8); alcohol about 4x/week, 1-2 drinks; sleep 7-8 h and good.", "acceptable_approaches": ["brief non-judgmental screening"]},
+    {"assessment_area": "pediatric or caregiver-mediated questioning", "importance": "not_expected", "case_context": "Child-style or caregiver-mediated questioning is not applicable to Jayden.", "acceptable_approaches": []}
+  ]
+}

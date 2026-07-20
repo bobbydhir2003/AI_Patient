@@ -1,0 +1,140 @@
+.wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) 0;
+}
+
+.row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: stretch;
+}
+
+.mainButton {
+  flex: 1;
+  min-height: 48px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+}
+
+.mainButton:focus-visible {
+  outline: 2px solid var(--color-accent-hover);
+  outline-offset: 2px;
+}
+
+.stopButton {
+  min-height: 48px;
+  flex-shrink: 0;
+}
+
+.status {
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+  min-height: 1.2em;
+  margin: 0;
+}
+
+.unsupported {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+  background-color: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  margin: 0;
+}
+
+/* --- subtle state indicators --- */
+
+.pulseDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #ffffff;
+  animation: ccPulse 1.3s ease-in-out infinite;
+}
+
+.speakerBars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 14px;
+}
+
+.speakerBars span {
+  width: 3px;
+  background-color: #ffffff;
+  border-radius: 1px;
+  animation: ccBars 1s ease-in-out infinite;
+}
+
+.speakerBars span:nth-child(1) {
+  height: 6px;
+}
+
+.speakerBars span:nth-child(2) {
+  height: 12px;
+  animation-delay: 0.2s;
+}
+
+.speakerBars span:nth-child(3) {
+  height: 8px;
+  animation-delay: 0.4s;
+}
+
+.processingDots span {
+  animation: ccBlink 1.2s infinite;
+  font-weight: 700;
+}
+
+.processingDots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.processingDots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes ccPulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+}
+
+@keyframes ccBars {
+  0%,
+  100% {
+    transform: scaleY(0.5);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes ccBlink {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulseDot,
+  .speakerBars span,
+  .processingDots span {
+    animation: none;
+  }
+}

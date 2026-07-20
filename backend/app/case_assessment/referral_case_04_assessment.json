@@ -1,0 +1,86 @@
+{
+  "case_id": "referral_case_04",
+  "version": "1.0",
+  "communication_expectations": "Priya is 38, quietly spoken and guarded; genuine, unhurried empathy is essential. Checklist-style questioning keeps her closed.",
+  "caregiver_rules": "Not applicable - the patient speaks for themselves.",
+  "patient_goals": [
+    "Sleep and energy back",
+    "Return to swimming",
+    "Feel like herself again"
+  ],
+  "assessment_areas": [
+    {
+      "assessment_area": "persistent pain exploration",
+      "importance": "high",
+      "case_context": "Over a year of low-back and neck pain, worse with long desk days.",
+      "acceptable_approaches": [
+        "symptom behavior questions",
+        "impact questions"
+      ]
+    },
+    {
+      "assessment_area": "sleep exploration",
+      "importance": "high",
+      "case_context": "Marked insomnia with early waking and exhaustion.",
+      "acceptable_approaches": [
+        "sleep screening"
+      ]
+    },
+    {
+      "assessment_area": "participation and work impact",
+      "importance": "high",
+      "case_context": "Reduced workdays and abandoned activities (book club, swimming).",
+      "acceptable_approaches": [
+        "participation exploration"
+      ]
+    },
+    {
+      "assessment_area": "emotional wellbeing exploration",
+      "importance": "high",
+      "case_context": "Fatigue, withdrawal and flat affect are cues deserving sensitive, empathetic follow-up; depth of disclosure depends on the student's approach.",
+      "acceptable_approaches": [
+        "responding to emotional cues with warmth",
+        "gentle open questions about mood and coping"
+      ]
+    },
+    {
+      "assessment_area": "supportive, scope-appropriate responses",
+      "importance": "high",
+      "case_context": "Supportive listening is appropriate; diagnosing or treating mood problems is not the student's role.",
+      "acceptable_approaches": [
+        "validating without diagnosing"
+      ]
+    },
+    {
+      "assessment_area": "pediatric topics",
+      "importance": "not_expected",
+      "case_context": "Not applicable.",
+      "acceptable_approaches": []
+    }
+  ],
+  "referral_assessment_context": {
+    "clinical_summary": "Significant emotional distress accompanies persistent pain: months of low mood, exhaustion, social withdrawal, and on harder days hopeless feelings (no plan or intent disclosed); she has told no one. This may represent a mental-health concern whose urgency depends on what the transcript actually contains.",
+    "scope_considerations": [
+      "Supportive listening, validation, pain education, and activity pacing are within the student's role.",
+      "Diagnosing or treating a mood condition is not; sensitive acknowledgment plus appropriate involvement of other professionals is the expected direction."
+    ],
+    "safety_considerations": [
+      "Hopelessness warrants sensitive, direct, non-judgmental exploration; urgency escalates only with what is actually disclosed (she denies any plan or intent when asked kindly).",
+      "Dismissing, minimizing, or ignoring the disclosure is itself a safety concern."
+    ],
+    "reasonable_care_pathways": [
+      "An appropriate mental-health professional",
+      "The patient's primary medical provider"
+    ],
+    "urgency_context": "Prompt but non-emergency coordination fits the disclosed picture; the student should not treat it as an emergency absent intent, nor as trivial.",
+    "acceptable_alternatives": [
+      "Encouraging her to share how she has been feeling with her doctor and offering to help make that connection",
+      "Collaborative framing that keeps her in control of next steps"
+    ],
+    "not_expected": [
+      "Mental-health diagnosis or counseling techniques",
+      "Crisis escalation beyond what the transcript supports",
+      "Referral action when no emotional content was ever disclosed"
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "rubric_id": "history",
+  "domain": "History Checklist",
+  "version": "1.0",
+  "student_facing_description": "Assesses how thoroughly you explored the history areas that matter for this patient case.",
+  "what_it_evaluates": "Breadth and depth of the health-promotion history relative to what THIS case makes relevant: symptom behavior, functional impact, daily activities and participation, health behaviors (activity, sleep, nutrition), psychosocial context, and patient goals. Depth means following up on what the patient discloses, not asking one question per topic.",
+  "criteria": [
+    "The presenting concerns identified in the case reference are explored, not just mentioned.",
+    "Symptom behavior is characterized when symptoms are present (location, timing, aggravating/easing factors, impact).",
+    "Functional impact is explored across relevant life areas (home, school or work, play or recreation, family roles).",
+    "Relevant health behaviors are screened (activity, sleep, nutrition) where the case reference marks them relevant.",
+    "The patient's own goals and priorities are elicited.",
+    "Follow-up questions deepen important disclosures rather than moving to the next topic.",
+    "The student is NOT penalized for omitting areas the case reference marks optional or not expected."
+  ]
+}

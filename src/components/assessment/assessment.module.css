@@ -1,0 +1,226 @@
+/* Shared styles for the AI assessment review UI (UNMC dark system). */
+
+.levelBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-bg-elevated);
+  white-space: nowrap;
+}
+
+.levelAdvanced { color: #7ee2a8; border-color: rgba(76, 175, 125, 0.5); }
+.levelProficient { color: #4caf7d; border-color: rgba(76, 175, 125, 0.4); }
+.levelDeveloping { color: #d9a441; border-color: rgba(217, 164, 65, 0.45); }
+.levelNeedsImprovement { color: #e06b5d; border-color: rgba(192, 57, 43, 0.5); }
+.levelInsufficientEvidence { color: var(--color-text-muted); }
+
+.sectionCard {
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.sectionTitle {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.mutedText { color: var(--color-text-secondary); font-size: 0.9rem; line-height: 1.55; }
+
+.aiTag {
+  display: inline-flex;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #b9a7f0;
+  border: 1px solid rgba(150, 120, 240, 0.4);
+  background: rgba(150, 120, 240, 0.08);
+}
+
+/* --- rubric cards --- */
+.rubricCard { padding: 0; overflow: hidden; }
+
+.rubricHeader {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: transparent;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rubricHeader:focus-visible { outline: 2px solid var(--color-accent-hover); outline-offset: -2px; }
+.rubricTitleWrap { display: flex; flex-direction: column; gap: 4px; }
+.rubricTitle { font-size: 0.98rem; font-weight: 700; }
+.rubricSummary { font-size: 0.84rem; color: var(--color-text-secondary); }
+.rubricMeta { display: flex; align-items: center; gap: var(--space-3); flex-shrink: 0; }
+.evidenceCount { font-size: 0.74rem; color: var(--color-text-muted); white-space: nowrap; }
+.chevron { transition: transform var(--transition-fast); color: var(--color-text-muted); }
+.chevronOpen { transform: rotate(90deg); }
+
+.rubricBody {
+  border-top: 1px solid var(--color-border);
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.listBlock { display: flex; flex-direction: column; gap: var(--space-2); }
+.listHeading { font-size: 0.78rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; }
+.headingStrength { color: #4caf7d; }
+.headingGrowth { color: #d9a441; }
+.plainList { margin: 0; padding-left: 1.1rem; color: var(--color-text-secondary); font-size: 0.88rem; display: flex; flex-direction: column; gap: 6px; }
+
+/* --- evidence items --- */
+.evidenceItem {
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  background: var(--color-bg-elevated);
+}
+
+.evidenceStrength { border-left-color: #4caf7d; }
+.evidenceMissed { border-left-color: #d9a441; }
+.evidenceMistake { border-left-color: #d9a441; }
+.evidenceSafety { border-left-color: var(--color-danger); }
+
+.evidenceTop { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
+.evidenceLabel { font-size: 0.86rem; font-weight: 700; }
+.evidenceQuote {
+  font-size: 0.86rem;
+  border-left: 2px solid var(--color-border-strong);
+  padding-left: 10px;
+  color: var(--color-text-primary);
+  font-style: italic;
+}
+.quoteWho { font-style: normal; font-weight: 700; font-size: 0.74rem; color: var(--color-text-muted); margin-right: 6px; }
+.confidenceTag { font-size: 0.7rem; color: var(--color-text-muted); }
+
+.linkButton {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: var(--color-accent-hover);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+.linkButton:hover { text-decoration: underline; }
+
+/* --- Review This Moment --- */
+.momentBlock {
+  border: 1px solid rgba(217, 164, 65, 0.35);
+  border-radius: var(--radius-sm);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  background: rgba(217, 164, 65, 0.04);
+}
+.momentHeading { font-size: 0.8rem; font-weight: 700; color: #d9a441; letter-spacing: 0.04em; text-transform: uppercase; }
+.momentRow { display: flex; flex-direction: column; gap: 4px; }
+.momentLabel { font-size: 0.74rem; font-weight: 700; color: var(--color-text-muted); }
+.momentText { font-size: 0.88rem; color: var(--color-text-primary); line-height: 1.5; }
+.momentAlt { color: #7ee2a8; }
+
+/* --- transcript review --- */
+.transcriptWrap { display: flex; flex-direction: column; gap: var(--space-3); }
+.filterRow { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+.filterButton {
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  border-radius: 999px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.filterActive { color: #ffffff; background: var(--color-accent); border-color: var(--color-accent); }
+
+.turnRow { display: flex; flex-direction: column; gap: 6px; padding: var(--space-3); border-radius: var(--radius-sm); border: 1px solid transparent; }
+.turnHighlighted { border-color: var(--color-accent-border); background: var(--color-accent-soft); }
+.turnHeader { display: flex; align-items: baseline; gap: var(--space-2); flex-wrap: wrap; }
+.turnSpeaker { font-size: 0.74rem; font-weight: 800; letter-spacing: 0.06em; }
+.speakerStudent { color: var(--color-accent-hover); }
+.speakerPatient { color: #6fa8dc; }
+.turnLabelTag { font-size: 0.7rem; color: var(--color-text-muted); }
+.turnText { font-size: 0.9rem; line-height: 1.55; }
+
+.markerRow { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+.markerChip {
+  border: none;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 10px;
+  cursor: pointer;
+  color: #0a0a0a;
+}
+.chipStrength { background: #4caf7d; }
+.chipMissed { background: #d9a441; }
+.chipMistake { background: #d9a441; }
+.chipSafety { background: #e06b5d; }
+.chipObservation { background: #9aa7b8; }
+
+.markerPanel {
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-card);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  box-shadow: var(--shadow-elevated);
+}
+
+/* --- method panel (right sidebar) --- */
+.methodStep { display: flex; gap: var(--space-3); }
+.methodNum {
+  width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.74rem; font-weight: 700;
+  border: 1px solid rgba(150, 120, 240, 0.5); color: #b9a7f0;
+}
+.methodTitle { font-size: 0.84rem; font-weight: 700; color: #b9a7f0; }
+.methodText { font-size: 0.78rem; color: var(--color-text-secondary); line-height: 1.5; }
+.metaGrid { display: flex; flex-direction: column; gap: 6px; font-size: 0.76rem; color: var(--color-text-secondary); }
+.metaRow { display: flex; justify-content: space-between; gap: var(--space-2); }
+.metaKey { color: var(--color-text-muted); }
+
+/* --- focus areas --- */
+.focusItem { display: flex; gap: var(--space-3); align-items: flex-start; }
+.focusNum {
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 0.8rem;
+  background: rgba(217, 164, 65, 0.15); color: #d9a441; border: 1px solid rgba(217, 164, 65, 0.4);
+}
+
+/* --- status --- */
+.statusWrap { display: flex; flex-direction: column; align-items: center; gap: var(--space-4); padding: var(--space-8) var(--space-5); text-align: center; }
+.spinner {
+  width: 40px; height: 40px; border-radius: 50%;
+  border: 3px solid var(--color-border-strong); border-top-color: var(--color-accent-hover);
+  animation: assessSpin 0.9s linear infinite;
+}
+@keyframes assessSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation: none; } }

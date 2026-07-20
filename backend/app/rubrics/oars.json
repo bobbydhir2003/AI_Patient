@@ -1,0 +1,16 @@
+{
+  "rubric_id": "oars",
+  "domain": "OARS Communication",
+  "version": "1.0",
+  "student_facing_description": "Evaluates how you used open-ended questions, affirmations, reflective listening, and summaries to guide a patient-centered conversation.",
+  "what_it_evaluates": "Use of OARS motivational-interviewing micro-skills: Open-ended questions that invite the patient's own words; Affirmations that recognize patient strengths and efforts; Reflections that demonstrate active listening by restating or deepening what the patient said; Summaries that consolidate information before transitions.",
+  "criteria": [
+    "Open-ended questions are used to open topics and explore patient perspectives rather than defaulting to yes/no questions.",
+    "Closed questions are reserved for clarification, not for opening new topics.",
+    "The student reflects patient statements (simple or complex reflections) rather than only acknowledging with 'okay' or 'I see'.",
+    "Affirmations are genuine and specific to something the patient said or did.",
+    "The student summarizes key information at transitions or before closing.",
+    "Questions build on the patient's previous answers instead of following a fixed checklist order.",
+    "Leading or suggestive questions that plant an answer are avoided."
+  ]
+}

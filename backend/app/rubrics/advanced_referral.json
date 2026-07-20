@@ -1,0 +1,16 @@
+{
+  "rubric_id": "advanced_referral_reasoning",
+  "version": "1.0",
+  "title": "Advanced Referral Assessment",
+  "description": "Evaluates how the student recognizes, explores, communicates, and manages concerns requiring consultation, referral, coordination, or escalation. Case-independent: all patient-specific grounding comes from the protected context of the selected case.",
+  "student_facing_description": "Evaluates how you recognized the concern, explored it, respected professional boundaries, considered urgency and safety, and communicated next steps.",
+  "domains": [
+    {"id": "concern_recognition", "title": "Concern Recognition", "definition": "Recognizes when patient information may require consultation, referral, coordination, or escalation beyond the current encounter."},
+    {"id": "relevant_exploration", "title": "Relevant Exploration", "definition": "Explores the concern sufficiently to understand its relevance, impact, and potential urgency."},
+    {"id": "professional_scope", "title": "Professional Scope", "definition": "Responds within appropriate professional boundaries and avoids unsupported diagnosis, prescription, or specialized treatment."},
+    {"id": "care_pathway_reasoning", "title": "Care Pathway Reasoning", "definition": "Identifies a clinically reasonable next care pathway based on the information available."},
+    {"id": "urgency_safety", "title": "Urgency & Safety", "definition": "Distinguishes routine coordination from prompt or immediate escalation."},
+    {"id": "patient_centered_communication", "title": "Patient-Centered Communication", "definition": "Explains concerns and next steps respectfully, clearly, and collaboratively."},
+    {"id": "coordination_followup", "title": "Coordination & Follow-Up", "definition": "Addresses documentation, supervision, communication, consent, referral follow-through, or expected next steps."}
+  ]
+}

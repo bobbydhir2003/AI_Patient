@@ -1,0 +1,86 @@
+{
+  "case_id": "referral_case_02",
+  "version": "1.0",
+  "communication_expectations": "Eleanor is 74, articulate and courteous; respectful adult communication with patience for detail. She minimizes symptoms, so gentle specific follow-up is important.",
+  "caregiver_rules": "Not applicable - the patient speaks for themselves.",
+  "patient_goals": [
+    "Stay independent at home",
+    "Keep walking to the shops and gardening"
+  ],
+  "assessment_areas": [
+    {
+      "assessment_area": "balance and dizziness exploration",
+      "importance": "high",
+      "case_context": "Unsteadiness plus intermittent dizziness with a discoverable pattern (timing, position changes).",
+      "acceptable_approaches": [
+        "asking when/where dizziness happens",
+        "asking what she was doing when it started"
+      ]
+    },
+    {
+      "assessment_area": "falls and safety at home",
+      "importance": "high",
+      "case_context": "Two recent near-falls and a two-storey home.",
+      "acceptable_approaches": [
+        "falls screening",
+        "home-environment questions"
+      ]
+    },
+    {
+      "assessment_area": "medication history",
+      "importance": "high",
+      "case_context": "Recent medication change and nightly sleep aid are relevant history a thorough interview gathers.",
+      "acceptable_approaches": [
+        "standard medication questions",
+        "asking about recent health changes"
+      ]
+    },
+    {
+      "assessment_area": "function and participation",
+      "importance": "medium",
+      "case_context": "She has started avoiding longer walks; independence is her core goal.",
+      "acceptable_approaches": [
+        "daily-activity exploration"
+      ]
+    },
+    {
+      "assessment_area": "scope-appropriate handling of medication topics",
+      "importance": "high",
+      "case_context": "Gathering medication history is appropriate; directing changes to medication is not.",
+      "acceptable_approaches": [
+        "neutral information gathering",
+        "avoiding medication directives"
+      ]
+    },
+    {
+      "assessment_area": "pediatric/caregiver topics",
+      "importance": "not_expected",
+      "case_context": "Not applicable.",
+      "acceptable_approaches": []
+    }
+  ],
+  "referral_assessment_context": {
+    "clinical_summary": "Dizziness and near-falls began after a recent blood-pressure medication dose change, compounded by a nightly over-the-counter sleep aid; the pattern (post-dose, positional) suggests a possible medication-related cause.",
+    "scope_considerations": [
+      "Balance training, fall-risk education, and gathering a medication history are appropriate.",
+      "Advising the patient to stop, skip, or change any medication is outside the student's role."
+    ],
+    "safety_considerations": [
+      "Two recent near-falls raise fall risk; urgency depends on the frequency, injuries, and symptom pattern actually disclosed."
+    ],
+    "reasonable_care_pathways": [
+      "The prescribing medical provider",
+      "A pharmacist or appropriate medication professional"
+    ],
+    "urgency_context": "Prompt (not emergency) coordination is generally reasonable given recurring near-falls; escalate promptly if the transcript discloses injury or worsening.",
+    "acceptable_alternatives": [
+      "Encouraging the patient to report the timing pattern to whoever manages her prescriptions",
+      "Coordinating with the patient's medical team without naming a discipline"
+    ],
+    "not_expected": [
+      "Identifying the specific medication mechanism",
+      "Medication advice of any kind",
+      "Referral action if the medication history was never disclosed"
+    ]
+  }
+}

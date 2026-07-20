@@ -1,0 +1,282 @@
+.page {
+  padding: 4rem 1rem;
+  min-height: calc(100vh - 80px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background-color: #111;
+  color: #fff;
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+.container {
+  width: 100%;
+  max-width: 1000px;
+  background: #1c1c1c;
+  border-radius: 12px;
+  padding: 3rem 2rem;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  border: 1px solid #333;
+  margin-top: 2rem;
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 3rem;
+}
+
+.title {
+  font-size: 1.75rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  color: #fff;
+}
+
+.subtitle {
+  font-size: 1rem;
+  color: #a0a0a0;
+  max-width: 600px;
+  margin: 0 auto;
+  line-height: 1.5;
+}
+
+.content {
+  display: flex;
+  gap: 3rem;
+  flex-direction: column;
+}
+
+@media (min-width: 768px) {
+  .content {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
+.leftPanel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 500px;
+}
+
+.graphicContainer {
+  position: relative;
+  width: 200px;
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 2rem;
+}
+
+.logoPulse {
+  position: absolute;
+  width: 80px;
+  height: 80px;
+  object-fit: contain;
+  z-index: 2;
+}
+
+.ring {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 4px solid transparent;
+  border-top-color: #d12027;
+  border-right-color: rgba(209, 32, 39, 0.3);
+  animation: spin 2s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ring {
+    animation: pulse 2s ease-in-out infinite;
+    border-color: #d12027;
+  }
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes pulse {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.05); opacity: 1; }
+  100% { transform: scale(0.95); opacity: 0.8; }
+}
+
+.stages {
+  width: 100%;
+  background: #252525;
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.stageRow {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.stageRow:last-child {
+  margin-bottom: 0;
+}
+
+.stageIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+}
+
+.iconComplete {
+  color: #2e7d32;
+  font-weight: bold;
+}
+
+.iconActive {
+  color: #d12027;
+  animation: pulseActive 1.5s infinite;
+}
+
+.iconPending {
+  color: #666;
+  border: 2px solid #666;
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  margin: 4px;
+}
+
+@keyframes pulseActive {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.2); opacity: 0.8; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.stageText {
+  flex: 1;
+  font-size: 0.95rem;
+}
+
+.textComplete {
+  color: #a0a0a0;
+}
+
+.textActive {
+  color: #fff;
+  font-weight: 500;
+}
+
+.textPending {
+  color: #666;
+}
+
+.progressContainer {
+  width: 100%;
+  margin-bottom: 2rem;
+}
+
+.progressTrack {
+  height: 6px;
+  background: #333;
+  border-radius: 3px;
+  overflow: hidden;
+  margin-bottom: 0.75rem;
+}
+
+.progressFill {
+  height: 100%;
+  background: #d12027;
+  transition: width 0.5s ease-out;
+}
+
+.progressLabel {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: #a0a0a0;
+}
+
+.actions {
+  display: flex;
+  gap: 1rem;
+  flex-direction: column;
+}
+
+.rightPanel {
+  flex: 0 0 320px;
+}
+
+.statusCard {
+  background: #252525;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 1.5rem;
+  box-shadow: inset 0 0 40px rgba(209, 32, 39, 0.05);
+}
+
+.statusTitle {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 1.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #fff;
+}
+
+.statusList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.statusItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  font-size: 0.9rem;
+  color: #ccc;
+  line-height: 1.4;
+}
+
+.statusItem::before {
+  content: "•";
+  color: #d12027;
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.errorCard {
+  background: #251212;
+  border: 1px solid #d12027;
+  border-radius: 8px;
+  padding: 2rem;
+  text-align: center;
+  margin-top: 2rem;
+  width: 100%;
+}
+
+.errorTitle {
+  color: #ff4444;
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+.errorMessage {
+  color: #e0e0e0;
+  margin-bottom: 1.5rem;
+  line-height: 1.5;
+}
