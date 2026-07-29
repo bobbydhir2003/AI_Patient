@@ -1,5 +1,6 @@
 import { useNavigate, useParams } from "react-router-dom";
-import { PatientProfile } from "../components/cases/PatientProfile";
+import { AppImage } from "../components/common/AppImage";
+import { PavingWheel } from "../components/cases/PavingWheel";
 import { ProgressSteps } from "../components/layout/ProgressSteps";
 import { usePatientCase } from "../services/cases";
 import styles from "./CaseIntroductionPage.module.css";
@@ -55,36 +56,143 @@ export function CaseIntroductionPage() {
     );
   }
 
+  const {
+    name,
+    age,
+    image,
+    patientType,
+    gender,
+    raceEthnicity,
+    medicalHistory,
+    medications,
+    referralReason,
+    studentVisibleInfo,
+    caregiverNotice,
+    pavingProfile,
+    task,
+  } = patientCase;
+
+  const genderLabel = gender
+    ? gender.charAt(0).toUpperCase() + gender.slice(1)
+    : "";
+  const hasMeds = Array.isArray(medications) && medications.length > 0;
+  const hasClinical = Boolean(medicalHistory) || hasMeds;
+
   return (
     <div className="page">
       <ProgressSteps steps={PROGRESS_STEPS} currentStepIndex={0} />
 
       <div className={styles.layout}>
-        <div className="card" style={{ padding: "1.5rem" }}>
-          <PatientProfile patientCase={patientCase} />
+        {/* SECTION 1: Patient header */}
+        <div className={`card ${styles.header}`}>
+          <div className={styles.identity}>
+            <AppImage
+              src={image}
+              alt={`${name} patient portrait`}
+              className={styles.portrait}
+            />
+            <div className={styles.identityDetails}>
+              <div className={styles.nameRow}>
+                <h1 className={styles.name}>{name}</h1>
+                {patientType && (
+                  <span className={styles.typeBadge}>{patientType}</span>
+                )}
+              </div>
+              <dl className={styles.metaGrid}>
+                <div className={styles.metaItem}>
+                  <dt>Age</dt>
+                  <dd>{age === 1 ? "1 year" : `${age} years`}</dd>
+                </div>
+                {genderLabel && (
+                  <div className={styles.metaItem}>
+                    <dt>Gender</dt>
+                    <dd>{genderLabel}</dd>
+                  </div>
+                )}
+                {raceEthnicity && (
+                  <div className={styles.metaItem}>
+                    <dt>Race / Ethnicity</dt>
+                    <dd>{raceEthnicity}</dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+          </div>
+
+          {hasClinical && (
+            <div className={styles.clinical}>
+              {medicalHistory && (
+                <div className={styles.clinicalBlock}>
+                  <h2 className={styles.clinicalTitle}>Medical History</h2>
+                  <p className={styles.clinicalBody}>{medicalHistory}</p>
+                </div>
+              )}
+              {hasMeds && (
+                <div className={styles.clinicalBlock}>
+                  <h2 className={styles.clinicalTitle}>Medications</h2>
+                  <ul className={styles.medList}>
+                    {medications!.map((med) => (
+                      <li key={med}>{med}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
+        {/* Caregiver notice (e.g. Camden's mother answers) */}
+        {caregiverNotice && (
+          <div className={styles.notice} role="note">
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              className={styles.noticeIcon}
+            >
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="16" x2="12" y2="12" />
+              <line x1="12" y1="8" x2="12.01" y2="8" />
+            </svg>
+            <p>{caregiverNotice}</p>
+          </div>
+        )}
+
+        {/* SECTION 2 & 3: Referral Reason + Student-Visible Information */}
         <div className={styles.infoGrid}>
           <div className={`card ${styles.section}`}>
             <h2 className={styles.sectionTitle}>Referral Reason</h2>
-            <p className={styles.sectionBody}>{patientCase.referralReason}</p>
+            <p className={styles.sectionBody}>{referralReason}</p>
           </div>
 
           <div className={`card ${styles.section}`}>
             <h2 className={styles.sectionTitle}>Student-Visible Information</h2>
             <ul className={styles.infoList}>
-              {patientCase.studentVisibleInfo.map((info) => (
+              {studentVisibleInfo.map((info) => (
                 <li key={info}>{info}</li>
               ))}
             </ul>
           </div>
         </div>
 
+        {/* SECTION 4: PAVING Wheel (digital radar from the patient's worksheet) */}
+        {pavingProfile && pavingProfile.categories.length > 0 && (
+          <PavingWheel patientName={name} profile={pavingProfile} />
+        )}
+
+        {/* SECTION 5: Your Task */}
         <div className={`card ${styles.taskPanel}`}>
           <h2 className={styles.sectionTitle}>Your Task</h2>
-          <p className={styles.sectionBody}>{patientCase.task}</p>
+          <p className={styles.sectionBody}>{task}</p>
         </div>
 
+        {/* Navigation */}
         <div className={styles.actions}>
           <button
             type="button"

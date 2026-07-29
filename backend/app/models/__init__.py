@@ -2,6 +2,12 @@ from app.models.assessment import AssessmentDomainResult, AssessmentEvidence, As
 from app.models.audit_log import AuditLog
 from app.models.conversation_turn import ConversationTurn
 from app.models.interview_session import InterviewSession
+from app.models.runtime_config import (
+    ApiCredential,
+    ConfigurationHistory,
+    PatientVoiceSetting,
+    SystemSetting,
+)
 from app.models.student import Student
 from app.models.user import User
 
@@ -14,4 +20,8 @@ __all__ = [
     "AssessmentRun",
     "AssessmentDomainResult",
     "AssessmentEvidence",
+    "ApiCredential",
+    "SystemSetting",
+    "PatientVoiceSetting",
+    "ConfigurationHistory",
 ]

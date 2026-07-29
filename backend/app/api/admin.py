@@ -20,7 +20,8 @@ from app.schemas.admin import (
     TranscriptMessageOut,
 )
 from app.schemas.assessment_schema import AssessmentOut
-from app.services import admin_service
+from app.schemas.notification_schema import NotificationListOut
+from app.services import admin_service, notification_service
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -114,6 +115,26 @@ def audit_logs(
     db: Session = Depends(get_db),
 ) -> PaginatedAuditLogs:
     return admin_service.list_audit_logs(db, page=page, page_size=page_size)
+
+
+# ---------------- notifications ----------------
+@router.get("/notifications", response_model=NotificationListOut)
+def notifications(
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> NotificationListOut:
+    """Real admin notification feed derived from recorded activity."""
+    return notification_service.list_notifications(db, admin)
+
+
+@router.post("/notifications/read-all", response_model=MutationResult)
+def read_all_notifications(
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> MutationResult:
+    notification_service.mark_all_read(db, admin)
+    db.commit()
+    return MutationResult(success=True, message="All notifications marked as read.")
 
 
 # ---------------- mutations ----------------

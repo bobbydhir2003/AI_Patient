@@ -23,6 +23,11 @@ import { AdminTranscriptsPage } from "./pages/admin/AdminTranscriptsPage";
 import { AdminAssessmentsPage } from "./pages/admin/AdminAssessmentsPage";
 import { AdminArchivedPage } from "./pages/admin/AdminArchivedPage";
 import { AdminProfilePage } from "./pages/admin/AdminProfilePage";
+import { SystemDashboardPage } from "./pages/admin/system/SystemDashboardPage";
+import { AiConfigurationPage } from "./pages/admin/system/AiConfigurationPage";
+import { PatientVoicesPage } from "./pages/admin/system/PatientVoicesPage";
+import { ApiCredentialsPage } from "./pages/admin/system/ApiCredentialsPage";
+import { SystemHealthPage } from "./pages/admin/system/subpages";
 import { ProtectedRoute } from "./portal/ProtectedRoute";
 
 function App() {
@@ -92,6 +97,13 @@ function App() {
           <Route path="archived" element={<AdminArchivedPage />} />
           <Route path="profile" element={<AdminProfilePage />} />
           <Route path="audit-log" element={<AdminAuditLogPage />} />
+
+          {/* Technical / system administration (separate from the academic dashboard) */}
+          <Route path="system" element={<SystemDashboardPage />} />
+          <Route path="system/voices" element={<PatientVoicesPage />} />
+          <Route path="system/config" element={<AiConfigurationPage />} />
+          <Route path="system/credentials" element={<ApiCredentialsPage />} />
+          <Route path="system/health" element={<SystemHealthPage />} />
         </Route>
       </Routes>
       {!isHomePage && !isAdminArea && <AppFooter />}

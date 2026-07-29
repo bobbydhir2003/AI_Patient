@@ -40,6 +40,16 @@
   background-color: var(--color-bg-card);
 }
 
+.speaker {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--color-accent-hover);
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
 .text {
   font-size: 0.95rem;
   color: var(--color-text-primary);

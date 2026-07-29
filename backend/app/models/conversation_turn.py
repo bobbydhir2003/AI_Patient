@@ -29,6 +29,10 @@ class ConversationTurn(Base):
     )
     turn_index: Mapped[int] = mapped_column(Integer, nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)  # student | patient
+    # Multi-participant speaker identity (patient turns). For single-speaker
+    # cases speaker_id defaults to "patient" and the label to "Patient".
+    speaker_id: Mapped[str] = mapped_column(String(30), nullable=False, default="patient")
+    speaker_label: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     client_turn_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source: Mapped[str | None] = mapped_column(String(20), nullable=True)  # typed | speech | openai
     content: Mapped[str] = mapped_column(Text, nullable=False)

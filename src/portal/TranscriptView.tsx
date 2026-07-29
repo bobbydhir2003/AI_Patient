@@ -37,7 +37,9 @@ export function TranscriptView({
         return (
           <div key={m.id} className={`pt-msg ${cls}`}>
             <span className="pt-msg-meta">
-              #{m.turnIndex + 1} · {speakerLabel(m.speaker)} · {fmtTime(m.createdAt)}
+              #{m.turnIndex + 1} ·{" "}
+              {m.speaker === "patient" && m.speakerLabel ? m.speakerLabel : speakerLabel(m.speaker)}
+              {" "}· {fmtTime(m.createdAt)}
             </span>
             {m.content}
             {renderAction && <div style={{ marginTop: 6 }}>{renderAction(m)}</div>}

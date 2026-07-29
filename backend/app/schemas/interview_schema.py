@@ -11,6 +11,10 @@ class MessageOut(CamelModel):
     sender: str  # student | patient
     text: str
     timestamp: datetime
+    # Multi-participant speaker identity (patient turns). Defaults keep
+    # single-speaker cases unchanged.
+    speaker_id: str = "patient"
+    speaker_label: str = ""
 
 
 class StudentMessageRequest(CamelModel):
@@ -123,6 +127,17 @@ class InterviewConfigOut(CamelModel):
     sentence_pipelining_enabled: bool = False
 
 
+class TurnSegmentOut(CamelModel):
+    """One participant's spoken segment (for multi-speaker / joint responses).
+    Segments are ordered; the frontend plays each with its own voice."""
+
+    turn_id: str
+    speaker_id: str = "patient"
+    speaker_label: str = ""
+    text: str
+    speech: SpeechStyleOut | None = None
+
+
 class TurnResponse(CamelModel):
     """What the frontend receives. Internal fact IDs / prompts are never exposed."""
 
@@ -133,3 +148,9 @@ class TurnResponse(CamelModel):
     # Controlled delivery metadata for TTS; None on idempotent replays or when
     # the model omitted it (the case's default voice profile applies).
     speech: SpeechStyleOut | None = None
+    # Speaker of the primary segment (multi-participant cases).
+    speaker_id: str = "patient"
+    speaker_label: str = ""
+    # Ordered segments when more than one participant answers ("both"). When a
+    # single participant answers, this is a one-element list (or omitted).
+    responses: list[TurnSegmentOut] | None = None

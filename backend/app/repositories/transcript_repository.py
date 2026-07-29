@@ -27,6 +27,8 @@ class TranscriptRepository:
         facts_used: list[str] | None = None,
         response_type: str | None = None,
         validation_status: str | None = None,
+        speaker_id: str = "patient",
+        speaker_label: str = "",
     ) -> ConversationTurn:
         turn = ConversationTurn(
             session_id=session_id,
@@ -40,6 +42,8 @@ class TranscriptRepository:
             facts_used=json.dumps(facts_used) if facts_used is not None else None,
             response_type=response_type,
             validation_status=validation_status,
+            speaker_id=speaker_id,
+            speaker_label=speaker_label,
         )
         self.db.add(turn)
         self.db.flush()

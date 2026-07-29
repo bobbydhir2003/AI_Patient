@@ -65,6 +65,15 @@ class AudioCache:
         with self._lock:
             return len(self._entries)
 
+    def nbytes(self) -> int:
+        """Approximate total bytes held by cached audio clips (read-only)."""
+        with self._lock:
+            return sum(len(v) for v in self._entries.values())
+
+    @property
+    def max_entries(self) -> int:
+        return self._max_entries
+
 
 _default_cache: AudioCache | None = None
 

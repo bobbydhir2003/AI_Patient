@@ -137,6 +137,7 @@ def stream_patient_response(
     active_topic: str | None = None,
     client: OpenAIPatientClient | None = None,
     correlation_id: str = "",
+    speaker_id: str | None = None,
 ):
     """Generator yielding StreamSpeech, StreamSentence..., StreamCompleted.
 
@@ -158,7 +159,7 @@ def stream_patient_response(
     eligible_ids = {f.id for f in eligible}
 
     client = client or get_openai_client()
-    messages = prompt_builder.build_streaming_messages(case, eligible, context, question)
+    messages = prompt_builder.build_streaming_messages(case, eligible, context, question, speaker_id)
 
     # Early delivery labels so the first sentence never waits for metadata.
     yield StreamSpeech(speech=derive_early_speech(case, topics))

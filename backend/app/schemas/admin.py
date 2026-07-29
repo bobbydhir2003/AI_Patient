@@ -169,6 +169,9 @@ class TranscriptMessageOut(CamelModel):
     source: str | None = None
     turn_index: int
     created_at: datetime
+    # Multi-participant speaker identity (e.g. Camden vs Camden's Mother).
+    speaker_id: str = "patient"
+    speaker_label: str = ""
 
 
 # ---------------- Mutations ----------------

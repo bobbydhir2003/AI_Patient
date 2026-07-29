@@ -92,21 +92,71 @@ def _referral_block(case: CaseDefinition) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Multi-participant speaker blocks (e.g. Camden + his mother). Appended to the
+# developer prompt so the SAME model call is framed as the correct speaker. The
+# WHO-speaks decision is made deterministically upstream (speaker_router).
+# ---------------------------------------------------------------------------
+def _speaker_block(case: CaseDefinition, speaker_id: str) -> str:
+    part = next((p for p in case.participants if p.id == speaker_id), None)
+    if part is None:
+        return ""
+    if part.response_style == "young_child":
+        return (
+            "\n\nYOU ARE ANSWERING AS: Camden — a 4-year-old boy (the patient), speaking in the "
+            "FIRST person as a young child.\n"
+            "CHILD RULES (override the spoken-answer style above):\n"
+            "- Keep it VERY short: usually one short sentence, about 3–12 words.\n"
+            "- Use simple words a 4-year-old uses (tummy, owie, tired, scared, play).\n"
+            "- NEVER use medical words, medication names, dates, timelines, or explanations.\n"
+            "- If asked something a 4-year-old would not know (medicine, diagnosis, schedules, "
+            "history), say something like \"I don't know\" or \"Mom knows\" or \"You can ask my mom.\"\n"
+            "- Talk about how you feel RIGHT NOW, what you like, what you don't like.\n"
+            "- It's okay to be distracted or to say you want to play or go home."
+        )
+    if part.response_style == "adult_caregiver":
+        return (
+            "\n\nYOU ARE ANSWERING AS: Camden's Mother — his caregiver and the PRIMARY HISTORIAN.\n"
+            "CAREGIVER RULES:\n"
+            "- Speak as an adult about YOUR SON Camden in the third person (he/his).\n"
+            "- You know the medical, developmental, family and treatment history; answer with "
+            "realistic detail but reveal it GRADUALLY, only as the student asks good questions.\n"
+            "- Do not dump every concern or barrier at once; don't expose hidden information early.\n"
+            "- Show realistic concern and some ambivalence (motivational-interviewing): e.g. \"I "
+            "worry about pushing him too much,\" \"I'm not sure he has the energy for that.\" Do NOT "
+            "instantly agree to every suggestion — make the student explore your concerns.\n"
+            "- Sound like a caring parent, not a clinician; avoid technical jargon unless the case "
+            "background supports it."
+        )
+    return ""
+
+
 def build_developer_prompt(
-    case: CaseDefinition, facts: list[CaseFact], disclosed_fact_ids: set[str] | None = None
+    case: CaseDefinition,
+    facts: list[CaseFact],
+    disclosed_fact_ids: set[str] | None = None,
+    speaker_id: str | None = None,
 ) -> str:
     template = load_template()
     prompt = template.replace("{{PERSONA}}", _persona_block(case)).replace(
         "{{FACTS}}", _facts_block(facts, disclosed_fact_ids or set())
     )
-    return prompt + _referral_block(case)
+    prompt = prompt + _referral_block(case)
+    if speaker_id:
+        prompt = prompt + _speaker_block(case, speaker_id)
+    return prompt
 
 
 def build_messages(
-    case: CaseDefinition, facts: list[CaseFact], context: InterviewContext, question: str
+    case: CaseDefinition,
+    facts: list[CaseFact],
+    context: InterviewContext,
+    question: str,
+    speaker_id: str | None = None,
 ) -> list[dict]:
     messages: list[dict] = [
-        {"role": "developer", "content": build_developer_prompt(case, facts, context.disclosed_fact_ids)}
+        {"role": "developer",
+         "content": build_developer_prompt(case, facts, context.disclosed_fact_ids, speaker_id)}
     ]
     messages.extend(context.history)
     messages.append({"role": "user", "content": question})
@@ -141,11 +191,15 @@ spoken reply itself. Never skip the {STREAM_METADATA_DELIMITER} line."""
 
 
 def build_streaming_messages(
-    case: CaseDefinition, facts: list[CaseFact], context: InterviewContext, question: str
+    case: CaseDefinition,
+    facts: list[CaseFact],
+    context: InterviewContext,
+    question: str,
+    speaker_id: str | None = None,
 ) -> list[dict]:
     """Same prompt as build_messages, plus the streaming output override."""
     developer = (
-        build_developer_prompt(case, facts, context.disclosed_fact_ids)
+        build_developer_prompt(case, facts, context.disclosed_fact_ids, speaker_id)
         + "\n"
         + _STREAMING_OUTPUT_INSTRUCTION
     )

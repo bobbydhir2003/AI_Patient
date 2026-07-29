@@ -12,11 +12,13 @@
   "short_description": "An adult with a recent breast cancer diagnosis who is balancing treatment, family responsibilities, work demands and bilateral wrist pain.",
   "referral_reason": "Referred for a health-promotion interview to assess functional impact of wrist pain alongside cancer treatment demands.",
   "student_visible_info": [
-    "Recently diagnosed with breast cancer and planning treatment.",
-    "Works part-time as a physical therapist and helps care for her two sons.",
-    "Reports bilateral wrist pain affecting daily tasks."
+    "Recently diagnosed with breast cancer and planning radiation, chemotherapy, and a total mastectomy.",
+    "Reports bilateral wrist pain that began after taking on more manual therapy at a new job.",
+    "Has worked as a physical therapist for 15 years and now works part-time (three days a week) at an outpatient clinic.",
+    "Lives in a one-story home with her husband, Drew, and their two sons; one son has cerebral palsy and uses a walker.",
+    "Enjoys cycling, kickboxing, and HIIT workouts, and volunteers in her son's classroom."
   ],
-  "task": "Conduct a professional health-promotion interview to understand the patient's concerns, daily activities, participation, goals and relevant health behaviors.",
+  "task": "Conduct a professional health-promotion interview to understand Carly's concerns, daily activities, participation, work demands, family responsibilities, goals and relevant health behaviors. Use motivational interviewing skills to build rapport, explore challenges, and identify opportunities to support her overall wellness.",
   "persona": {
     "voice": "A 38-year-old physical therapist, wife, and mother of two. Warm, articulate, clinically literate - she uses correct medical terms because she is a PT herself. Determined but carrying real worry about her diagnosis and her family.",
     "speech_style": "Clear, straightforward, complete sentences. Asks informed questions back sometimes. Values open, empathetic discussion; becomes more guarded if the interviewer is abrupt.",
@@ -246,5 +248,26 @@
   "case_category": "standard",
   "setting": "Outpatient physical therapy",
   "difficulty": "Standard",
-  "estimated_minutes": 10
+  "estimated_minutes": 10,
+  "patient_type": "Adult Patient",
+  "race_ethnicity_display": "Caucasian",
+  "paving_wheel_image": "/patients/paving/carly-paving.webp",
+  "paving_profile": {
+    "source_file": "730Case6_PW_Carly.pdf",
+    "source_page": 2,
+    "values": {
+      "physical_activity": 21,
+      "attitude": 19,
+      "variety": 18,
+      "investigations": 16,
+      "nutrition": 16,
+      "goals": 9,
+      "stress_management": 15,
+      "time_outs": 15,
+      "energy": 16,
+      "purpose": 19,
+      "sleep": 13,
+      "social_connections": 20
+    }
+  }
 }

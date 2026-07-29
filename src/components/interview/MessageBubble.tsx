@@ -22,6 +22,9 @@ export function MessageBubble({ message, patientImage, patientName }: MessageBub
         />
       )}
       <div className={styles.bubble}>
+        {isPatient && message.speakerLabel && (
+          <span className={styles.speaker}>{message.speakerLabel}</span>
+        )}
         <span className={styles.text}>{message.text}</span>
         <span className={styles.timestamp}>{message.timestamp}</span>
       </div>

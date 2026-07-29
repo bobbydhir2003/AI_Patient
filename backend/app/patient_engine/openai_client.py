@@ -1,7 +1,6 @@
 """Thin wrapper around the OpenAI Python SDK (Responses API, structured output)."""
 import json
 
-from app.core.config import get_settings
 from app.core.exceptions import PatientEngineError, StructuredOutputTruncatedError
 from app.core.logging import get_logger
 from app.schemas.interview_schema import PATIENT_REPLY_JSON_SCHEMA, PatientReply
@@ -10,30 +9,42 @@ logger = get_logger(__name__)
 
 
 class OpenAIPatientClient:
-    """Generates structured simulated-patient responses via the OpenAI platform."""
+    """Generates structured simulated-patient responses via the OpenAI platform.
+
+    Reads its active model / timeout / key from the RuntimeConfigurationService
+    on each request, so an admin changing the model or replacing the key through
+    the dashboard takes effect on the NEXT request without a restart. The
+    underlying OpenAI SDK client is cached and rebuilt only when the key or
+    timeout actually change."""
 
     def __init__(self) -> None:
-        self._settings = get_settings()
         self._client = None
+        self._client_fingerprint: tuple | None = None
+
+    @staticmethod
+    def _runtime():
+        from app.services import runtime_config_service
+        return runtime_config_service.openai_runtime()
 
     @property
     def configured(self) -> bool:
-        return bool(self._settings.openai_api_key)
+        return bool(self._runtime().api_key)
 
-    def _get_client(self):
-        if self._client is None:
+    def _get_client(self, rt=None):
+        rt = rt or self._runtime()
+        fingerprint = (rt.api_key, rt.timeout_seconds)
+        if self._client is None or self._client_fingerprint != fingerprint:
             from openai import OpenAI  # imported lazily so tests never need a key
 
-            self._client = OpenAI(
-                api_key=self._settings.openai_api_key,
-                timeout=self._settings.openai_timeout_seconds,
-            )
+            self._client = OpenAI(api_key=rt.api_key, timeout=rt.timeout_seconds)
+            self._client_fingerprint = fingerprint
         return self._client
 
     def _do_generate(self, messages: list[dict], schema: dict, schema_name: str, resolved_tokens: int) -> dict:
-        client = self._get_client()
+        rt = self._runtime()
+        client = self._get_client(rt)
         response = client.responses.create(
-            model=self._settings.openai_model,
+            model=rt.model,
             input=messages,
             max_output_tokens=resolved_tokens,
             text={
@@ -70,10 +81,11 @@ class OpenAIPatientClient:
         allow_truncation_retry: bool = False,
     ) -> dict:
         """Generic structured-output call (Responses API, strict JSON schema)."""
-        if not self.configured:
+        rt = self._runtime()
+        if not rt.api_key:
             raise PatientEngineError("OPENAI_API_KEY is not configured.")
-        
-        resolved_tokens = max_output_tokens or self._settings.openai_max_output_tokens
+
+        resolved_tokens = max_output_tokens or rt.max_output_tokens
         try:
             return self._do_generate(messages, schema, schema_name, resolved_tokens)
         except StructuredOutputTruncatedError:
@@ -105,17 +117,18 @@ class OpenAIPatientClient:
         underlying HTTP stream. On completion, `usage_out` (if provided) is
         filled with input/output token counts for dev cost tracking.
         """
-        if not self.configured:
+        rt = self._runtime()
+        if not rt.api_key:
             raise PatientEngineError("OPENAI_API_KEY is not configured.")
         resolved_tokens = (
             max_output_tokens
-            or self._settings.openai_patient_max_output_tokens
-            or self._settings.openai_max_output_tokens
+            or rt.patient_max_output_tokens
+            or rt.max_output_tokens
         )
-        client = self._get_client()
+        client = self._get_client(rt)
         try:
             stream = client.responses.create(
-                model=self._settings.openai_model,
+                model=rt.model,
                 input=messages,
                 max_output_tokens=resolved_tokens,
                 stream=True,
@@ -159,7 +172,8 @@ class OpenAIPatientClient:
 
     def generate(self, messages: list[dict]) -> PatientReply:
         # Patient replies use the patient token limit
-        limit = self._settings.openai_patient_max_output_tokens or self._settings.openai_max_output_tokens
+        rt = self._runtime()
+        limit = rt.patient_max_output_tokens or rt.max_output_tokens
         data = self.generate_structured(messages, PATIENT_REPLY_JSON_SCHEMA, "patient_reply", max_output_tokens=limit)
         return PatientReply.model_validate(data)
 

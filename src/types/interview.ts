@@ -11,6 +11,10 @@ export interface ConversationMessage {
   /** Frontend-generated idempotency id (mirrors the backend client_turn_id). */
   clientTurnId?: string;
   source?: MessageSource;
+  /** Multi-participant speaker label (e.g. "Camden's Mother", "Camden").
+   * Absent/blank for single-speaker cases. */
+  speakerId?: string;
+  speakerLabel?: string;
   /** Messages are rendered only after backend confirmation in the atomic
    * exchange flow, so rendered messages are "saved"; the field exists so any
    * future optimistic path must track persistence explicitly. */

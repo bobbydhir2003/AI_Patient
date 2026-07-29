@@ -82,9 +82,23 @@ def synthesize(
 ) -> StreamingResponse:
     t_received = time.monotonic()  # backend request received (monotonic)
     settings = get_settings()
-    resolved = load_voice_profile(payload.case_id)  # 404 for unknown cases
+
+    # Multi-participant voice selection: the stored turn's speaker decides which
+    # voice speaks. Camden -> child ("patient") voice; the mother -> "caregiver"
+    # voice. A missing caregiver voice reports unavailable so the frontend falls
+    # back to a browser adult voice (never Camden's child voice).
+    speaker_key = "patient"
+    if payload.session_id and payload.turn_id:
+        turn = db.get(ConversationTurn, payload.turn_id)
+        if turn is not None and getattr(turn, "speaker_id", "patient") == "mother":
+            speaker_key = "caregiver"
+
+    resolved = load_voice_profile(payload.case_id, speaker_key)  # 404 for unknown cases
     if not resolved.available:
-        logger.info("voice_unavailable case_id=%s reason=%s", payload.case_id, resolved.reason)
+        logger.info(
+            "voice_unavailable case_id=%s speaker=%s reason=%s",
+            payload.case_id, speaker_key, resolved.reason,
+        )
         raise VoiceNotAvailableError()
 
     text = _resolve_approved_text(db, payload)

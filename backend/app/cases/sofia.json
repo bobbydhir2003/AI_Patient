@@ -15,11 +15,13 @@
   "short_description": "A teenager with polyarticular juvenile idiopathic arthritis who is experiencing wrist and elbow discomfort, school limitations and reduced dance participation.",
   "referral_reason": "Referred by her primary care physician as a cost-effective way to help manage her condition; assess impact of joint symptoms on school and dance activities.",
   "student_visible_info": [
-    "Diagnosed with polyarticular juvenile idiopathic arthritis at age 8 (refractory).",
+    "13 years old and in middle school.",
+    "Diagnosed with polyarticular juvenile idiopathic arthritis at age 8 (considered refractory).",
     "Reports pain and swelling in both elbows and her left ankle, plus pain and limitation in both wrists.",
-    "Passionate about hip-hop dance but has reduced participation recently."
+    "Passionate about hip-hop dance but has had to cut back; currently limited in dressing, preparing meals, and schoolwork.",
+    "Lives in a mobile home with her mom and dad and has one close friend outside of school."
   ],
-  "task": "Conduct a professional health-promotion interview to understand the patient's concerns, daily activities, participation, goals and relevant health behaviors.",
+  "task": "Conduct a professional health-promotion interview to understand Sofia's concerns, daily activities, participation at school and in dance, goals and relevant health behaviors. Use motivational interviewing skills to build rapport with a teenager, explore challenges, and identify opportunities to support her overall wellness.",
   "persona": {
     "voice": "A 13-year-old girl. A little reserved at first, warms up when the interviewer is friendly. Loves hip-hop music and dance. Frustrated that her body won't let her do what she loves.",
     "speech_style": "Casual teenage speech, short-to-medium sentences, occasional 'like' or 'I guess'. Downplays feelings unless asked kindly. Doesn't use medical jargon beyond what a long-term patient picks up.",
@@ -224,5 +226,26 @@
   "case_category": "standard",
   "setting": "Pediatric outpatient",
   "difficulty": "Standard",
-  "estimated_minutes": 10
+  "estimated_minutes": 10,
+  "patient_type": "Pediatric Patient",
+  "race_ethnicity_display": "Hispanic",
+  "paving_wheel_image": "/patients/paving/sofia-paving.webp",
+  "paving_profile": {
+    "source_file": "730Case7_PW_Sofia.pdf",
+    "source_page": 2,
+    "values": {
+      "physical_activity": 24,
+      "attitude": 23,
+      "variety": 12,
+      "investigations": 9,
+      "nutrition": 17,
+      "goals": 5,
+      "stress_management": 10,
+      "time_outs": 17,
+      "energy": 21,
+      "purpose": 21,
+      "sleep": 25,
+      "social_connections": 25
+    }
+  }
 }

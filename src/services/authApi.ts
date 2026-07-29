@@ -6,7 +6,7 @@
 import { API_BASE_URL, ApiError } from "./api";
 import type { Assessment } from "../types/assessment";
 
-export type UserRole = "student" | "admin";
+export type UserRole = "student" | "admin" | "super_admin";
 
 export interface AuthUser {
   id: string;
@@ -108,6 +108,8 @@ export interface TranscriptMessage {
   source: string | null;
   turnIndex: number;
   createdAt: string;
+  speakerId?: string;
+  speakerLabel?: string;
 }
 
 // ---------------- student self-service ----------------
@@ -322,6 +324,27 @@ export function fetchAuditLogs(
   q.set("page", String(params.page ?? 1));
   q.set("page_size", String(params.pageSize ?? 25));
   return authRequest<Paginated<AuditLogEntry>>(`/admin/audit-logs?${q.toString()}`, token);
+}
+
+// ---------------- admin notifications ----------------
+export interface AdminNotification {
+  id: string;
+  title: string;
+  message: string;
+  type: string;
+  createdAt: string;
+  isRead: boolean;
+  link?: string | null;
+}
+export interface NotificationFeed {
+  notifications: AdminNotification[];
+  unreadCount: number;
+}
+export function fetchNotifications(token: string): Promise<NotificationFeed> {
+  return authRequest<NotificationFeed>("/admin/notifications", token);
+}
+export function markAllNotificationsRead(token: string): Promise<{ success: boolean }> {
+  return authRequest("/admin/notifications/read-all", token, { method: "POST" });
 }
 
 // ---------------- admin mutations ----------------

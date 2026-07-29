@@ -4,10 +4,157 @@
   gap: var(--space-5);
 }
 
+/* SECTION 1: Patient header */
+.header {
+  padding: var(--space-5) var(--space-6);
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+  gap: var(--space-6);
+  align-items: stretch;
+}
+
+.identity {
+  display: flex;
+  gap: var(--space-5);
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.portrait {
+  flex-shrink: 0;
+  width: 128px;
+  height: 128px;
+  object-fit: cover;
+  object-position: center top;
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  display: block;
+}
+
+.identityDetails {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.nameRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.name {
+  font-size: 1.6rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.typeBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-3);
+  border-radius: 999px;
+  background-color: var(--color-accent-soft);
+  border: 1px solid var(--color-accent-border);
+  color: var(--color-text-primary);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.metaGrid {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-6);
+}
+
+.metaItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.metaItem dt {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-muted);
+}
+
+.metaItem dd {
+  margin: 0;
+  font-size: 0.98rem;
+  color: var(--color-text-primary);
+}
+
+.clinical {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-left: var(--space-6);
+  border-left: 1px solid var(--color-border);
+}
+
+.clinicalBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.clinicalTitle {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.clinicalBody {
+  color: var(--color-text-secondary);
+  line-height: 1.55;
+  font-size: 0.95rem;
+}
+
+.medList {
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--color-text-secondary);
+  line-height: 1.55;
+  font-size: 0.95rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* Caregiver notice */
+.notice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  background-color: var(--color-accent-soft);
+  border: 1px solid var(--color-accent-border);
+  color: var(--color-text-primary);
+  line-height: 1.5;
+}
+
+.noticeIcon {
+  flex-shrink: 0;
+  color: var(--color-accent-hover);
+}
+
+/* SECTION 2 & 3 */
 .infoGrid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--space-5);
+  align-items: stretch;
 }
 
 .section {
@@ -56,9 +203,45 @@
   color: var(--color-text-secondary);
 }
 
+/* Tablet: stack header columns */
+@media (max-width: 900px) {
+  .header {
+    grid-template-columns: 1fr;
+    gap: var(--space-5);
+  }
+
+  .clinical {
+    padding-left: 0;
+    padding-top: var(--space-4);
+    border-left: none;
+    border-top: 1px solid var(--color-border);
+  }
+}
+
 @media (max-width: 768px) {
   .infoGrid {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Mobile: stack portrait above details, full-width buttons */
+@media (max-width: 560px) {
+  .header {
+    padding: var(--space-5);
+  }
+
+  .identity {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+  }
+
+  .nameRow {
+    justify-content: center;
+  }
+
+  .metaGrid {
+    justify-content: center;
   }
 
   .actions {

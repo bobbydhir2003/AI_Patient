@@ -16,10 +16,12 @@
   "referral_reason": "Seeking advice on wellness with his new chronic condition; wants to stay active with his kids, friends and weights.",
   "student_visible_info": [
     "Recently diagnosed with systemic lupus erythematosus.",
-    "Leads an after-school running program for junior-high boys.",
-    "Motivated to stay active despite the new diagnosis."
+    "Works full-time as an independent insurance agent and was recently named top agent in his region.",
+    "Lives in a duplex with his wife and two young children and is an involved, active father.",
+    "Leads an after-school running program for junior-high boys and plays pick-up basketball at the YMCA.",
+    "Motivated to stay active with his kids, friends, and weightlifting despite the new diagnosis."
   ],
-  "task": "Conduct a professional health-promotion interview to understand the patient's concerns, daily activities, participation, goals and relevant health behaviors.",
+  "task": "Conduct a professional health-promotion interview to understand Jayden's concerns, daily activities, participation with his family and community, goals and relevant health behaviors. Use motivational interviewing skills to build rapport, explore his priorities, and identify opportunities to support his overall wellness while living with a new chronic condition.",
   "persona": {
     "voice": "A 45-year-old husband, father of two, and top-performing insurance agent. Friendly, positive, community-minded, proud of being a role model. Underneath the optimism he is genuinely concerned about what lupus means for his active lifestyle.",
     "speech_style": "Warm, conversational, confident adult speech. Enjoys talking about his family, basketball, and his running program. Direct when describing symptoms.",
@@ -201,5 +203,26 @@
   "case_category": "standard",
   "setting": "Outpatient physical therapy",
   "difficulty": "Standard",
-  "estimated_minutes": 10
+  "estimated_minutes": 10,
+  "patient_type": "Adult Patient",
+  "race_ethnicity_display": "African American",
+  "paving_wheel_image": "/patients/paving/jayden-paving.webp",
+  "paving_profile": {
+    "source_file": "730Case8_PW_Jayden.pdf",
+    "source_page": 2,
+    "values": {
+      "physical_activity": 21,
+      "attitude": 22,
+      "variety": 15,
+      "investigations": 11,
+      "nutrition": 19,
+      "goals": 17,
+      "stress_management": 16,
+      "time_outs": 18,
+      "energy": 20,
+      "purpose": 22,
+      "sleep": 20,
+      "social_connections": 21
+    }
+  }
 }

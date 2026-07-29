@@ -9,7 +9,7 @@ import jwt
 from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
-from app.core.constants import USER_ROLE_ADMIN, USER_ROLE_STUDENT
+from app.core.constants import ADMIN_ROLES, USER_ROLE_STUDENT, USER_ROLE_SUPER_ADMIN
 from app.core.exceptions import (
     ForbiddenError,
     InactiveAccountError,
@@ -56,8 +56,16 @@ def get_current_user(
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    if current_user.role != USER_ROLE_ADMIN:
+    # super_admin is a strict superset of admin, so it passes admin checks too.
+    if current_user.role not in ADMIN_ROLES:
         raise ForbiddenError("Administrator access is required.")
+    return current_user
+
+
+def require_super_admin(current_user: User = Depends(get_current_user)) -> User:
+    """Highest tier: API-key replacement/removal and configuration rollback."""
+    if current_user.role != USER_ROLE_SUPER_ADMIN:
+        raise ForbiddenError("Super administrator access is required.")
     return current_user
 
 
@@ -77,7 +85,7 @@ def require_session_access(
     session = db.get(InterviewSession, session_id)
     if session is None:
         raise SessionNotFoundError(session_id)
-    if current_user.role == USER_ROLE_ADMIN:
+    if current_user.role in ADMIN_ROLES:
         return session
     if current_user.student_id and session.student_id == current_user.student_id:
         return session

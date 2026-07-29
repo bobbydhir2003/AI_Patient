@@ -30,6 +30,10 @@ class InterviewSession(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default=SESSION_STATUS_ACTIVE)
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     disclosed_fact_ids: Mapped[str] = mapped_column(Text, nullable=False, default="[]")  # JSON list
+    # Frozen config used when this interview started (JSON): model, voice version,
+    # streaming, token limit, prompt version. Never contains secrets. Lets an
+    # active session keep its original config even if an admin edits settings.
+    config_snapshot: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     active_topic: Mapped[str | None] = mapped_column(String(40), nullable=True)  # follow-up context
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

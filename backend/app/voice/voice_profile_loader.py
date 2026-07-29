@@ -21,15 +21,68 @@ class ResolvedVoice:
     model_id: str
 
 
-def load_voice_profile(case_id: str) -> ResolvedVoice:
-    """Resolve the voice configuration for `case_id`.
+def _runtime_override_profile(case_id: str, speaker_id: str) -> tuple[VoiceProfile, str] | None:
+    """Return (profile, model_id) from an active runtime voice override, if any.
 
+    Opens a short-lived DB session so an admin's dashboard voice edit takes
+    effect on the next TTS request. Best-effort: any error falls back to the
+    case-file profile."""
+    try:
+        from sqlalchemy import inspect as _sa_inspect
+
+        from app.database.connection import get_engine, get_session_factory
+        from app.models import PatientVoiceSetting
+
+        # has_table() returns False (never raises) when the runtime tables are
+        # absent - avoids an exception on the TTS hot path (and the reference
+        # cycle a caught traceback would create).
+        if not _sa_inspect(get_engine()).has_table("patient_voice_settings"):
+            return None
+        db = get_session_factory()()
+        try:
+            row = (
+                db.query(PatientVoiceSetting)
+                .filter(
+                    PatientVoiceSetting.case_id == case_id,
+                    PatientVoiceSetting.speaker_id == speaker_id,
+                )
+                .one_or_none()
+            )
+            if row is None or not row.is_active or not row.voice_id.strip():
+                return None
+            prof = VoiceProfile(
+                provider="elevenlabs",
+                voice_id=row.voice_id,
+                model_id=row.model_id,
+                stability=row.stability,
+                similarity_boost=row.similarity_boost,
+                style=row.style,
+                speaker_boost=row.speaker_boost,
+                enabled=True,
+            )
+            return prof, (row.model_id or get_settings().elevenlabs_default_model)
+        finally:
+            db.close()
+    except Exception:
+        return None
+
+
+def load_voice_profile(case_id: str, speaker_id: str = "patient") -> ResolvedVoice:
+    """Resolve the voice configuration for `case_id` / `speaker_id`.
+
+    Priority: active runtime override -> case-file profile -> unavailable.
     Raises CaseNotFoundError for unknown case IDs (same behavior as the rest of
     the app). Never raises for missing/disabled voice config - it reports
     `available=False` so callers can fall back gracefully.
     """
     settings = get_settings()
     case = case_loader.load_case(case_id)  # raises CaseNotFoundError if invalid
+
+    override = _runtime_override_profile(case_id, speaker_id)
+    if override is not None and settings.elevenlabs_enabled and settings.elevenlabs_api_key:
+        prof, model_id = override
+        return ResolvedVoice(available=True, reason="", profile=prof, model_id=model_id)
+
     profile = case.voice_profile or VoiceProfile()
 
     reason = ""

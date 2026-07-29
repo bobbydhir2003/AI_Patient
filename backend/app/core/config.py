@@ -1,7 +1,27 @@
 """Application settings loaded from environment / .env file."""
+import logging
+import re
 from functools import lru_cache
 
+from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
+
+# Numeric tuning knobs that must never take down the whole app because of a
+# stray unit suffix in a .env value (e.g. `ELEVENLABS_CACHE_MAX_ENTRIES=24s`).
+# Critical settings (database_url, keys, secrets) are intentionally NOT in this
+# list - a bad value there should still fail loudly.
+_LENIENT_NUMERIC_FIELDS = (
+    "openai_timeout_seconds",
+    "openai_max_output_tokens",
+    "openai_max_retries",
+    "patient_streaming_first_audio_target_ms",
+    "elevenlabs_timeout_seconds",
+    "elevenlabs_max_text_chars",
+    "elevenlabs_cache_max_entries",
+    "access_token_expire_minutes",
+)
 
 
 class Settings(BaseSettings):
@@ -65,6 +85,10 @@ class Settings(BaseSettings):
     # The default below is only a development convenience and is never secure.
     jwt_secret_key: str = "dev-insecure-change-me"
     jwt_algorithm: str = "HS256"
+
+    # Server-side key that encrypts API credentials stored in the runtime config
+    # table. Lives OUTSIDE the database. Empty => secure secret storage disabled.
+    config_encryption_key: str = ""
     access_token_expire_minutes: int = 60 * 12  # 12 hours
     # Allow open student self-registration through POST /api/auth/register.
     allow_student_self_registration: bool = True
@@ -73,6 +97,38 @@ class Settings(BaseSettings):
     admin_email: str = ""
     admin_password: str = ""
     admin_full_name: str = "Administrator"
+
+    @field_validator(*_LENIENT_NUMERIC_FIELDS, mode="before")
+    @classmethod
+    def _coerce_lenient_numeric(cls, value: object, info: ValidationInfo) -> object:
+        """Tolerate a stray non-numeric suffix on tuning values.
+
+        A `.env` typo like `ELEVENLABS_CACHE_MAX_ENTRIES=24s` used to raise a
+        ValidationError inside create_app(), which crashed uvicorn on startup
+        and made EVERY /api route (including /api/cases) unreachable - surfacing
+        to students as "Could not load patient cases". These are non-critical
+        performance knobs, so we strip a trailing unit suffix (24s -> 24) and,
+        if the value is still unparseable, fall back to the field default -
+        always with a warning so the misconfiguration is visible in the logs.
+        """
+        if value is None or not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        match = re.match(r"^[-+]?\d+(?:\.\d+)?", stripped)
+        if match and match.group(0) != stripped:
+            logger.warning(
+                "Config %s=%r has a non-numeric suffix; using %r instead.",
+                info.field_name, value, match.group(0),
+            )
+            return match.group(0)
+        if match:
+            return value
+        default = cls.model_fields[info.field_name].default
+        logger.warning(
+            "Config %s=%r is not a valid number; falling back to default %r.",
+            info.field_name, value, default,
+        )
+        return default
 
     @property
     def cors_origin_list(self) -> list[str]:

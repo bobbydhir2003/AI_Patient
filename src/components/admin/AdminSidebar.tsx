@@ -1,15 +1,9 @@
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../../state/AuthContext";
 import {
-  IconArchive,
   IconAssessments,
-  IconAudit,
-  IconBolt,
   IconDashboard,
-  IconExport,
-  IconImport,
   IconLogout,
-  IconPlus,
   IconProfile,
   IconSessions,
   IconStudents,
@@ -28,32 +22,15 @@ interface NavItem {
 
 const SECTIONS: { title: string; items: NavItem[] }[] = [
   {
-    title: "Overview",
-    items: [{ to: "/admin", label: "Dashboard", icon: IconDashboard, end: true }],
-  },
-  {
-    title: "Student data",
+    title: "Academic Management",
     items: [
+      { to: "/admin", label: "Dashboard", icon: IconDashboard, end: true },
       { to: "/admin/students", label: "Students", icon: IconStudents },
       { to: "/admin/sessions", label: "Sessions", icon: IconSessions },
       { to: "/admin/transcripts", label: "Transcripts", icon: IconTranscript },
       { to: "/admin/assessments", label: "Assessments", icon: IconAssessments },
     ],
   },
-  {
-    title: "Management",
-    items: [
-      { to: "/admin/archived", label: "Archived", icon: IconArchive },
-      { to: "/admin/audit-log", label: "Admin Activity Log", icon: IconAudit, end: true },
-    ],
-  },
-];
-
-// Quick actions with no safe backend action yet are surfaced as disabled.
-const QUICK_ACTIONS: { label: string; icon: Icon }[] = [
-  { label: "Add Student", icon: IconPlus },
-  { label: "Import Students", icon: IconImport },
-  { label: "Export Reports", icon: IconExport },
 ];
 
 export function AdminSidebar() {
@@ -99,27 +76,6 @@ export function AdminSidebar() {
           <IconLogout />
           <span>Logout</span>
         </button>
-      </div>
-
-      <div className="pt-quick-actions">
-        <div className="pt-quick-actions-title">
-          <IconBolt width={15} height={15} />
-          Quick Actions
-        </div>
-        {QUICK_ACTIONS.map(({ label, icon: Icon }) => (
-          <button
-            key={label}
-            type="button"
-            className="pt-navlink disabled"
-            disabled
-            aria-disabled="true"
-            title="Coming soon"
-          >
-            <Icon />
-            <span>{label}</span>
-            <span className="pt-coming-soon">Soon</span>
-          </button>
-        ))}
       </div>
     </nav>
   );

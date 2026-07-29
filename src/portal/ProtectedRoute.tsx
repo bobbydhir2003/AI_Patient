@@ -16,6 +16,12 @@ export function ProtectedRoute({
   const { loading, isAuthenticated, user } = useAuth();
   const location = useLocation();
 
+  // super_admin is a strict superset of admin, so it satisfies an "admin" gate.
+  const roleSatisfied =
+    !role ||
+    user?.role === role ||
+    (role === "admin" && user?.role === "super_admin");
+
   if (loading) {
     return (
       <div className="pt-portal">
@@ -26,8 +32,9 @@ export function ProtectedRoute({
   if (!isAuthenticated) {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }
-  if (role && user?.role !== role) {
-    const home = user?.role === "admin" ? "/admin" : "/student/dashboard";
+  if (!roleSatisfied) {
+    const home =
+      user?.role === "admin" || user?.role === "super_admin" ? "/admin" : "/student/dashboard";
     return <Navigate to={home} replace />;
   }
   return <>{children}</>;

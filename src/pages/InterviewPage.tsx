@@ -270,10 +270,19 @@ export function InterviewPage() {
         id: localId(), sender: "student", text: question, timestamp: formatTimestamp(),
         clientTurnId, source, saveStatus: "saved",
       });
-      addMessage({
-        id: turn.turnId, sender: "patient", text: turn.patientText, timestamp: formatTimestamp(),
-        clientTurnId: `${clientTurnId}:patient`, source: "openai", saveStatus: "saved",
-      });
+      // Multi-participant: render one bubble per ordered segment (a joint
+      // "both" turn shows Camden then his mother). Single-speaker cases have one.
+      const segments = turn.responses && turn.responses.length > 0
+        ? turn.responses
+        : [{ turnId: turn.turnId, speakerId: turn.speakerId ?? "patient",
+             speakerLabel: turn.speakerLabel ?? "", text: turn.patientText, speech: turn.speech ?? null }];
+      for (const seg of segments) {
+        addMessage({
+          id: seg.turnId, sender: "patient", text: seg.text, timestamp: formatTimestamp(),
+          clientTurnId: `${clientTurnId}:patient:${seg.speakerId}`, source: "openai",
+          saveStatus: "saved", speakerId: seg.speakerId, speakerLabel: seg.speakerLabel,
+        });
+      }
       if (import.meta.env.DEV) {
         console.info("Response source: OpenAI backend", { turnId: turn.turnId });
       }
@@ -360,6 +369,8 @@ export function InterviewPage() {
               id: m.id,
               sender: m.sender,
               text: m.text,
+              speakerId: m.speakerId,
+              speakerLabel: m.speakerLabel,
               saveStatus: "saved" as const,
               timestamp: new Date(m.timestamp).toLocaleTimeString([], {
                 hour: "2-digit",

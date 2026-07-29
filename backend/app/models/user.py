@@ -41,5 +41,10 @@ class User(Base):
         DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
     )
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When this admin last marked their notification feed read. Unread count =
+    # real admin-activity events newer than this timestamp (never hardcoded).
+    notifications_read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     student = relationship("Student", back_populates="user")

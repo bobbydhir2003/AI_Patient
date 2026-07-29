@@ -586,6 +586,8 @@ def get_session_transcript(db: Session, session_id: str) -> list[TranscriptMessa
             source=t.source,
             turn_index=t.turn_index,
             created_at=t.created_at,
+            speaker_id=getattr(t, "speaker_id", "patient") or "patient",
+            speaker_label=getattr(t, "speaker_label", "") or "",
         )
         for t in rows
     ]

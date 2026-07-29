@@ -42,6 +42,8 @@ class EngineResult:
     # Normalized speech-performance labels (controlled enums) or None.
     # Delivery only - never affects the text or what facts were disclosed.
     speech: dict | None = None
+    # Which participant produced this response (multi-participant cases).
+    speaker_id: str | None = None
 
 
 def _resolve_topics(question: str, previous_active_topic: str | None) -> tuple[list[str], str | None]:
@@ -62,7 +64,11 @@ def generate_patient_response(
     disclosed_fact_ids: set[str],
     active_topic: str | None = None,
     client: OpenAIPatientClient | None = None,
+    speaker_id: str | None = None,
 ) -> EngineResult:
+    """Generate ONE participant's response. `speaker_id` (e.g. 'camden' /
+    'mother') frames the prompt as that speaker; single-speaker cases pass None
+    and behave exactly as before. Joint ('both') turns call this twice."""
     case = case_loader.load_case(case_id)
     topics, next_active_topic = _resolve_topics(question, active_topic)
     context = context_resolver.resolve_context(case_id, topics, turns, disclosed_fact_ids, active_topic)
@@ -72,7 +78,7 @@ def generate_patient_response(
     eligible_ids = {f.id for f in eligible}
 
     client = client or get_openai_client()
-    messages = prompt_builder.build_messages(case, eligible, context, question)
+    messages = prompt_builder.build_messages(case, eligible, context, question, speaker_id)
 
     def attempt() -> PatientReply:
         reply = client.generate(messages)
@@ -83,6 +89,17 @@ def generate_patient_response(
         return reply
 
     reply = fallback_manager.run_with_retry(attempt, what=f"patient response for case '{case_id}'")
+
+    # Camden (a 4-year-old) must stay developmentally appropriate. Shorten or
+    # deflect to the mother if the model produced clinical/long text.
+    child_validation = "valid"
+    if speaker_id == "camden":
+        from app.patient_engine.child_response_validator import validate_child_response
+
+        check = validate_child_response(reply.patient_text)
+        reply.patient_text = check.text
+        if check.changed:
+            child_validation = "child_adjusted"
 
     # Only accept fact ids that were actually eligible this turn.
     used_ids = [fid for fid in reply.used_fact_ids if fid in eligible_ids]
@@ -105,6 +122,7 @@ def generate_patient_response(
         model_name=get_settings().openai_model,
         used_fact_ids=used_ids,
         newly_disclosed_fact_ids=newly_disclosed,
-        validation_status="valid",
+        validation_status=child_validation,
         speech=speech,
+        speaker_id=speaker_id,
     )

@@ -34,7 +34,12 @@ def _to_response(db: Session, session: InterviewSession) -> SessionResponse:
         started_at=session.started_at,
         completed_at=session.completed_at,
         messages=[
-            MessageOut(id=t.id, sender=t.role, text=t.content, timestamp=t.created_at) for t in turns
+            MessageOut(
+                id=t.id, sender=t.role, text=t.content, timestamp=t.created_at,
+                speaker_id=getattr(t, "speaker_id", "patient") or "patient",
+                speaker_label=getattr(t, "speaker_label", "") or "",
+            )
+            for t in turns
         ],
     )
 
@@ -67,6 +72,14 @@ def create_session(db: Session, payload: SessionCreateRequest) -> SessionRespons
         assessment_capabilities=_json.dumps(capabilities),
         protected_reference_version="1.0",
     )
+    # Freeze the active (non-secret) config this interview should keep using, so
+    # an admin editing the model/voice mid-way cannot alter an in-progress
+    # session. New sessions capture the latest config here.
+    try:
+        from app.services import runtime_config_service
+        session.config_snapshot = runtime_config_service.session_snapshot(db, payload.case_id)
+    except Exception:  # snapshot is best-effort; never block starting an interview
+        logger.warning("config_snapshot_failed case_id=%s", payload.case_id)
     db.commit()
     return _to_response(db, session)
 

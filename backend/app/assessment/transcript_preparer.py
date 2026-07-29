@@ -18,9 +18,16 @@ def prepare_transcript(turns: list[ConversationTurn]) -> PreparedTranscript:
     for turn in turns:
         label = f"turn_{turn.turn_index:02d}"
         label_to_turn[label] = turn
-        speaker = "STUDENT" if turn.role == "student" else "PATIENT"
         if turn.role == "student":
             student_count += 1
+            speaker = "STUDENT"
+        else:
+            # Multi-participant cases surface WHO answered (e.g. "PATIENT
+            # (Camden's Mother)") so the rubric can assess pediatric,
+            # family-centered communication with both participants.
+            sid = getattr(turn, "speaker_id", "patient") or "patient"
+            label_txt = getattr(turn, "speaker_label", "") or ""
+            speaker = f"PATIENT ({label_txt})" if sid not in ("", "patient") and label_txt else "PATIENT"
         lines.append(f"[{label}] {speaker}: {turn.content}")
     return PreparedTranscript(
         text="\n".join(lines), label_to_turn=label_to_turn, student_turn_count=student_count

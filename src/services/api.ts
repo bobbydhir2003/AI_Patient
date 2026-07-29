@@ -15,6 +15,8 @@ export interface ApiMessage {
   sender: "student" | "patient";
   text: string;
   timestamp: string;
+  speakerId?: string;
+  speakerLabel?: string;
 }
 
 export interface ApiSession {
@@ -36,6 +38,17 @@ export interface ApiTurn {
   sessionStatus: string;
   /** Controlled delivery labels for TTS (null on replays / when omitted). */
   speech: PatientSpeechStyle | null;
+  /** Multi-participant speaker of the primary segment. */
+  speakerId?: string;
+  speakerLabel?: string;
+  /** Ordered segments when more than one participant answered ("both"). */
+  responses?: {
+    turnId: string;
+    speakerId: string;
+    speakerLabel: string;
+    text: string;
+    speech: PatientSpeechStyle | null;
+  }[];
 }
 
 /** Whether the realistic (ElevenLabs) patient voice is available for a case.
@@ -60,19 +73,40 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}/api${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
+  const url = `${API_BASE_URL}/api${path}`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: { "Content-Type": "application/json" },
+      ...init,
+    });
+  } catch (networkError) {
+    // fetch() itself rejected (backend unreachable, DNS, CORS preflight blocked).
+    // Surface the real request URL in dev so the failure is diagnosable instead
+    // of only showing the generic "backend is running?" message.
+    if (import.meta.env.DEV) {
+      console.error(`[api] network error requesting ${url}:`, networkError);
+    }
+    throw new ApiError(
+      "Could not reach the server. Check that the backend is running.",
+      0,
+      "network_error",
+    );
+  }
   if (!response.ok) {
     let message = `Request failed with status ${response.status}`;
     let code = "unknown_error";
+    let rawBody = "";
     try {
-      const body = (await response.json()) as { error?: { message?: string; code?: string } };
+      rawBody = await response.text();
+      const body = JSON.parse(rawBody) as { error?: { message?: string; code?: string } };
       if (body.error?.message) message = body.error.message;
       if (body.error?.code) code = body.error.code;
     } catch {
-      // keep defaults
+      // non-JSON error body; keep defaults but retain rawBody for dev logging
+    }
+    if (import.meta.env.DEV) {
+      console.error(`[api] ${init?.method ?? "GET"} ${url} -> ${response.status}`, rawBody);
     }
     throw new ApiError(message, response.status, code);
   }

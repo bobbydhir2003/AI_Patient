@@ -4,7 +4,19 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import admin, assessments, auth, cases, health, interviews, sessions, students, voice
+from app.api import (
+    admin,
+    admin_runtime,
+    admin_system,
+    assessments,
+    auth,
+    cases,
+    health,
+    interviews,
+    sessions,
+    students,
+    voice,
+)
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
@@ -40,6 +52,8 @@ def create_app() -> FastAPI:
     _app.include_router(students.router, prefix="/api")
     _app.include_router(admin.router, prefix="/api")
     _app.include_router(cases.router, prefix="/api")
+    _app.include_router(admin_system.router, prefix="/api")
+    _app.include_router(admin_runtime.router, prefix="/api")
     _app.include_router(sessions.router, prefix="/api")
     _app.include_router(interviews.router, prefix="/api")
     _app.include_router(assessments.router, prefix="/api")

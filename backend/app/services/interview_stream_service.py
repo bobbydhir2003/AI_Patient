@@ -78,6 +78,10 @@ class _TurnContext:
     replay: dict | None = None  # pre-built final event data for idempotent replays
     session_status: str = "active"
     newly_disclosed: set[str] = field(default_factory=set)
+    # Multi-participant routing (single-speaker cases keep "patient"/"").
+    speaker_id: str = "patient"
+    speaker_label: str = ""
+    engine_speaker: str | None = None  # what to frame the prompt as (None = unchanged)
 
 
 def _load_context(session_factory, session_id: str, payload: StudentMessageRequest) -> _TurnContext:
@@ -126,7 +130,25 @@ def _load_context(session_factory, session_id: str, payload: StudentMessageReque
                     )
 
         prior_turns = transcript_repo.list_turns(session_id)
-        snapshots = [SimpleNamespace(role=t.role, content=t.content) for t in prior_turns]
+        snapshots = [
+            SimpleNamespace(
+                role=t.role, content=t.content,
+                speaker_id=getattr(t, "speaker_id", "patient"),
+            )
+            for t in prior_turns
+        ]
+        # ---- Speaker routing (multi-participant cases only) ----
+        from app.patient_engine import case_loader, speaker_router
+
+        case = case_loader.load_case(session.case_id)
+        routing = speaker_router.resolve_for_case(case, question, snapshots)
+        # Live audio streams one voice at a time; a "both" turn routes to the
+        # primary historian (mother) in the streaming path. The non-streaming
+        # path returns a true two-segment joint response.
+        chosen = "mother" if routing.speaker == speaker_router.SPEAKER_BOTH else routing.speaker
+        eff_sid, label, _vk = speaker_router.participant_meta(case, chosen)
+        engine_speaker = chosen if speaker_router.is_multi_participant(case) else None
+
         return _TurnContext(
             case_id=session.case_id,
             question=question,
@@ -135,6 +157,9 @@ def _load_context(session_factory, session_id: str, payload: StudentMessageReque
             active_topic=session.active_topic,
             turn_number=len(prior_turns),
             session_status=session.status,
+            speaker_id=eff_sid,
+            speaker_label=label,
+            engine_speaker=engine_speaker,
         )
     finally:
         db.close()
@@ -192,6 +217,8 @@ def _commit_turn(
             facts_used=result.used_fact_ids,
             response_type=result.response_type,
             validation_status="interrupted" if interrupted else result.validation_status,
+            speaker_id=ctx.speaker_id,
+            speaker_label=ctx.speaker_label,
         )
         session_repo.add_disclosed_fact_ids(session, result.newly_disclosed_fact_ids)
         session_repo.set_active_topic(session, result.active_topic)
@@ -210,6 +237,8 @@ def _commit_turn(
             "status": "interrupted" if interrupted else "completed",
             "sessionStatus": session.status,
             "speech": _speech_out(result.speech),
+            "speakerId": ctx.speaker_id,
+            "speakerLabel": ctx.speaker_label,
         }
     except Exception:
         db.rollback()
@@ -308,6 +337,11 @@ def _stream_events(
             return None
 
     try:
+        # Tell the frontend who is speaking BEFORE any sentence, so it can label
+        # the message and pick the matching voice for playback.
+        if ctx.speaker_id != "patient":
+            yield _sse("speaker", {"speakerId": ctx.speaker_id, "speakerLabel": ctx.speaker_label})
+
         engine_stream = stream_patient_response(
             case_id=ctx.case_id,
             question=ctx.question,
@@ -316,6 +350,7 @@ def _stream_events(
             active_topic=ctx.active_topic,
             client=client,
             correlation_id=correlation_id,
+            speaker_id=ctx.engine_speaker,
         )
         final: StreamCompleted | None = None
         try:

@@ -81,14 +81,25 @@ def _failure_category(exc: Exception, status_code: int | None = None) -> str:
 
 
 class ElevenLabsClient:
-    """Streams synthesized speech for already-approved patient text."""
+    """Streams synthesized speech for already-approved patient text.
+
+    The API key + output format are read from the RuntimeConfigurationService on
+    each request, so replacing the key or changing the format via the dashboard
+    applies immediately to the next TTS request. The key stays server-side (sent
+    only as the xi-api-key header, never logged)."""
 
     def __init__(self) -> None:
         self._settings = get_settings()
 
+    @staticmethod
+    def _runtime():
+        from app.services import runtime_config_service
+        return runtime_config_service.elevenlabs_runtime()
+
     @property
     def configured(self) -> bool:
-        return bool(self._settings.elevenlabs_api_key) and self._settings.elevenlabs_enabled
+        rt = self._runtime()
+        return bool(rt.api_key) and rt.enabled
 
     def stream_speech(
         self,
@@ -105,9 +116,10 @@ class ElevenLabsClient:
         buffering). Raises VoiceSynthesisError (safe, generic message) on any
         failure.
         """
-        fmt = output_format or self._settings.elevenlabs_output_format
+        rt = self._runtime()
+        fmt = output_format or rt.output_format
         url = f"{_BASE_URL}/text-to-speech/{voice_id}/stream"
-        headers = {"xi-api-key": self._settings.elevenlabs_api_key}  # never logged
+        headers = {"xi-api-key": rt.api_key}  # never logged
         body = {
             "text": text,
             "model_id": model_id,

@@ -13,13 +13,15 @@
   ],
   "medical_history": "High-risk acute lymphoblastic leukemia (ALL) diagnosed 3 months ago; prior tonsillectomy.",
   "short_description": "A child receiving treatment for high-risk acute lymphoblastic leukemia who is experiencing reduced activity and difficulty keeping up with family activities.",
-  "referral_reason": "Referred for a health-promotion interview to assess activity tolerance and participation during leukemia treatment.",
+  "referral_reason": "Referred for a health-promotion interview to assess the functional impact of reduced activity and difficulty keeping up with usual activities during cancer treatment.",
   "student_visible_info": [
-    "Currently undergoing treatment for high-risk acute lymphoblastic leukemia.",
-    "Caregiver reports reduced energy for play and family outings.",
-    "Lives at home with his mom and a 7-year-old brother."
+    "Lives in a 2-story home with his mom and 7-year-old brother and a pet goldfish, Turbo.",
+    "His bedroom is on the 2nd floor next to his brother's room.",
+    "Prior to diagnosis, Cam was very active and loved playing outside and exploring parks.",
+    "Recently has had trouble keeping up with his brother and has been staying inside watching TV (Team Umizoomi and PJ Masks).",
+    "His grandmother home schools both boys while his mom works full-time."
   ],
-  "task": "Conduct a professional health-promotion interview to understand the patient's concerns, daily activities, participation, goals and relevant health behaviors.",
+  "task": "Conduct a professional health-promotion interview to understand Camden's and his family's concerns, daily activities, participation, goals and relevant health behaviors. Use motivational interviewing skills to guide the conversation with his mother and identify opportunities to support his overall wellness.",
   "persona": {
     "voice": "A 4-year-old boy. Sweet, easily distracted, concrete thinker. Loves talking about his goldfish Turbo, his shows, and 'exploring'. Sometimes references what 'Mommy says'.",
     "speech_style": "Very short, simple sentences (5-12 words). Simple vocabulary a preschooler would use ('tummy', 'owie', 'stuffies'). May answer questions literally or drift off topic.",
@@ -248,5 +250,48 @@
   "case_category": "standard",
   "setting": "Pediatric outpatient",
   "difficulty": "Standard",
-  "estimated_minutes": 10
+  "estimated_minutes": 10,
+  "patient_type": "Pediatric Patient",
+  "race_ethnicity_display": "Caucasian",
+  "paving_wheel_image": "/patients/paving/camden-paving.webp",
+  "caregiver_notice": "Camden is accompanied by his mother. His mother will be the primary person answering questions during the interview.",
+  "primary_speaker": "mother",
+  "participants": [
+    {
+      "id": "camden",
+      "display_name": "Camden",
+      "role": "patient",
+      "age": 4,
+      "primary": false,
+      "voice_key": "patient",
+      "response_style": "young_child"
+    },
+    {
+      "id": "mother",
+      "display_name": "Camden’s Mother",
+      "role": "caregiver",
+      "primary": true,
+      "voice_key": "caregiver",
+      "response_style": "adult_caregiver"
+    }
+  ],
+  "default_speaker": "mother",
+  "paving_profile": {
+    "source_file": "730Case5_PW_Camden.pdf",
+    "source_page": 2,
+    "values": {
+      "physical_activity": 22,
+      "attitude": 21,
+      "variety": 17,
+      "investigations": 16,
+      "nutrition": 14,
+      "goals": 11,
+      "stress_management": 11,
+      "time_outs": 23,
+      "energy": 20,
+      "purpose": 20,
+      "sleep": 25,
+      "social_connections": 25
+    }
+  }
 }

@@ -1,7 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import type { PatientCase } from "../../types/case";
 import { AppImage } from "../common/AppImage";
-import { CaseDifficultyBadge } from "./CaseDifficultyBadge";
 import styles from "./CaseCard.module.css";
 import catalogStyles from "./CaseCatalog.module.css";
 
@@ -23,13 +22,9 @@ export function CaseCard({ patientCase }: CaseCardProps) {
       <h3 className={styles.name}>{patientCase.name}</h3>
       <p className={styles.age}>Age: {patientCase.age}</p>
       <p className={styles.description}>{patientCase.shortDescription}</p>
-      {(patientCase.setting || patientCase.difficulty || patientCase.estimatedMinutes) && (
+      {patientCase.setting && (
         <div className={catalogStyles.cardMeta}>
-          <div className={catalogStyles.cardMetaRow}>
-            <CaseDifficultyBadge difficulty={patientCase.difficulty} />
-            {patientCase.estimatedMinutes ? <span>~{patientCase.estimatedMinutes} min</span> : null}
-          </div>
-          {patientCase.setting && <span>{patientCase.setting}</span>}
+          <span>{patientCase.setting}</span>
         </div>
       )}
       <button
