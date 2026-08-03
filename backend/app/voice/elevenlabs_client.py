@@ -24,6 +24,23 @@ from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
+
+def _mock_ai() -> bool:
+    """Effective simulated-provider flag (startup env OR load-test runtime override)."""
+    try:
+        from app.services import runtime_config_service
+        return runtime_config_service.mock_ai_enabled()
+    except Exception:
+        return bool(get_settings().mock_ai)
+
+
+class _TransientTTSError(Exception):
+    """Internal marker for a retryable TTS failure (429/5xx/timeout/empty)."""
+
+    def __init__(self, rate_limited: bool = False):
+        super().__init__("transient tts failure")
+        self.rate_limited = rate_limited
+
 _BASE_URL = "https://api.elevenlabs.io/v1"
 # MP3 output formats map to audio/mpeg; extend here if PCM formats are ever used.
 MEDIA_TYPES = {"mp3": "audio/mpeg"}
@@ -116,6 +133,11 @@ class ElevenLabsClient:
         buffering). Raises VoiceSynthesisError (safe, generic message) on any
         failure.
         """
+        settings = get_settings()
+        if _mock_ai():
+            yield from self._mock_stream()
+            return
+
         rt = self._runtime()
         fmt = output_format or rt.output_format
         url = f"{_BASE_URL}/text-to-speech/{voice_id}/stream"
@@ -128,50 +150,91 @@ class ElevenLabsClient:
         debug = self._settings.debug
         t_start = time.monotonic()
 
+        from app.core.telemetry import get_telemetry
+
+        tele = get_telemetry()
+        tele.elevenlabs.active.inc()
+        # Retry only the connection + first chunk (transient network/429/5xx);
+        # a mid-stream failure is not retried. The endpoint degrades to text-only
+        # if this ultimately fails, so the interview turn is never lost.
+        attempts = settings.provider_max_retries
         try:
-            client = get_http_client()  # shared keep-alive client; NOT closed here
+            last_exc: Exception | None = None
+            for attempt in range(attempts + 1):
+                try:
+                    yield from self._stream_once(url, headers, body, fmt, voice_id, debug, t_start, tele)
+                    tele.elevenlabs.record(latency_ms=(time.monotonic() - t_start) * 1000, ok=True)
+                    return
+                except _TransientTTSError as exc:
+                    last_exc = exc
+                    if exc.rate_limited:
+                        tele.elevenlabs.window.incr("rate_limited")
+                    if attempt < attempts:
+                        import random
+                        delay = min(
+                            settings.provider_retry_base_ms * (2 ** attempt) + random.uniform(0, settings.provider_retry_base_ms),
+                            settings.provider_retry_max_ms,
+                        ) / 1000.0
+                        tele.elevenlabs.window.incr("retries")
+                        time.sleep(delay)
+                        continue
+                    break
+            tele.elevenlabs.record(latency_ms=(time.monotonic() - t_start) * 1000, ok=False)
+            raise VoiceSynthesisError() from last_exc
+        finally:
+            tele.elevenlabs.active.dec()
+
+    def _stream_once(self, url, headers, body, fmt, voice_id, debug, t_start, tele):
+        """One connection attempt. Raises _TransientTTSError for retryable
+        failures BEFORE any chunk is yielded; once bytes flow, a failure ends the
+        clip (no retry)."""
+        client = get_http_client()  # shared keep-alive client; NOT closed here
+        try:
             with client.stream(
                 "POST", url, headers=headers, json=body, params={"output_format": fmt}
             ) as response:
-                if debug:
-                    logger.info(
-                        "tts_timing upstream_headers_ms=%.0f voice_id=%s",
-                        (time.monotonic() - t_start) * 1000, voice_id,
-                    )
                 if response.status_code >= 400:
-                    # Read (bounded) body for the server log only.
                     detail = response.read()[:300]
                     category = _failure_category(Exception(), response.status_code)
                     logger.warning(
                         "elevenlabs_error category=%s status=%d voice_id=%s detail=%r",
                         category, response.status_code, voice_id, detail,
                     )
+                    if response.status_code == 429 or response.status_code >= 500:
+                        raise _TransientTTSError(rate_limited=response.status_code == 429)
                     raise VoiceSynthesisError()
                 yielded = False
                 for chunk in response.iter_bytes():
                     if chunk:
-                        if not yielded and debug:
-                            logger.info(
-                                "tts_timing upstream_first_chunk_ms=%.0f voice_id=%s",
-                                (time.monotonic() - t_start) * 1000, voice_id,
-                            )
                         yielded = True
                         yield chunk
                 if not yielded:
                     logger.warning("elevenlabs_error category=empty_response voice_id=%s", voice_id)
-                    raise VoiceSynthesisError()
-                if debug:
-                    logger.info(
-                        "tts_timing upstream_complete_ms=%.0f voice_id=%s",
-                        (time.monotonic() - t_start) * 1000, voice_id,
-                    )
+                    raise _TransientTTSError(rate_limited=False)
         except VoiceSynthesisError:
+            raise
+        except _TransientTTSError:
             raise
         except httpx.HTTPError as exc:
             category = _failure_category(exc)
-            # str(exc) may contain the URL but never the key (header-based auth).
             logger.warning("elevenlabs_error category=%s voice_id=%s error=%s", category, voice_id, exc)
-            raise VoiceSynthesisError() from exc
+            # Timeouts / transport errors before completion are transient.
+            raise _TransientTTSError(rate_limited=False) from exc
+
+    def _mock_stream(self):
+        """Canned audio for MOCK_AI load-test mode (configurable latency)."""
+        from app.core.telemetry import get_telemetry
+
+        tele = get_telemetry()
+        tele.elevenlabs.active.inc()
+        t0 = time.monotonic()
+        try:
+            time.sleep(get_settings().mock_tts_latency_ms / 1000.0)
+            yield b"ID3mockmp3"
+            yield b"audio-bytes"
+            tele.elevenlabs.record(latency_ms=(time.monotonic() - t0) * 1000, ok=True)
+        finally:
+            tele.elevenlabs.active.dec()
 
 
 _default_client: ElevenLabsClient | None = None

@@ -631,7 +631,7 @@
 /* ---- metric cards ---- */
 .pt-metrics {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(7, 1fr);
   gap: var(--space-3);
   margin-bottom: var(--space-5);
 }
@@ -1288,7 +1288,7 @@
 /* ===================== system dashboard ===================== */
 .pt-sys-health {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(7, 1fr);
   gap: var(--space-3);
 }
 .pt-sys-card {
@@ -1366,3 +1366,78 @@
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* =========================================================================
+   Traffic Dashboard (System Administration → Traffic Dashboard)
+   Reuses the existing dark theme tokens; no new colors introduced.
+   ========================================================================= */
+.pt-traffic-cards {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+@media (max-width: 1200px) { .pt-traffic-cards { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 720px) { .pt-traffic-cards { grid-template-columns: repeat(2, 1fr); } }
+.pt-tc { padding: var(--space-4); }
+.pt-tc-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--space-2); margin-bottom: var(--space-2);
+}
+.pt-tc-label { color: var(--color-text-muted); font-size: 0.8rem; }
+.pt-tc-value { font-size: 1.7rem; font-weight: 650; line-height: 1.1; }
+.pt-tc-sub { font-size: 0.78rem; margin-top: 2px; }
+
+.pt-traffic-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: var(--space-4); margin-bottom: var(--space-5);
+}
+@media (max-width: 980px) { .pt-traffic-grid { grid-template-columns: 1fr; } }
+
+.pt-provider-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-4); }
+@media (max-width: 620px) { .pt-provider-grid { grid-template-columns: 1fr; } }
+.pt-provider-panel { border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: var(--space-3); }
+.pt-kv { display: flex; justify-content: space-between; font-size: 0.85rem; padding: 3px 0; }
+
+.pt-health-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3); }
+@media (max-width: 620px) { .pt-health-grid { grid-template-columns: repeat(2, 1fr); } }
+.pt-health-cell { border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: var(--space-3); text-align: center; }
+.pt-health-value { font-size: 1.15rem; font-weight: 600; }
+.pt-health-label { font-size: 0.75rem; margin-top: 2px; }
+
+.pt-select {
+  background: var(--color-bg-elevated); color: var(--color-text-primary);
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  padding: 4px 8px; font-size: 0.8rem;
+}
+.pt-chart-legend { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; margin-top: var(--space-2); font-size: 0.8rem; }
+.pt-legend-item { display: inline-flex; align-items: center; gap: 6px; color: var(--color-text-secondary); }
+.pt-legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.pt-legend-toggle { display: inline-flex; align-items: center; gap: 4px; color: var(--color-text-muted); cursor: pointer; }
+
+.pt-protect-list { display: flex; flex-direction: column; gap: var(--space-2); }
+.pt-protect-row { border-bottom: 1px solid var(--color-border); padding-bottom: var(--space-2); }
+.pt-protect-main { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.pt-protect-detail { font-size: 0.76rem; margin-top: 2px; }
+
+.pt-alert-list { display: flex; flex-direction: column; gap: var(--space-2); }
+.pt-alert-row { display: flex; align-items: center; gap: var(--space-2); font-size: 0.85rem; }
+.pt-alert-msg { flex: 1; }
+.pt-alert-time { font-size: 0.75rem; white-space: nowrap; }
+
+/* OpenAI capacity metric strip (Traffic Dashboard) */
+.pt-cap-strip {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+@media (max-width: 620px) { .pt-cap-strip { grid-template-columns: repeat(2, 1fr); } }
+.pt-cap-cell {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+}
+.pt-cap-label { font-size: 0.72rem; }
+.pt-cap-value { font-size: 0.95rem; font-weight: 600; }
+.pt-access-result { text-align: center; }

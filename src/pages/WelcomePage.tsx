@@ -1,161 +1,152 @@
 import { useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
-import { useAppContext } from "../state/AppContext";
-import { AppImage } from "../components/common/AppImage";
+import { Link, useNavigate } from "react-router-dom";
+import { useAuth } from "../state/AuthContext";
+import { ApiError } from "../services/api";
+import { homeCta, postLoginPath } from "../services/authRouting";
 import styles from "./WelcomePage.module.css";
+
+const FEATURES = [
+  {
+    title: "Realistic Patient Encounters",
+    text: "Engage in lifelike interviews across a variety of conditions.",
+    icon: (
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M4 5h11a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-4 3v-3H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" />
+      </svg>
+    ),
+  },
+  {
+    title: "AI-Supported Assessment",
+    text: "Get objective, actionable feedback aligned with PT competencies.",
+    icon: (
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M5 20V10M12 20V4M19 20v-7" />
+      </svg>
+    ),
+  },
+  {
+    title: "Learn. Reflect. Improve.",
+    text: "Build skills and confidence with every conversation.",
+    icon: (
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 3l8 4-8 4-8-4 8-4Z" /><path d="M6 10v4c0 1.7 2.7 3 6 3s6-1.3 6-3v-4" />
+      </svg>
+    ),
+  },
+];
 
 export function WelcomePage() {
   const navigate = useNavigate();
-  const { studentName, studentId, setStudentName, setStudentId } = useAppContext();
-  const [nameInput, setNameInput] = useState(studentName);
-  const [idInput, setIdInput] = useState(studentId);
-  const [error, setError] = useState("");
+  const { user, login } = useAuth();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  function handleSubmit(event: FormEvent) {
-    event.preventDefault();
-    const trimmedName = nameInput.trim();
-    if (!trimmedName) {
-      setError("Please enter your name to continue.");
-      return;
+  async function onSubmit(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      // Real student authentication happens HERE on "/" (not via /login).
+      const signedIn = await login(email.trim(), password);
+      // ACTIVE student -> student home; an admin who signs in here still goes to
+      // /admin (never the student interview flow).
+      navigate(postLoginPath(signedIn.role), { replace: true });
+    } catch (err) {
+      // Account-status (403) and invalid-credential (401) messages come straight
+      // from the backend; a true connection failure is a distinct message.
+      setError(err instanceof ApiError ? err.message : "Sign in failed. Please try again.");
+    } finally {
+      setBusy(false);
     }
-    setStudentName(trimmedName);
-    setStudentId(idInput.trim());
-    navigate("/cases");
   }
 
   return (
     <div className={styles.homePage}>
       <main className={styles.hero}>
-        <AppImage
-          src="/home/pt-interview-hero.webp"
-          alt="Physical therapy interview simulation"
-          className={styles.heroImage}
-          loading="eager"
-          fallbackSrc={null}
-        />
         <div className={styles.overlay} aria-hidden="true" />
 
         <div className={styles.heroInner}>
           <section className={styles.content}>
-            <span className={styles.eyebrow}>UNMC</span>
-
+            <span className={styles.eyebrow}>UNMC · iEXCEL</span>
             <h1 className={styles.heading}>
-              PT AI
+              PT AI Patient
               <br />
-              Patient Simulator
+              Simulator
             </h1>
-
             <div className={styles.accentLine} aria-hidden="true" />
-
             <p className={styles.subtitle}>
-              Realistic patient interviews and AI-supported student assessment.
+              Practice realistic patient interviews and build clinical confidence with
+              AI-supported feedback aligned with PT competencies.
             </p>
 
-            <p className={styles.description}>
-              Practice conducting professional health-promotion interviews with
-              simulated patients. Select a case, interview the patient, and
-              receive structured feedback on your communication and clinical
-              reasoning.
-            </p>
-
-            <form className={styles.form} onSubmit={handleSubmit} noValidate>
-              <div className={styles.formGroup}>
-                <label className={styles.label} htmlFor="student-name">
-                  Student Name
-                </label>
-                <div className={styles.inputWrap}>
-                  <svg
-                    className={styles.inputIcon}
-                    aria-hidden="true"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <circle cx="12" cy="8" r="4" />
-                    <path d="M4 20c0-3.3 3.6-5.5 8-5.5s8 2.2 8 5.5" />
-                  </svg>
-                  <input
-                    id="student-name"
-                    className={styles.input}
-                    type="text"
-                    value={nameInput}
-                    onChange={(event) => setNameInput(event.target.value)}
-                    placeholder="Enter your full name"
-                    autoComplete="name"
-                  />
+            <div className={styles.features}>
+              {FEATURES.map((f) => (
+                <div key={f.title} className={styles.feature}>
+                  <span className={styles.featureIcon}>{f.icon}</span>
+                  <div>
+                    <p className={styles.featureTitle}>{f.title}</p>
+                    <p className={styles.featureText}>{f.text}</p>
+                  </div>
                 </div>
-              </div>
-              <div className={styles.formGroup}>
-                <label className={styles.label} htmlFor="student-id">
-                  Student ID (optional)
-                </label>
-                <div className={styles.inputWrap}>
-                  <svg
-                    className={styles.inputIcon}
-                    aria-hidden="true"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <rect x="3" y="5" width="18" height="14" rx="2" />
-                    <circle cx="8.5" cy="11" r="2" />
-                    <path d="M5.5 16c0-1.4 1.4-2.3 3-2.3s3 .9 3 2.3" />
-                    <path d="M14.5 9.5h4M14.5 13h4" />
-                  </svg>
-                  <input
-                    id="student-id"
-                    className={styles.input}
-                    type="text"
-                    value={idInput}
-                    onChange={(event) => setIdInput(event.target.value)}
-                    placeholder="Enter your student ID"
-                  />
-                </div>
-              </div>
-              {error && (
-                <p className={styles.errorText} role="alert">
-                  {error}
-                </p>
-              )}
-              <div className={styles.actions}>
-                <button type="submit" className={`btn btn-primary ${styles.continueButton}`}>
-                  Continue
-                  <span className={styles.arrow} aria-hidden="true">
-                    →
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className={`btn btn-secondary ${styles.demoButton}`}
-                  title="Instructor Demo Mode is not yet available"
-                  aria-disabled="true"
-                  onClick={(event) => event.preventDefault()}
-                >
-                  <svg
-                    className={styles.demoIcon}
-                    aria-hidden="true"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M2.5 9.5 12 5l9.5 4.5L12 14 2.5 9.5Z" />
-                    <path d="M6.5 11.5v4.2c0 1.3 2.5 2.8 5.5 2.8s5.5-1.5 5.5-2.8v-4.2" />
-                    <path d="M21.5 9.5v5" />
-                  </svg>
-                  Instructor Demo Mode
-                </button>
-              </div>
-            </form>
+              ))}
+            </div>
           </section>
+
+          <aside className={styles.loginPanel}>
+            <div className={styles.loginCard}>
+              {user ? (
+                // Already authenticated: continue to the right home (no student
+                // interview flow for admins).
+                <>
+                  <h2 className={styles.loginTitle}>Welcome back!</h2>
+                  <p className={styles.loginSub}>You are already signed in.</p>
+                  <button
+                    type="button"
+                    className="pt-btn pt-btn-block"
+                    onClick={() => navigate(homeCta(user.role).to)}
+                  >
+                    {homeCta(user.role).label}
+                  </button>
+                </>
+              ) : (
+                <form onSubmit={onSubmit}>
+                  <div className={styles.loginCap} aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="30" height="30" fill="currentColor">
+                      <path d="M12 3 1 8l11 5 9-4.1V15h2V8L12 3Z" />
+                      <path d="M5 12.5V16c0 1.9 3.1 3.5 7 3.5s7-1.6 7-3.5v-3.5l-7 3.2-7-3.2Z" />
+                    </svg>
+                  </div>
+                  <h2 className={styles.loginTitle}>Welcome back!</h2>
+                  <p className={styles.loginSub}>Sign in to continue your PT AI experience.</p>
+
+                  <div className="pt-field">
+                    <label htmlFor="student-email">Email</label>
+                    <input id="student-email" type="email" className="pt-input" value={email}
+                      onChange={(e) => setEmail(e.target.value)} placeholder="you@unmc.edu"
+                      autoComplete="email" required />
+                  </div>
+                  <div className="pt-field">
+                    <label htmlFor="student-password">Password</label>
+                    <input id="student-password" type="password" className="pt-input" value={password}
+                      onChange={(e) => setPassword(e.target.value)} placeholder="Enter your password"
+                      autoComplete="current-password" required />
+                  </div>
+
+                  {error && <div className="pt-error-text" role="alert">{error}</div>}
+
+                  <button className="pt-btn pt-btn-block" type="submit" disabled={busy}>
+                    {busy ? "Signing in…" : "Sign In"}
+                  </button>
+
+                  <p className={styles.loginFoot}>
+                    New student? <Link className="pt-link" to="/register">Create an account</Link>
+                  </p>
+                </form>
+              )}
+            </div>
+          </aside>
         </div>
       </main>
     </div>

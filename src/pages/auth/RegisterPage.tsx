@@ -1,17 +1,17 @@
 import { useState, type FormEvent } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { useAuth } from "../../state/AuthContext";
 import { ApiError } from "../../services/api";
 
 export function RegisterPage() {
   const { register } = useAuth();
-  const navigate = useNavigate();
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [studentNumber, setStudentNumber] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pendingMessage, setPendingMessage] = useState<string | null>(null);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -22,18 +22,31 @@ export function RegisterPage() {
     }
     setBusy(true);
     try {
-      await register({
+      // D2: registration creates a PENDING account; no auto-login.
+      const res = await register({
         fullName: fullName.trim(),
         email: email.trim(),
         password,
         studentNumber: studentNumber.trim(),
       });
-      navigate("/student/dashboard", { replace: true });
+      setPendingMessage(res.message);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Registration failed. Please try again.");
     } finally {
       setBusy(false);
     }
+  }
+
+  if (pendingMessage) {
+    return (
+      <div className="pt-auth-shell">
+        <div className="pt-card pt-auth-card">
+          <h1 className="pt-h1">Account created</h1>
+          <p className="pt-sub">{pendingMessage}</p>
+          <Link className="pt-btn pt-btn-block" to="/login">Back to sign in</Link>
+        </div>
+      </div>
+    );
   }
 
   return (

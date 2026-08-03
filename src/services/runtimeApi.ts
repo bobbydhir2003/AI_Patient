@@ -81,7 +81,7 @@ export interface RuntimeVoice {
 export interface RuntimeCredential {
   service: string;
   configured: boolean;
-  source: string;
+  source: string; // "database" | "environment" | "none"
   maskedValue: string | null;
   lastTestStatus: string;
   lastTestMessage: string;
@@ -89,6 +89,7 @@ export interface RuntimeCredential {
   updatedAt: string | null;
   updatedBy: string | null;
   status: string;
+  secureStorageAvailable: boolean;
 }
 
 export interface ApplyResult {

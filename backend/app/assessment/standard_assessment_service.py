@@ -67,7 +67,23 @@ def list_rubrics() -> list[RubricOut]:
     ]
 
 
+def _prepare(db: Session, session):
+    """Load + validate everything the pipeline needs from the completed session."""
+    turns = TranscriptRepository(db).list_turns(session.id)
+    prepared = transcript_preparer.prepare_transcript(turns)
+    if prepared.student_turn_count < MIN_STUDENT_TURNS_FOR_ASSESSMENT:
+        raise AssessmentNotPossibleError(
+            "The interview contains no student questions, so there is nothing to assess."
+        )
+    load_case(session.case_id)  # sanity: known case
+    case_reference = rubric_loader.load_case_reference(session.case_id)
+    rubrics = rubric_loader.load_rubrics()
+    return prepared, case_reference, rubrics
+
+
 def generate_assessment(db: Session, session_id: str, client: OpenAIPatientClient, retry: bool = False) -> AssessmentOut:
+    """Synchronous path (used when the background queue is disabled and by the
+    sync test suite): create a PROCESSING run and run the pipeline inline."""
     logger.info("assessment_requested session_id=%s endpoint=POST /api/sessions/{id}/assessment", session_id)
     session = SessionRepository(db).get(session_id)
     if session is None:
@@ -75,37 +91,19 @@ def generate_assessment(db: Session, session_id: str, client: OpenAIPatientClien
     if session.status != SESSION_STATUS_COMPLETED or not session.locked:
         raise SessionNotCompletedError(session_id)
 
-    # Idempotency: if a usable assessment already exists for this completed
-    # session, return it. Never create duplicates, never 404.
     existing = AssessmentRepository(db).latest_for_session(session_id)
-    if existing is not None:
-        if existing.status in ("COMPLETE", "NEEDS_REVIEW"):
-            logger.info(
-                "assessment_existing_returned session_id=%s assessment_id=%s status=%s",
-                session_id, existing.id, existing.status,
-            )
-            return _run_to_out(db, existing)
-        # The API layer already protects against PENDING/PROCESSING/VERIFYING and FAILED (without retry).
-        # If we reach here with those statuses, it's either a valid retry or a bug.
-        # We allow it to overwrite by creating a new run.
-
-    turns = TranscriptRepository(db).list_turns(session_id)
-    prepared = transcript_preparer.prepare_transcript(turns)
-    if prepared.student_turn_count < MIN_STUDENT_TURNS_FOR_ASSESSMENT:
-        raise AssessmentNotPossibleError(
-            "The interview contains no student questions, so there is nothing to assess."
+    if existing is not None and existing.status in ("COMPLETE", "NEEDS_REVIEW"):
+        logger.info(
+            "assessment_existing_returned session_id=%s assessment_id=%s status=%s",
+            session_id, existing.id, existing.status,
         )
+        return _run_to_out(db, existing)
 
-    load_case(session.case_id)  # sanity: known case
-    case_reference = rubric_loader.load_case_reference(session.case_id)
-    rubrics = rubric_loader.load_rubrics()
+    _prepare(db, session)  # validates min turns before creating a run
     settings = get_settings()
-
-    repo = AssessmentRepository(db)
-    run = repo.create_run(
+    run = AssessmentRepository(db).create_run(
         session_id=session_id,
         case_id=session.case_id,
-        case_version=case_reference.get("version", ""),
         rubric_version=rubric_loader.rubric_version(),
         model_name=settings.openai_model,
         prompt_version=ASSESSMENT_PROMPT_VERSION,
@@ -113,6 +111,30 @@ def generate_assessment(db: Session, session_id: str, client: OpenAIPatientClien
     )
     db.commit()
     logger.info("assessment_created session_id=%s assessment_id=%s status=PROCESSING", session_id, run.id)
+    return execute_pipeline(db, run, session, client)
+
+
+def execute_existing(db: Session, run, client: OpenAIPatientClient) -> AssessmentOut:
+    """Background-worker entry: run the pipeline on an already-created run."""
+    session = SessionRepository(db).get(run.session_id)
+    if session is None:
+        raise SessionNotFoundError(run.session_id)
+    run.status = "PROCESSING"
+    db.commit()
+    return execute_pipeline(db, run, session, client)
+
+
+def execute_pipeline(db: Session, run, session, client: OpenAIPatientClient) -> AssessmentOut:
+    session_id = session.id
+    prepared, case_reference, rubrics = _prepare(db, session)
+    settings = get_settings()
+    repo = AssessmentRepository(db)
+    # Ensure derived metadata is set (a queued run is created with minimal fields).
+    run.case_version = case_reference.get("version", "")
+    run.rubric_version = rubric_loader.rubric_version()
+    run.model_name = settings.openai_model
+    run.prompt_version = ASSESSMENT_PROMPT_VERSION
+    db.commit()
 
     try:
         # ---- Stage 1: evidence extraction --------------------------------

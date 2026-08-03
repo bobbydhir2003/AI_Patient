@@ -19,6 +19,8 @@ import { AssessmentStatus } from "../components/assessment/AssessmentStatus";
 import { LevelBadge } from "../components/assessment/LevelBadge";
 import type { Assessment, AssessmentTurn, Rubric } from "../types/assessment";
 import { ReferralAssessmentView } from "../components/referralAssessment/ReferralAssessmentView";
+import { useAuth } from "../state/AuthContext";
+import { caseHubPath } from "../services/authRouting";
 import shared from "../components/assessment/assessment.module.css";
 import styles from "./AssessmentReviewPage.module.css";
 
@@ -27,7 +29,9 @@ type Phase = "processing" | "ready" | "failed";
 export function AssessmentReviewPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { cases } = useCases();
+  const studentHome = caseHubPath(user?.role);
 
   const [phase, setPhase] = useState<Phase>("processing");
   const [assessment, setAssessment] = useState<Assessment | null>(null);
@@ -107,7 +111,7 @@ export function AssessmentReviewPage() {
     return (
       <div className="page">
         <p>No interview session was provided.</p>
-        <button type="button" className="btn btn-primary" onClick={() => navigate("/cases")}>
+        <button type="button" className="btn btn-primary" onClick={() => navigate(studentHome)}>
           Back to Case Selection
         </button>
       </div>
@@ -124,7 +128,7 @@ export function AssessmentReviewPage() {
             phase="failed"
             friendlyMessage={errorMessage}
             onRetry={() => setAttempt((n) => n + 1)}
-            onBack={() => navigate("/cases")}
+            onBack={() => navigate(studentHome)}
           />
         )}
       </div>
@@ -150,7 +154,7 @@ export function AssessmentReviewPage() {
   })();
 
   return (
-    <div className="page">
+    <div className={`page ${styles.wide}`}>
       <div className={styles.layout}>
         {/* ---------------- left sidebar ---------------- */}
         <aside className={styles.column}>
@@ -196,7 +200,7 @@ export function AssessmentReviewPage() {
             >
               View Full Transcript
             </button>
-            <button type="button" className="btn btn-ghost" onClick={() => navigate("/cases")}>
+            <button type="button" className="btn btn-ghost" onClick={() => navigate(studentHome)}>
               Try Another Case
             </button>
           </div>
@@ -209,20 +213,22 @@ export function AssessmentReviewPage() {
           {tab === "overview" && (
             <>
               <OverallImpression assessment={assessment} />
-              {assessment.domains.map((domain) => (
-                <RubricCard
-                  key={domain.rubricDomain}
-                  domain={domain}
-                  rubric={rubricByDomain.get(domain.rubricDomain)}
-                  onViewTranscript={handleViewTranscript}
-                />
-              ))}
+              <div className={styles.rubricGrid}>
+                {assessment.domains.map((domain) => (
+                  <RubricCard
+                    key={domain.rubricDomain}
+                    domain={domain}
+                    rubric={rubricByDomain.get(domain.rubricDomain)}
+                    onViewTranscript={handleViewTranscript}
+                  />
+                ))}
+              </div>
               <FocusAreas areas={assessment.focusAreas} />
             </>
           )}
 
           {tab === "rubrics" && (
-            <>
+            <div className={styles.rubricGrid}>
               {assessment.domains.map((domain) => (
                 <RubricCard
                   key={domain.rubricDomain}
@@ -231,7 +237,7 @@ export function AssessmentReviewPage() {
                   onViewTranscript={handleViewTranscript}
                 />
               ))}
-            </>
+            </div>
           )}
 
           {tab === "transcript" && (

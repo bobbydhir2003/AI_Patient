@@ -262,10 +262,19 @@ def test_new_session_snapshots_config_and_existing_is_frozen(tmp_path, monkeypat
         Base.metadata.create_all(get_engine())
         from app.services import session_service, runtime_config_service as rc
         from app.schemas.session_schema import SessionCreateRequest
+        from app.models import Student
+
+        # A3: create_session now derives ownership from the authenticated student.
+        seed = get_session_factory()()
+        st = Student(name="Stu One", student_number="S1", email="s1@x")
+        seed.add(st); seed.flush()
+        u = User(email="s1@x", password_hash="x", full_name="Stu One",
+                 role="student", student_id=st.id, is_active=True)
+        seed.add(u); seed.commit(); student_uid = u.id; seed.close()
 
         db = get_session_factory()()
         first = session_service.create_session(db, SessionCreateRequest(
-            studentName="Stu One", studentId="S1", caseId="carly"))
+            studentName="Stu One", studentId="S1", caseId="carly"), db.get(User, student_uid))
         snap1 = json.loads(_snapshot_of(get_session_factory(), first.session_id))
         assert snap1["openai_model"]  # a real model was frozen
 
@@ -275,7 +284,7 @@ def test_new_session_snapshots_config_and_existing_is_frozen(tmp_path, monkeypat
 
         db3 = get_session_factory()()
         second = session_service.create_session(db3, SessionCreateRequest(
-            studentName="Stu Two", studentId="S2", caseId="carly"))
+            studentName="Stu Two", studentId="S2", caseId="carly"), db3.get(User, student_uid))
         snap2 = json.loads(_snapshot_of(get_session_factory(), second.session_id))
 
         # Existing session keeps its original model; the new one uses the change.

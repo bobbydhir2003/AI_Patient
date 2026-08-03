@@ -1,5 +1,8 @@
 import { CaseSection } from "../components/cases/CaseSection";
+import { Navigate } from "react-router-dom";
 import { useCaseCatalog } from "../services/cases";
+import { useAuth } from "../state/AuthContext";
+import { caseHubPath } from "../services/authRouting";
 import styles from "./CaseSelectionPage.module.css";
 
 /**
@@ -8,7 +11,12 @@ import styles from "./CaseSelectionPage.module.css";
  * adding a new case only requires registering it in the backend catalog.
  */
 export function CaseCatalogPage() {
+  const { user } = useAuth();
   const { catalog, loading, error, retry } = useCaseCatalog();
+
+  if (user?.role === "student") {
+    return <Navigate to={caseHubPath(user.role)} replace />;
+  }
 
   return (
     <div className="page">

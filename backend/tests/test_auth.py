@@ -27,11 +27,28 @@ def make_admin(engine, email="admin@school.edu", password="adminpass1"):
         db.close()
 
 
-def register(client, email="stud@school.edu", password="studpass1", number="S1"):
+def register(client, email="stud@school.edu", password="studpass1", number="S1", approve=True):
+    """Register a student. Registration now creates a PENDING account; by default
+    this helper also approves it (so tests that then log in keep working). Pass
+    approve=False to observe the raw pending registration."""
     resp = client.post(
         "/api/auth/register",
         json={"fullName": "Stud Ent", "email": email, "password": password, "studentNumber": number},
     )
+    if approve and resp.status_code == 201:
+        engine = getattr(client, "_test_engine", None)
+        if engine is not None:
+            from sqlalchemy.orm import sessionmaker
+            from app.models import User
+            db = sessionmaker(bind=engine)()
+            try:
+                u = db.query(User).filter(User.email == email.strip().lower()).first()
+                if u is not None:
+                    u.account_status = "ACTIVE"
+                    u.is_active = True
+                    db.commit()
+            finally:
+                db.close()
     return resp
 
 
@@ -46,13 +63,32 @@ def login_token(client, email, password):
 
 
 # --------------------------------------------------------------------- register
-def test_student_registration_creates_account_and_profile(client):
-    r = register(client)
+def test_student_registration_creates_pending_account(client, engine):
+    from sqlalchemy.orm import sessionmaker
+    from app.models import User
+
+    r = register(client, email="pend@school.edu", approve=False)
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["tokenType"] == "bearer"
-    assert body["user"]["role"] == "student"
-    assert body["user"]["studentId"]  # linked to a Student profile
+    # D2: no auto-login; a pending status message is returned (no token).
+    assert body["status"] == "pending"
+    assert "approval" in body["message"].lower()
+    assert "accessToken" not in body
+    # Account exists as PENDING, role student, linked to a Student profile.
+    db = sessionmaker(bind=engine)()
+    try:
+        u = db.query(User).filter(User.email == "pend@school.edu").first()
+        assert u is not None and u.account_status == "PENDING" and u.role == "student"
+        assert u.is_active is False and u.student_id
+    finally:
+        db.close()
+
+
+def test_pending_account_cannot_login(client):
+    register(client, email="pending2@school.edu", approve=False)
+    r = client.post("/api/auth/login", json={"email": "pending2@school.edu", "password": "studpass1"})
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "account_pending"
 
 
 def test_duplicate_email_rejected(client):
@@ -147,8 +183,9 @@ def test_student_cannot_access_another_students_session(client, engine):
     register(client, email="a@school.edu", password="passa1234", number="A1")
     token_a = login_token(client, "a@school.edu", "passa1234")
     # Student B with a session
-    rb = register(client, email="b@school.edu", password="passb1234", number="B1")
-    student_b_id = rb.json()["user"]["studentId"]
+    register(client, email="b@school.edu", password="passb1234", number="B1")
+    token_b = login_token(client, "b@school.edu", "passb1234")
+    student_b_id = client.get("/api/auth/me", headers=auth_header(token_b)).json()["studentId"]
     session_b = _seed_session(engine, student_b_id)
 
     # A tries to read B's session -> 404 (existence not revealed)
@@ -162,9 +199,9 @@ def test_student_cannot_access_another_students_session(client, engine):
 
 
 def test_student_sees_only_their_own_sessions(client, engine):
-    rb = register(client, email="own@school.edu", password="passown1", number="O1")
-    student_id = rb.json()["user"]["studentId"]
+    register(client, email="own@school.edu", password="passown1", number="O1")
     token = login_token(client, "own@school.edu", "passown1")
+    student_id = client.get("/api/auth/me", headers=auth_header(token)).json()["studentId"]
     session_id = _seed_session(engine, student_id)
 
     listing = client.get("/api/students/me/sessions", headers=auth_header(token))

@@ -1,3 +1,12 @@
+import pytest
+
+
+@pytest.fixture()
+def client(student_client):
+    # These tests hit auth-required endpoints; use the authenticated client.
+    return student_client
+
+
 def _create(client, case_id="camden", name="Test Student", student_id="12345"):
     return client.post(
         "/api/sessions",
@@ -12,7 +21,8 @@ def test_create_session(client):
     assert body["caseId"] == "camden"
     assert body["status"] == "active"
     assert body["locked"] is False
-    assert body["studentName"] == "Test Student"
+    # A3: identity comes from the authenticated student, NOT the request body.
+    assert body["studentName"] == "Default Student"
     assert body["messages"] == []
     assert body["sessionId"]
 

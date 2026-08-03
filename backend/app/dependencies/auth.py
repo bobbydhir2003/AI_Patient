@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.constants import ADMIN_ROLES, USER_ROLE_STUDENT, USER_ROLE_SUPER_ADMIN
 from app.core.exceptions import (
+    AssessmentNotFoundError,
     ForbiddenError,
     InactiveAccountError,
     NotAuthenticatedError,
@@ -32,10 +33,9 @@ def _extract_bearer_token(request: Request) -> str:
     return token
 
 
-def get_current_user(
-    request: Request, db: Session = Depends(get_db)
-) -> User:
-    token = _extract_bearer_token(request)
+def load_user_from_token(db: Session, token: str) -> User:
+    """Validate a bearer token and return the active account. Shared by the
+    request dependency and the streaming path (which cannot hold a DB session)."""
     try:
         payload = decode_access_token(token)
     except jwt.ExpiredSignatureError:
@@ -53,6 +53,20 @@ def get_current_user(
     if not user.is_active:
         raise InactiveAccountError()
     return user
+
+
+def user_can_access_session(user: User, session: InterviewSession) -> bool:
+    """Ownership rule (single source of truth): admins may reach any session; a
+    student may reach only sessions owned by their linked Student profile."""
+    if user.role in ADMIN_ROLES:
+        return True
+    return bool(user.student_id and session.student_id == user.student_id)
+
+
+def get_current_user(
+    request: Request, db: Session = Depends(get_db)
+) -> User:
+    return load_user_from_token(db, _extract_bearer_token(request))
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
@@ -85,9 +99,46 @@ def require_session_access(
     session = db.get(InterviewSession, session_id)
     if session is None:
         raise SessionNotFoundError(session_id)
-    if current_user.role in ADMIN_ROLES:
-        return session
-    if current_user.student_id and session.student_id == current_user.student_id:
+    if user_can_access_session(current_user, session):
         return session
     # Do not reveal existence of another student's session.
     raise SessionNotFoundError(session_id)
+
+
+def authorize_session_from_token(session_factory, request: Request, session_id: str) -> User:
+    """Authenticate + ownership-check for endpoints that must NOT hold a
+    request-scoped DB connection open for the whole response (streaming).
+
+    Opens a short-lived session, verifies the token and ownership, closes it,
+    and returns the authenticated user. Raises BEFORE any streaming begins so
+    the client receives a clean 401/404 instead of a broken stream. Not leaking
+    existence: unknown or unauthorized sessions both raise SessionNotFoundError.
+    """
+    token = _extract_bearer_token(request)
+    db = session_factory()
+    try:
+        user = load_user_from_token(db, token)
+        session = db.get(InterviewSession, session_id)
+        if session is None or not user_can_access_session(user, session):
+            raise SessionNotFoundError(session_id)
+        return user
+    finally:
+        db.close()
+
+
+def require_assessment_access(
+    assessment_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Ownership check for assessment-id-scoped routes: the caller must own (or
+    admin) the session the assessment belongs to. Never leaks existence."""
+    from app.models import AssessmentRun  # local import avoids import cycles
+
+    run = db.get(AssessmentRun, assessment_id)
+    if run is None:
+        raise AssessmentNotFoundError(assessment_id)
+    session = db.get(InterviewSession, run.session_id)
+    if session is None or not user_can_access_session(current_user, session):
+        raise AssessmentNotFoundError(assessment_id)
+    return run

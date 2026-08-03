@@ -45,10 +45,27 @@ class UserOut(CamelModel):
     email: str
     student_number: str
     role: str
+    account_status: str = "ACTIVE"
     is_active: bool
     student_id: str | None = None
     created_at: datetime
     last_login_at: datetime | None = None
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    review_note: str | None = None
+
+
+class RegisterResult(CamelModel):
+    status: str  # "pending"
+    message: str
+
+
+class RoleChangeIn(CamelModel):
+    role: str = Field(pattern="^(student|admin|super_admin)$")
+
+
+class ReviewNoteIn(CamelModel):
+    note: str = Field(default="", max_length=1000)
 
 
 class TokenResponse(CamelModel):

@@ -3,6 +3,13 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
+
+@pytest.fixture()
+def client(student_client):
+    return student_client
+
 from app.core.constants import REFERRAL_CASE_IDS, STANDARD_CASE_IDS
 from app.patient_engine.case_loader import load_all_cases, load_case
 from app.patient_engine.fact_selector import select_facts

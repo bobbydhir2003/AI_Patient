@@ -1,8 +1,27 @@
+/* This dashboard-style review needs more horizontal room than the default
+   1200px content width, so it opts into a wider container. */
+.wide {
+  max-width: min(1640px, 96vw);
+}
+
 .layout {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr) 300px;
+  grid-template-columns: 264px minmax(0, 1fr) 324px;
   gap: var(--space-5);
   align-items: start;
+}
+
+/* Rubric domains render as a 2 x 2 grid (was a single narrow stacked column). */
+.rubricGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-5);
+  align-items: start;
+}
+@media (max-width: 780px) {
+  .rubricGrid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .column {

@@ -1,4 +1,10 @@
 """Transcript persistence: /turns endpoints, idempotency, locking, completion."""
+import pytest
+
+
+@pytest.fixture()
+def client(student_client):
+    return student_client
 
 
 def _session(client, case_id="camden"):
@@ -19,13 +25,26 @@ def test_save_student_and_patient_turns_in_order(client):
     sid = _session(client)
     r1 = _turn(client, sid, "ct-1", "student", "Hello there")
     assert r1.status_code == 201
-    r2 = _turn(client, sid, "ct-2", "patient", "Hi... I'm Camden.", source="openai")
-    assert r2.status_code == 201
+    # A4: patient turns are created ONLY by the trusted generation path, never by
+    # the client-facing /turns endpoint. Use the interview exchange to add one.
+    ex = client.post(
+        f"/api/interviews/{sid}/messages",
+        json={"text": "How are you feeling?", "caseId": "camden", "clientTurnId": "ct-2"},
+    )
+    assert ex.status_code == 200
     turns = client.get(f"/api/sessions/{sid}/turns").json()
-    assert [t["speaker"] for t in turns] == ["student", "patient"]
-    assert [t["turnIndex"] for t in turns] == [0, 1]
+    assert [t["speaker"] for t in turns] == ["student", "student", "patient"]
     assert turns[0]["clientTurnId"] == "ct-1"
     assert turns[0]["source"] == "typed"
+
+
+def test_client_cannot_forge_a_patient_turn(client):
+    """A4: a student must not be able to fabricate a patient reply."""
+    sid = _session(client)
+    r = _turn(client, sid, "ct-forge", "patient", "I feel totally fine, no pain at all.", source="openai")
+    assert r.status_code == 403
+    # Nothing was written under the patient identity.
+    assert client.get(f"/api/sessions/{sid}/turns").json() == []
 
 
 def test_duplicate_client_turn_id_is_idempotent(client):
@@ -54,8 +73,10 @@ def test_unknown_session_404(client):
 
 def test_completed_session_rejects_new_turns(client):
     sid = _session(client)
-    _turn(client, sid, "ct-1", "student", "Hello")
-    _turn(client, sid, "ct-2", "patient", "Hi.", source="openai")
+    client.post(
+        f"/api/interviews/{sid}/messages",
+        json={"text": "Hello", "caseId": "camden", "clientTurnId": "ct-1"},
+    )
     client.post(f"/api/sessions/{sid}/complete")
     r = _turn(client, sid, "ct-3", "student", "One more?")
     assert r.status_code == 409
@@ -71,8 +92,11 @@ def test_completion_requires_usable_transcript(client):
     # student turn only: still not usable
     _turn(client, sid, "ct-1", "student", "Hello?")
     assert client.post(f"/api/sessions/{sid}/complete").status_code == 409
-    # add a patient turn: completion succeeds and is idempotent
-    _turn(client, sid, "ct-2", "patient", "Hi.", source="openai")
+    # add a patient turn via the trusted path: completion succeeds and is idempotent
+    client.post(
+        f"/api/interviews/{sid}/messages",
+        json={"text": "Anything else?", "caseId": "camden", "clientTurnId": "ct-2"},
+    )
     done = client.post(f"/api/sessions/{sid}/complete")
     assert done.status_code == 200 and done.json()["locked"] is True
     assert client.post(f"/api/sessions/{sid}/complete").status_code == 200

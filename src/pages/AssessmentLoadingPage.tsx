@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { createAssessment, getAssessmentStatus } from "../services/api";
 import { ProgressSteps } from "../components/layout/ProgressSteps";
+import { useAuth } from "../state/AuthContext";
+import { caseHubPath } from "../services/authRouting";
 import styles from "./AssessmentLoadingPage.module.css";
 
 const PROGRESS_STEPS = ["Case Introduction", "Interview", "Assessment", "Complete"];
@@ -12,12 +14,14 @@ type StageMode = "saving_transcript" | "preparing" | "evaluating" | "building_re
 export function AssessmentLoadingPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const mountedRef = useRef(true);
 
   const [status, setStatus] = useState<StatusMode>("not_started");
   const [stage, setStage] = useState<StageMode>("saving_transcript");
   const [isLongRunning, setIsLongRunning] = useState(false);
   const [polling, setPolling] = useState(true);
+  const studentHome = caseHubPath(user?.role);
 
   // Mark if we've already tried to create it to avoid double-firing in StrictMode
   const hasTriggeredCreate = useRef(false);
@@ -134,8 +138,8 @@ export function AssessmentLoadingPage() {
               Your interview was completed and saved, but the AI assessment could not be generated.
             </p>
             <div className={styles.actions} style={{ flexDirection: 'row', justifyContent: 'center' }}>
-              <button className="btn btn-secondary" onClick={() => navigate("/cases")}>
-                Back to Cases
+              <button className="btn btn-secondary" onClick={() => navigate(studentHome)}>
+                Back to Dashboard
               </button>
               <button className="btn btn-primary" onClick={handleRetry}>
                 Generate Assessment Again

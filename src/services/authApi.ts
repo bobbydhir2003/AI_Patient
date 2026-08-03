@@ -62,13 +62,20 @@ export function apiLogin(email: string, password: string): Promise<TokenResponse
   });
 }
 
+/** D2: registration creates a PENDING account and returns a status message
+ * (no token / no auto-login). */
+export interface RegisterResult {
+  status: string; // "pending"
+  message: string;
+}
+
 export function apiRegister(input: {
   fullName: string;
   email: string;
   password: string;
   studentNumber: string;
-}): Promise<TokenResponse> {
-  return authRequest<TokenResponse>("/auth/register", null, {
+}): Promise<RegisterResult> {
+  return authRequest<RegisterResult>("/auth/register", null, {
     method: "POST",
     body: JSON.stringify(input),
   });

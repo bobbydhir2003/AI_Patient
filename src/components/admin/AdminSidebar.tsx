@@ -18,6 +18,7 @@ interface NavItem {
   label: string;
   icon: Icon;
   end?: boolean;
+  superAdminOnly?: boolean;
 }
 
 const SECTIONS: { title: string; items: NavItem[] }[] = [
@@ -29,12 +30,21 @@ const SECTIONS: { title: string; items: NavItem[] }[] = [
       { to: "/admin/sessions", label: "Sessions", icon: IconSessions },
       { to: "/admin/transcripts", label: "Transcripts", icon: IconTranscript },
       { to: "/admin/assessments", label: "Assessments", icon: IconAssessments },
+      { to: "/admin/users", label: "User Accounts", icon: IconStudents },
+    ],
+  },
+  {
+    title: "System Administration",
+    items: [
+      { to: "/admin/system", label: "System Dashboard", icon: IconDashboard, end: true },
+      { to: "/admin/system/traffic", label: "Traffic Dashboard", icon: IconSessions },
+      { to: "/admin/system/load-testing", label: "Load & Capacity Testing", icon: IconSessions, superAdminOnly: true },
     ],
   },
 ];
 
 export function AdminSidebar() {
-  const { logout } = useAuth();
+  const { logout, isSuperAdmin } = useAuth();
   const navigate = useNavigate();
 
   return (
@@ -42,7 +52,9 @@ export function AdminSidebar() {
       {SECTIONS.map((section) => (
         <div key={section.title}>
           <div className="pt-nav-section-label">{section.title}</div>
-          {section.items.map(({ to, label, icon: Icon, end }) => (
+          {section.items
+            .filter((item) => !item.superAdminOnly || isSuperAdmin)
+            .map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
               to={to}

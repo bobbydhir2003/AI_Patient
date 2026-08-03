@@ -6,10 +6,52 @@ from fastapi.responses import JSONResponse
 class AppError(Exception):
     status_code = 500
     code = "internal_error"
+    # Optional extra HTTP headers (e.g. Retry-After on 429). None by default.
+    headers: dict | None = None
 
     def __init__(self, message: str = "Internal server error") -> None:
         super().__init__(message)
         self.message = message
+
+
+class RateLimitedError(AppError):
+    """Too many requests from this identity/IP for a protected action. The
+    message never exposes internal provider or infrastructure details."""
+
+    status_code = 429
+    code = "rate_limited"
+
+    def __init__(self, retry_after: int | None = None) -> None:
+        super().__init__("Too many requests. Please slow down and try again shortly.")
+        if retry_after and retry_after > 0:
+            self.headers = {"Retry-After": str(int(retry_after))}
+
+
+class ServiceOverloadedError(AppError):
+    """The server is at its configured AI-interview concurrency limit and could
+    not admit this request within the bounded wait. A controlled, safe overload
+    signal - never a raw provider error."""
+
+    status_code = 503
+    code = "service_overloaded"
+
+    def __init__(self, retry_after: int | None = 5) -> None:
+        super().__init__("The system is at capacity right now. Please try again in a moment.")
+        if retry_after and retry_after > 0:
+            self.headers = {"Retry-After": str(int(retry_after))}
+
+
+class LoginThrottledError(AppError):
+    """Too many failed login attempts for this IP/email pair. Deliberately
+    generic so it never reveals whether the email belongs to a real account."""
+
+    status_code = 429
+    code = "login_throttled"
+
+    def __init__(self, retry_after: int | None = None) -> None:
+        super().__init__("Too many login attempts. Please wait a moment and try again.")
+        if retry_after and retry_after > 0:
+            self.headers = {"Retry-After": str(int(retry_after))}
 
 
 class CaseNotFoundError(AppError):
@@ -202,12 +244,52 @@ class InactiveAccountError(AppError):
         super().__init__("This account has been deactivated.")
 
 
+class AccountPendingError(AppError):
+    status_code = 403
+    code = "account_pending"
+
+    def __init__(self) -> None:
+        super().__init__("Your account is still pending administrator approval.")
+
+
+class AccountRejectedError(AppError):
+    status_code = 403
+    code = "account_rejected"
+
+    def __init__(self) -> None:
+        super().__init__("Your account request was not approved. Please contact the administrator.")
+
+
+class AccountDisabledError(AppError):
+    status_code = 403
+    code = "account_disabled"
+
+    def __init__(self) -> None:
+        super().__init__("Your account is currently disabled. Please contact the administrator.")
+
+
 class ForbiddenError(AppError):
     status_code = 403
     code = "forbidden"
 
     def __init__(self, message: str = "You do not have permission to perform this action.") -> None:
         super().__init__(message)
+
+
+class AccessNotApprovedError(AppError):
+    status_code = 403
+    code = "access_not_approved"
+
+    def __init__(self) -> None:
+        super().__init__("Your email has not been approved for access yet.")
+
+
+class AccessRequestNotFoundError(AppError):
+    status_code = 404
+    code = "access_request_not_found"
+
+    def __init__(self, ref: str) -> None:
+        super().__init__(f"Access request '{ref}' was not found.")
 
 
 class EmailAlreadyRegisteredError(AppError):
@@ -250,12 +332,45 @@ class DeleteConfirmationError(AppError):
         super().__init__("This permanent deletion requires typing DELETE to confirm.")
 
 
+class LoadTestConflictError(AppError):
+    status_code = 409
+    code = "load_test_already_running"
+
+    def __init__(self, message: str = "A load test is already running. Stop it before starting another.") -> None:
+        super().__init__(message)
+
+
+class LoadTestNotFoundError(AppError):
+    status_code = 404
+    code = "load_test_not_found"
+
+    def __init__(self, ref: str) -> None:
+        super().__init__(f"Load test '{ref}' was not found.")
+
+
+class LoadTestConfirmationError(AppError):
+    status_code = 422
+    code = "load_test_confirmation_required"
+
+    def __init__(self, message: str = "Real-provider load tests spend money and require explicit confirmation.") -> None:
+        super().__init__(message)
+
+
+class LoadTestDisabledError(AppError):
+    status_code = 409
+    code = "load_test_disabled"
+
+    def __init__(self) -> None:
+        super().__init__("Load & capacity testing is disabled by configuration.")
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def app_error_handler(_: Request, exc: AppError) -> JSONResponse:
         return JSONResponse(
             status_code=exc.status_code,
             content={"error": {"code": exc.code, "message": exc.message}},
+            headers=exc.headers,
         )
 
 

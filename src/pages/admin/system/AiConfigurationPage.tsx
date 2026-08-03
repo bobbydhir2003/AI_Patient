@@ -141,6 +141,7 @@ export function AiConfigurationPage() {
             <button className="pt-btn pt-btn-secondary pt-btn-sm" onClick={() => test("elevenlabs")}>Test Connection</button>
             {editing !== "elevenlabs" && (
               <button className="pt-btn pt-btn-sm" onClick={() => startEdit("elevenlabs", {
+                enabled: cfg.elevenlabs.enabled,
                 model: cfg.elevenlabs.model, outputFormat: cfg.elevenlabs.outputFormat,
                 timeoutSeconds: cfg.elevenlabs.timeoutSeconds,
               })}>Edit</button>
@@ -149,6 +150,14 @@ export function AiConfigurationPage() {
         </div>
         {editing === "elevenlabs" ? (
           <div className="pt-row" style={{ gap: "var(--space-4)", alignItems: "flex-end" }}>
+            <label className="pt-field" style={{ marginBottom: 0 }}>
+              <span>Service</span>
+              <select className="pt-select" value={form.enabled ? "enabled" : "disabled"}
+                onChange={(e) => setForm({ ...form, enabled: e.target.value === "enabled" })}>
+                <option value="enabled">Enabled</option>
+                <option value="disabled">Disabled</option>
+              </select>
+            </label>
             <label className="pt-field" style={{ marginBottom: 0 }}>
               <span>Model</span>
               <select className="pt-select" value={String(form.model ?? "")}
@@ -175,6 +184,7 @@ export function AiConfigurationPage() {
           </div>
         ) : (
           <dl className="pt-kv">
+            <dt>Service</dt><dd>{cfg.elevenlabs.enabled ? "Enabled" : "Disabled"}</dd>
             <dt>Model</dt><dd>{cfg.elevenlabs.model}</dd>
             <dt>Output format</dt><dd>{cfg.elevenlabs.outputFormat}</dd>
             <dt>Timeout</dt><dd>{cfg.elevenlabs.timeoutSeconds ?? "—"}s</dd>

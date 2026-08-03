@@ -24,6 +24,9 @@ import { AdminAssessmentsPage } from "./pages/admin/AdminAssessmentsPage";
 import { AdminArchivedPage } from "./pages/admin/AdminArchivedPage";
 import { AdminProfilePage } from "./pages/admin/AdminProfilePage";
 import { SystemDashboardPage } from "./pages/admin/system/SystemDashboardPage";
+import { TrafficDashboardPage } from "./pages/admin/system/TrafficDashboardPage";
+import { LoadCapacityTestingPage } from "./pages/admin/system/LoadCapacityTestingPage";
+import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
 import { AiConfigurationPage } from "./pages/admin/system/AiConfigurationPage";
 import { PatientVoicesPage } from "./pages/admin/system/PatientVoicesPage";
 import { ApiCredentialsPage } from "./pages/admin/system/ApiCredentialsPage";
@@ -94,12 +97,22 @@ function App() {
           <Route path="sessions/:sessionId" element={<AdminSessionPage />} />
           <Route path="transcripts" element={<AdminTranscriptsPage />} />
           <Route path="assessments" element={<AdminAssessmentsPage />} />
+          <Route path="users" element={<AdminUsersPage />} />
           <Route path="archived" element={<AdminArchivedPage />} />
           <Route path="profile" element={<AdminProfilePage />} />
           <Route path="audit-log" element={<AdminAuditLogPage />} />
 
           {/* Technical / system administration (separate from the academic dashboard) */}
           <Route path="system" element={<SystemDashboardPage />} />
+          <Route path="system/traffic" element={<TrafficDashboardPage />} />
+          <Route
+            path="system/load-testing"
+            element={
+              <ProtectedRoute role="super_admin">
+                <LoadCapacityTestingPage />
+              </ProtectedRoute>
+            }
+          />
           <Route path="system/voices" element={<PatientVoicesPage />} />
           <Route path="system/config" element={<AiConfigurationPage />} />
           <Route path="system/credentials" element={<ApiCredentialsPage />} />

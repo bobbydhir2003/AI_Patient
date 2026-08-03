@@ -84,31 +84,43 @@ def send_student_message(
 
     # Generate FIRST (all segments). If generation fails, nothing is persisted
     # and the student keeps their question to retry (no fake patient replies).
+    # B5: an interview slot is reserved first; if the server is at its AI
+    # concurrency limit, a controlled ServiceOverloadedError (503) is raised
+    # BEFORE any OpenAI call - never a raw provider error.
+    from app.core.concurrency import interview_slot
+    from app.core.telemetry import get_telemetry
+
+    tele = get_telemetry()
     t_generate = time.monotonic()
     results = []
-    try:
-        for sid in speaker_ids:
-            # None for single-speaker cases -> unchanged prompt/behavior.
-            engine_speaker = sid if speaker_router.is_multi_participant(case) else None
-            results.append(
-                generate_patient_response(
-                    case_id=session.case_id,
-                    question=question,
-                    turns=prior_turns,
-                    disclosed_fact_ids=session_repo.get_disclosed_fact_ids(session),
-                    active_topic=session.active_topic,
-                    client=client,
-                    speaker_id=engine_speaker,
+    with interview_slot():
+        tele.live.set_status(session.id, "WAITING_FOR_AI")
+        try:
+            for sid in speaker_ids:
+                # None for single-speaker cases -> unchanged prompt/behavior.
+                engine_speaker = sid if speaker_router.is_multi_participant(case) else None
+                results.append(
+                    generate_patient_response(
+                        case_id=session.case_id,
+                        question=question,
+                        turns=prior_turns,
+                        disclosed_fact_ids=session_repo.get_disclosed_fact_ids(session),
+                        active_topic=session.active_topic,
+                        client=client,
+                        speaker_id=engine_speaker,
+                    )
                 )
+        except Exception:
+            db.rollback()
+            tele.live.set_status(session.id, "INTERVIEWING")
+            logger.error(
+                "turn_failed session_id=%s case_id=%s turn=%d openai_called=True "
+                "response_saved=False error_code=PATIENT_RESPONSE_UNAVAILABLE",
+                session.id, session.case_id, turn_number,
             )
-    except Exception:
-        db.rollback()
-        logger.error(
-            "turn_failed session_id=%s case_id=%s turn=%d openai_called=True "
-            "response_saved=False error_code=PATIENT_RESPONSE_UNAVAILABLE",
-            session.id, session.case_id, turn_number,
-        )
-        raise
+            raise
+    latency_ms = int((time.monotonic() - t_generate) * 1000)
+    tele.live.set_status(session.id, "INTERVIEWING", latency_ms=latency_ms)
 
     if get_settings().debug:
         logger.info(

@@ -1,3 +1,16 @@
+import pytest
+
+
+@pytest.fixture()
+def client(student_client):
+    return student_client
+
+
+@pytest.fixture()
+def failing_client(failing_student_client):
+    return failing_student_client
+
+
 def _start(client, case_id="camden"):
     response = client.post(
         "/api/sessions",

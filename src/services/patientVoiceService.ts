@@ -30,7 +30,7 @@
  * only the latest generation may play; cancellation invalidates everything;
  * the progressive reducer makes CANCEL/FAIL terminal in every phase.
  */
-import { API_BASE_URL, fetchVoiceStatus } from "./api";
+import { API_BASE_URL, fetchVoiceStatus, withAuthHeaders } from "./api";
 import { cancelActiveStream } from "./streamRegistry";
 import {
   cancelSpeech as cancelBrowserSpeech,
@@ -202,7 +202,7 @@ async function playElevenLabs(options: SpeakOptions, generation: number, t0: num
 
   const response = await fetch(`${API_BASE_URL}/api/voice/synthesize`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: withAuthHeaders({ "Content-Type": "application/json" }),
     signal: abort.signal,
     body: JSON.stringify({
       caseId: options.caseId,

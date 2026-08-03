@@ -12,6 +12,13 @@ import {
 } from "../../../services/runtimeApi";
 import { ConfirmModal, ErrorState, LoadingState, useToast } from "../../../portal/ui";
 
+/** Human label for the effective credential source. */
+function sourceLabel(source: string): string {
+  if (source === "database") return "Database";
+  if (source === "environment") return "Environment";
+  return "Not configured";
+}
+
 function ReplaceKeyModal({ service, onClose, onDone }: {
   service: string; onClose: () => void; onDone: () => void;
 }) {
@@ -133,17 +140,29 @@ export function ApiCredentialsPage() {
             </div>
             <dl className="pt-kv">
               <dt>Key</dt><dd>{c.maskedValue ?? "—"}</dd>
-              <dt>Source</dt><dd>{c.source}</dd>
+              <dt>Source</dt><dd>{sourceLabel(c.source)}</dd>
               <dt>Last test</dt><dd>{c.lastTestStatus}{c.lastTestMessage ? ` — ${c.lastTestMessage}` : ""}</dd>
               <dt>Updated by</dt><dd>{c.updatedBy ?? "Unknown"}</dd>
             </dl>
+            {isSuperAdmin && !c.secureStorageAvailable && (
+              <p className="pt-muted" style={{ fontSize: "0.82rem", marginTop: "var(--space-2)" }} role="note">
+                Runtime credential storage requires CONFIG_ENCRYPTION_KEY to be configured on the server.
+              </p>
+            )}
             <div className="pt-row" style={{ marginTop: "var(--space-3)" }}>
               <button className="pt-btn pt-btn-secondary pt-btn-sm" onClick={() => test(c.service)}>Test Connection</button>
               {isSuperAdmin && (
                 <>
-                  <button className="pt-btn pt-btn-sm" onClick={() => setReplacing(c.service)}>Replace Key</button>
-                  {c.configured && c.source === "runtime" && (
-                    <button className="pt-btn pt-btn-danger pt-btn-sm" onClick={() => setRemoving(c.service)}>Remove</button>
+                  <button
+                    className="pt-btn pt-btn-sm"
+                    onClick={() => setReplacing(c.service)}
+                    disabled={!c.secureStorageAvailable}
+                    title={c.secureStorageAvailable ? "" : "CONFIG_ENCRYPTION_KEY is not set on the server"}
+                  >
+                    Replace Key
+                  </button>
+                  {c.configured && c.source === "database" && (
+                    <button className="pt-btn pt-btn-danger pt-btn-sm" onClick={() => setRemoving(c.service)}>Remove Override</button>
                   )}
                 </>
               )}

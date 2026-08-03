@@ -1,23 +1,48 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../state/AuthContext";
 import { ApiError } from "../../services/api";
+import { isAdminRole } from "../../services/authRouting";
+import styles from "./LoginPage.module.css";
 
+const STUDENT_ON_ADMIN = "This login is for administrator accounts only.";
+
+/**
+ * ADMIN-ONLY sign in (route "/login"). Students sign in on "/". This page uses
+ * the same backend auth API; the difference is intent + role validation. Backend
+ * RBAC (require_admin/require_super_admin) is the real protection - this only
+ * routes correctly and refuses to send a student into the admin area.
+ */
 export function LoginPage() {
-  const { login } = useAuth();
+  const { login, user } = useAuth();
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Already-authenticated visits: admins go straight to /admin; a signed-in
+  // student sees the admin-only notice (never routed into the student sim here).
+  useEffect(() => {
+    if (user && isAdminRole(user.role)) {
+      navigate("/admin", { replace: true });
+    } else if (user) {
+      setError("This portal is for administrators only.");
+    }
+  }, [user, navigate]);
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     setBusy(true);
     try {
-      const user = await login(email.trim(), password);
-      navigate(user.role === "admin" ? "/admin" : "/student/dashboard", { replace: true });
+      const signedIn = await login(email.trim(), password);
+      if (isAdminRole(signedIn.role)) {
+        navigate("/admin", { replace: true });
+      } else {
+        // Valid student credentials, but this is the admin portal.
+        setError(STUDENT_ON_ADMIN);
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Sign in failed. Please try again.");
     } finally {
@@ -26,34 +51,29 @@ export function LoginPage() {
   }
 
   return (
-    <div className="pt-auth-shell">
-      <form className="pt-card pt-auth-card" onSubmit={onSubmit}>
-        <h1 className="pt-h1">Sign in</h1>
-        <p className="pt-sub">Access your PT AI Patient interviews and assessments.</p>
+    <div className={styles.adminShell}>
+      <div className={styles.adminOverlay} aria-hidden="true" />
+      <form className={styles.adminCard} onSubmit={onSubmit}>
+        <div className={styles.adminBadge} aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3Z" />
+            <path d="M9.5 12.5l1.8 1.8 3.2-3.6" />
+          </svg>
+        </div>
+        <h1 className={styles.adminTitle}>Administrator Sign In</h1>
+        <p className={styles.adminSub}>Access the PT AI Patient Simulator administration system.</p>
 
         <div className="pt-field">
-          <label htmlFor="email">Email</label>
-          <input
-            id="email"
-            type="email"
-            className="pt-input"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoComplete="email"
-            required
-          />
+          <label htmlFor="admin-email">Email</label>
+          <input id="admin-email" type="email" className="pt-input" value={email}
+            onChange={(e) => setEmail(e.target.value)} placeholder="you@unmc.edu"
+            autoComplete="email" required />
         </div>
         <div className="pt-field">
-          <label htmlFor="password">Password</label>
-          <input
-            id="password"
-            type="password"
-            className="pt-input"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="current-password"
-            required
-          />
+          <label htmlFor="admin-password">Password</label>
+          <input id="admin-password" type="password" className="pt-input" value={password}
+            onChange={(e) => setPassword(e.target.value)} placeholder="Enter your password"
+            autoComplete="current-password" required />
         </div>
 
         {error && <div className="pt-error-text" role="alert">{error}</div>}
@@ -62,10 +82,11 @@ export function LoginPage() {
           {busy ? "Signing in…" : "Sign in"}
         </button>
 
-        <p className="pt-muted" style={{ marginTop: 16, fontSize: "0.88rem" }}>
-          New student? <Link className="pt-link" to="/register">Create an account</Link>
-        </p>
+        <div className={styles.adminBack}>
+          <Link className="pt-link" to="/">← Back to Student Portal</Link>
+        </div>
       </form>
+      <p className={styles.secureNote}>Secure access · Restricted to authorized administrators</p>
     </div>
   );
 }

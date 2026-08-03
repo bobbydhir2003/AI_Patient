@@ -13,6 +13,7 @@ import {
   apiMe,
   apiRegister,
   type AuthUser,
+  type RegisterResult,
 } from "../services/authApi";
 
 const TOKEN_KEY = "ptai-auth-token";
@@ -31,7 +32,7 @@ interface AuthContextValue {
     email: string;
     password: string;
     studentNumber: string;
-  }) => Promise<AuthUser>;
+  }) => Promise<RegisterResult>;
   logout: () => void;
 }
 
@@ -106,13 +107,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const register = useCallback(
+    // D2: registration no longer auto-logs-in; it returns a pending status
+    // message. The caller shows it and directs the user to sign in after approval.
     async (input: { fullName: string; email: string; password: string; studentNumber: string }) => {
-      const res = await apiRegister(input);
-      persistToken(res.accessToken);
-      setUser(res.user);
-      return res.user;
+      return apiRegister(input);
     },
-    [persistToken],
+    [],
   );
 
   const value = useMemo<AuthContextValue>(

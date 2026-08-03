@@ -1,0 +1,45 @@
+# --- Secrets / local env (NEVER bake into the image) ---
+.env
+.env.*
+*.env
+
+# --- Version control / project metadata ---
+.git
+.gitignore
+.dockerignore
+.claude
+
+# --- Python virtual environments ---
+.venv
+venv
+env
+ENV
+
+# --- Local databases and backups (do not ship data in the image) ---
+*.db
+*.db.bak
+*.db.pre-*
+*.sqlite
+*.sqlite3
+
+# --- Caches / build artifacts ---
+__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+htmlcov
+build
+dist
+
+# --- Tests (not needed at runtime) ---
+tests
+
+# --- Editor / OS cruft ---
+.DS_Store
+.idea
+.vscode
+*.swp

@@ -88,6 +88,18 @@ USER_ROLES = (USER_ROLE_STUDENT, USER_ROLE_ADMIN, USER_ROLE_SUPER_ADMIN)
 # Roles that may reach the admin area (super_admin is a strict superset of admin).
 ADMIN_ROLES = (USER_ROLE_ADMIN, USER_ROLE_SUPER_ADMIN)
 
+# --- Account status (separate from role; approval lifecycle) ---
+ACCOUNT_STATUS_PENDING = "PENDING"    # newly registered; awaiting admin approval
+ACCOUNT_STATUS_ACTIVE = "ACTIVE"      # approved; may sign in
+ACCOUNT_STATUS_REJECTED = "REJECTED"  # approval declined
+ACCOUNT_STATUS_DISABLED = "DISABLED"  # previously active, now suspended
+ACCOUNT_STATUSES = (
+    ACCOUNT_STATUS_PENDING,
+    ACCOUNT_STATUS_ACTIVE,
+    ACCOUNT_STATUS_REJECTED,
+    ACCOUNT_STATUS_DISABLED,
+)
+
 # --- Runtime configuration: apply modes ---
 APPLY_IMMEDIATE = "immediate"          # next provider request uses it
 APPLY_NEW_SESSIONS = "new_sessions"    # only interviews started after the change

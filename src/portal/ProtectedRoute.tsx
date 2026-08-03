@@ -10,13 +10,14 @@ export function ProtectedRoute({
   role,
   children,
 }: {
-  role?: "student" | "admin";
+  role?: "student" | "admin" | "super_admin";
   children: ReactNode;
 }) {
   const { loading, isAuthenticated, user } = useAuth();
   const location = useLocation();
 
   // super_admin is a strict superset of admin, so it satisfies an "admin" gate.
+  // A "super_admin" gate is satisfied only by a super_admin.
   const roleSatisfied =
     !role ||
     user?.role === role ||

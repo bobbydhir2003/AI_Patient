@@ -97,6 +97,34 @@ class OpenAIRuntime:
     streaming_enabled: bool
 
 
+def mock_ai_enabled(db: Session | None = None) -> bool:
+    """Effective simulated-provider flag. Precedence: runtime DB override
+    (set by the load-test controller for a Simulated-AI run) -> startup env.
+    Reused by the OpenAI/ElevenLabs clients so a Simulated-AI load test spends
+    no provider credits while still exercising the real application path."""
+    own = db is None
+    db = db or _open_session()
+    try:
+        override = _get_setting(db, "mock_ai")
+        return bool(override) if override is not None else bool(get_settings().mock_ai)
+    finally:
+        if own:
+            db.close()
+
+
+def set_mock_ai(db: Session, *, enabled: bool, admin_email: str) -> None:
+    _upsert_setting(db, "mock_ai", bool(enabled), "bool", "load_test",
+                    APPLY_IMMEDIATE, admin_email)
+    db.flush(); _bump()
+
+
+def clear_mock_ai(db: Session) -> None:
+    row = db.execute(select(SystemSetting).where(SystemSetting.key == "mock_ai")).scalar_one_or_none()
+    if row is not None:
+        db.delete(row)
+        db.flush(); _bump()
+
+
 def openai_runtime(db: Session | None = None) -> OpenAIRuntime:
     own = db is None
     db = db or _open_session()
@@ -141,9 +169,12 @@ def elevenlabs_runtime(db: Session | None = None) -> ElevenLabsRuntime:
         model = _get_setting(db, "elevenlabs_model") or s.elevenlabs_default_model
         fmt = _get_setting(db, "elevenlabs_output_format") or s.elevenlabs_output_format
         timeout = _get_setting(db, "elevenlabs_timeout_seconds")
+        # Part 7: elevenlabs_enabled is now a DB runtime override (was env-only,
+        # which required a restart). Precedence: DB override -> env -> default.
+        enabled_override = _get_setting(db, "elevenlabs_enabled")
         return ElevenLabsRuntime(
             api_key=_active_key(db, "elevenlabs", s.elevenlabs_api_key),
-            enabled=s.elevenlabs_enabled,
+            enabled=enabled_override if enabled_override is not None else s.elevenlabs_enabled,
             model=model,
             output_format=fmt,
             timeout_seconds=timeout if timeout is not None else s.elevenlabs_timeout_seconds,
@@ -165,15 +196,29 @@ def _active_key(db: Session, service: str, env_fallback: str) -> str:
         return env_fallback  # runtime table absent -> env fallback
     if row and row.encrypted_secret and row.is_active:
         try:
-            return crypto.decrypt_secret(row.encrypted_secret)
+            plaintext = crypto.decrypt_secret(row.encrypted_secret)
         except crypto.EncryptionUnavailableError:
             return env_fallback  # unreadable token -> safe fallback, never crash
+        # A12: opportunistically migrate a legacy (unsalted v1) token to the new
+        # salted PBKDF2 (v2) format. Best-effort - a failure here must never
+        # break the read, so we roll back and keep serving the decrypted value.
+        if crypto.is_legacy_token(row.encrypted_secret):
+            try:
+                row.encrypted_secret = crypto.encrypt_secret(plaintext)
+                db.commit()
+            except Exception:
+                db.rollback()
+        return plaintext
     return env_fallback
 
 
 def credential_status(db: Session) -> list[dict]:
     s = get_settings()
     env_keys = {"openai": s.openai_api_key, "elevenlabs": s.elevenlabs_api_key}
+    # Part 2: whether the server can store an encrypted DB credential at all. When
+    # false, the UI disables "Replace Key" and explains that CONFIG_ENCRYPTION_KEY
+    # must be set. Never exposes the key itself.
+    secure_storage = crypto.encryption_available()
     rows = {r.service: r for r in db.execute(select(ApiCredential)).scalars().all()}
     out = []
     for service in ("openai", "elevenlabs"):
@@ -182,7 +227,7 @@ def credential_status(db: Session) -> list[dict]:
             out.append({
                 "service": service,
                 "configured": True,
-                "source": "runtime",
+                "source": "database",  # effective source: encrypted DB override
                 "masked_value": row.masked_value,
                 "last_test_status": row.last_test_status,
                 "last_test_message": row.last_test_message,
@@ -190,13 +235,14 @@ def credential_status(db: Session) -> list[dict]:
                 "updated_at": row.updated_at.isoformat() if row.updated_at else None,
                 "updated_by": row.updated_by or None,
                 "status": "configured",
+                "secure_storage_available": secure_storage,
             })
         else:
             env_key = env_keys.get(service, "")
             out.append({
                 "service": service,
                 "configured": bool(env_key),
-                "source": "env" if env_key else "none",
+                "source": "environment" if env_key else "none",
                 "masked_value": crypto.mask_secret(env_key) if env_key else None,
                 "last_test_status": "never",
                 "last_test_message": "",
@@ -204,6 +250,7 @@ def credential_status(db: Session) -> list[dict]:
                 "updated_at": None,
                 "updated_by": None,
                 "status": "configured" if env_key else "not_configured",
+                "secure_storage_available": secure_storage,
             })
     return out
 
@@ -325,6 +372,10 @@ def set_openai_config(db: Session, *, admin_email: str, patch: dict) -> None:
 
 
 def set_elevenlabs_config(db: Session, *, admin_email: str, patch: dict) -> None:
+    if "enabled" in patch:
+        # Part 7: runtime enable/disable of realistic TTS (applies to next request).
+        _upsert_setting(db, "elevenlabs_enabled", bool(patch["enabled"]), "bool",
+                        "elevenlabs", APPLY_IMMEDIATE, admin_email)
     if "model" in patch:
         if patch["model"] not in ELEVENLABS_MODEL_ALLOWLIST:
             raise ValidationFailedError(

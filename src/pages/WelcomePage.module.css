@@ -11,16 +11,12 @@
   width: 100%;
   min-height: 560px;
   overflow: hidden;
-}
-
-.heroImage {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: center right;
-  display: block;
+  /* Priority F: student home background (local asset). */
+  background-color: #000;
+  background-image: url("/home/Home.webp");
+  background-size: cover;
+  background-position: center right;
+  background-repeat: no-repeat;
 }
 
 .overlay {
@@ -44,11 +40,13 @@
   padding: clamp(32px, 4vh, 56px) clamp(24px, 4.5vw, 72px);
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: clamp(24px, 4vw, 72px);
 }
 
 .content {
   position: relative;
-  width: min(600px, 44vw);
+  width: min(600px, 46vw);
 }
 
 .eyebrow {
@@ -300,4 +298,107 @@
   .demoButton {
     min-height: 50px;
   }
+}
+
+/* --- Priority E: real account-entry section (replaces free-text identity) --- */
+.entryHint {
+  margin: 14px 0 6px;
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 0.92rem;
+}
+.entryDivider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 20px 0 12px;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.entryDivider::before,
+.entryDivider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.22);
+}
+.tertiaryRow {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.tertiaryRow :global(.btn) {
+  flex: 1;
+  min-height: 46px;
+  font-size: 0.92rem;
+  border-radius: 10px;
+}
+
+/* --- Priority F: feature list (left) + student login card (right) --- */
+.features {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-top: 8px;
+}
+.feature {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding-top: 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+.feature:first-child { border-top: none; padding-top: 0; }
+.featureIcon {
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: rgba(217, 39, 46, 0.16);
+  color: #ef4f56;
+}
+.featureTitle { margin: 0 0 2px; font-size: 1rem; font-weight: 700; color: #fff; }
+.featureText { margin: 0; font-size: 0.86rem; line-height: 1.5; color: rgba(255, 255, 255, 0.6); }
+
+.loginPanel {
+  position: relative;
+  width: min(430px, 40vw);
+  flex: 0 0 auto;
+}
+.loginCard {
+  background: rgba(18, 18, 20, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 16px;
+  padding: clamp(24px, 2.4vw, 36px);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+}
+.loginCap {
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 14px;
+  display: grid;
+  place-items: center;
+  color: #ef4f56;
+}
+.loginTitle { margin: 0; text-align: center; font-size: 1.7rem; font-weight: 800; color: #fff; }
+.loginSub { margin: 6px 0 22px; text-align: center; color: rgba(255, 255, 255, 0.6); font-size: 0.9rem; }
+.loginCard :global(.pt-field) { margin-bottom: 14px; }
+.loginFoot { margin: 16px 0 0; text-align: center; color: rgba(255, 255, 255, 0.72); font-size: 0.9rem; }
+.orRule {
+  display: flex; align-items: center; gap: 12px;
+  color: rgba(255, 255, 255, 0.4); font-size: 0.8rem; margin: 18px 0 12px;
+}
+.orRule::before, .orRule::after { content: ""; flex: 1; height: 1px; background: rgba(255, 255, 255, 0.16); }
+
+/* Responsive: stack on tablet/mobile */
+@media (max-width: 900px) {
+  .heroInner { flex-direction: column; align-items: stretch; justify-content: center; }
+  .content { width: 100%; }
+  .heading { white-space: normal; }
+  .loginPanel { width: 100%; max-width: 460px; margin: 8px auto 0; }
+  .features { display: none; }
 }

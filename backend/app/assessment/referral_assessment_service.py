@@ -173,7 +173,13 @@ def _validate_extraction(extraction, prepared, domain_ids):
     return extraction
 
 
-def generate(db: Session, session_id: str, client: OpenAIPatientClient, retry: bool = False) -> AssessmentOut:
+def execute_existing(db: Session, run, client: OpenAIPatientClient) -> AssessmentOut:
+    """Background-worker entry: run the referral pipeline on an existing run."""
+    return generate(db, run.session_id, client, retry=True, run=run)
+
+
+def generate(db: Session, session_id: str, client: OpenAIPatientClient,
+             retry: bool = False, run=None) -> AssessmentOut:
     session = SessionRepository(db).get(session_id)
     if session is None:
         raise SessionNotFoundError(session_id)
@@ -181,9 +187,9 @@ def generate(db: Session, session_id: str, client: OpenAIPatientClient, retry: b
         raise SessionNotCompletedError(session_id)
 
     repo = AssessmentRepository(db)
-    existing = repo.latest_for_session(session_id)
-    if existing is not None:
-        if existing.status in ("COMPLETE", "NEEDS_REVIEW"):
+    if run is None:
+        existing = repo.latest_for_session(session_id)
+        if existing is not None and existing.status in ("COMPLETE", "NEEDS_REVIEW"):
             from app.assessment.standard_assessment_service import _run_to_out
             return _run_to_out(db, existing)
 
@@ -199,13 +205,21 @@ def generate(db: Session, session_id: str, client: OpenAIPatientClient, retry: b
         raise AssessmentNotPossibleError("Protected referral assessment context is missing for this case.")
 
     settings = get_settings()
-    run = repo.create_run(
-        session_id=session_id, case_id=session.case_id,
-        assessment_mode="advanced_referral", case_version=case_reference.get("version", ""),
-        rubric_version=rubric.get("version", "1.0"), model_name=settings.openai_model,
-        prompt_version=PROMPT_VERSION, status="PROCESSING",
-    )
-    db.commit()
+    if run is None:
+        run = repo.create_run(
+            session_id=session_id, case_id=session.case_id,
+            assessment_mode="advanced_referral", case_version=case_reference.get("version", ""),
+            rubric_version=rubric.get("version", "1.0"), model_name=settings.openai_model,
+            prompt_version=PROMPT_VERSION, status="PROCESSING",
+        )
+        db.commit()
+    else:  # worker path: promote the queued run and fill derived metadata
+        run.status = "PROCESSING"
+        run.case_version = case_reference.get("version", "")
+        run.rubric_version = rubric.get("version", "1.0")
+        run.model_name = settings.openai_model
+        run.prompt_version = PROMPT_VERSION
+        db.commit()
 
     try:
         domain_defs = rubric["domains"]

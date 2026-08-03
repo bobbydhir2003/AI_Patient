@@ -107,6 +107,13 @@ def parse_sse(body: str) -> list[tuple[str, dict]]:
 
 
 def make_streaming_test_client(engine, openai_client) -> TestClient:
+    from fastapi import Depends, Request
+    from sqlalchemy.orm import Session as _Session
+
+    from app.dependencies.auth import get_current_user as real_get_current_user
+    from app.models import User
+    from tests.conftest import seed_default_student
+
     app = create_app()
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
@@ -120,7 +127,29 @@ def make_streaming_test_client(engine, openai_client) -> TestClient:
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_db_factory] = lambda: factory
     app.dependency_overrides[get_openai_client] = lambda: openai_client
-    return TestClient(app)
+
+    # Auth: the interview endpoints now require a token. The streaming endpoint
+    # authorizes ownership by reading the bearer token directly (it must not hold
+    # a request-scoped DB session), so we seed a default student, override the
+    # dependency-based auth, AND set a real default bearer token on the client so
+    # both the dependency path (create_session) and the manual streaming
+    # authorizer resolve to the same owning student.
+    default_uid = seed_default_student(engine)
+
+    def override_current_user(request: Request, db: _Session = Depends(get_db)) -> User:
+        if request.headers.get("Authorization") or request.headers.get("authorization"):
+            return real_get_current_user(request, db)
+        return db.get(User, default_uid)
+
+    app.dependency_overrides[real_get_current_user] = override_current_user
+
+    tc = TestClient(app)
+    token = tc.post(
+        "/api/auth/login",
+        json={"email": "default@school.edu", "password": "defaultpass1"},
+    ).json()["accessToken"]
+    tc.headers.update({"Authorization": f"Bearer {token}"})
+    return tc
 
 
 @pytest.fixture()

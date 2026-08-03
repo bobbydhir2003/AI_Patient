@@ -23,6 +23,7 @@ class OpenAIConfigPatchIn(CamelModel):
 
 
 class ElevenLabsConfigPatchIn(CamelModel):
+    enabled: bool | None = None
     model: str | None = None
     output_format: str | None = None
     timeout_seconds: float | None = None
@@ -66,6 +67,8 @@ class CredentialStatusOut(CamelModel):
     updated_at: str | None = None
     updated_by: str | None = None
     status: str
+    # Part 2: false when CONFIG_ENCRYPTION_KEY is unset -> Replace Key is unavailable.
+    secure_storage_available: bool = False
 
 
 class CredentialListOut(CamelModel):

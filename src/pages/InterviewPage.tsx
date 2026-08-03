@@ -9,6 +9,7 @@ import {
   fetchSessionTurns,
   sendStudentMessage,
 } from "../services/api";
+import { classifyInterviewInitError } from "../services/interviewErrors";
 import {
   startStreamingExchange,
   StreamCancelledError,
@@ -23,7 +24,9 @@ import type { AudioSetup, InterruptionSensitivity } from "../services/voiceActiv
 import { useVoiceConversation } from "../hooks/useVoiceConversation";
 import { isUsableTranscript, type VoiceConversationState } from "../hooks/voiceStateMachine";
 import { usePatientCase } from "../services/cases";
+import { caseHubPath } from "../services/authRouting";
 import { useAppContext } from "../state/AppContext";
+import { useAuth } from "../state/AuthContext";
 import { ProgressSteps } from "../components/layout/ProgressSteps";
 import { PatientProfile } from "../components/cases/PatientProfile";
 import { ConversationPanel } from "../components/interview/ConversationPanel";
@@ -84,8 +87,10 @@ function localId(): string {
 export function InterviewPage() {
   const { caseId } = useParams<{ caseId: string }>();
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { patientCase, loading: caseLoading, error: caseError, retry: retryCase } =
     usePatientCase(caseId);
+  const studentHome = caseHubPath(user?.role);
 
   const {
     studentName,
@@ -99,6 +104,9 @@ export function InterviewPage() {
   } = useAppContext();
 
   const [connection, setConnection] = useState<ConnectionState>("connecting");
+  // Specific message for non-connectivity init failures (403/401/5xx). When set
+  // with connection === "error", it is shown instead of the "offline" banner.
+  const [initError, setInitError] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [banner, setBanner] = useState<string | null>(null);
   const [showEndModal, setShowEndModal] = useState(false);
@@ -403,7 +411,10 @@ export function InterviewPage() {
         if (cancelled) return;
         console.error("Backend session could not be created:", err);
         setActiveInterview(null);
-        setConnection("offline");
+        // Only genuine network failures are "offline"; 403/401/5xx are not.
+        const result = classifyInterviewInitError(err);
+        setInitError(result.offline ? null : result.message);
+        setConnection(result.connection);
       }
     }
 
@@ -545,7 +556,7 @@ export function InterviewPage() {
     return (
       <div className="page">
         <p>We couldn't find that patient case.</p>
-        <button type="button" className="btn btn-primary" onClick={() => navigate("/cases")}>
+        <button type="button" className="btn btn-primary" onClick={() => navigate(studentHome)}>
           Back to Case Selection
         </button>
       </div>
@@ -577,6 +588,24 @@ export function InterviewPage() {
             onClick={() => setConnectAttempt((n) => n + 1)}
           >
             Retry connection
+          </button>
+        </div>
+      )}
+
+      {connection === "error" && initError && (
+        <div className={`card ${styles.offlineBanner}`} role="alert">
+          <div>
+            <strong>{initError}</strong>
+          </div>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => {
+              setInitError(null);
+              setConnectAttempt((n) => n + 1);
+            }}
+          >
+            Retry
           </button>
         </div>
       )}

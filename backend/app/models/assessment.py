@@ -1,10 +1,16 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
+
+# B2/B7: at most ONE active (queued/running) assessment per session. This partial
+# unique index is the atomic guard against the read-then-create double-submit
+# race - a second concurrent enqueue hits an IntegrityError and returns the
+# existing run instead of spending twice. Supported by both SQLite and Postgres.
+_ACTIVE_STATUSES_SQL = "status IN ('PENDING','PROCESSING','VERIFYING')"
 
 
 def _uuid() -> str:
@@ -17,6 +23,14 @@ def _now() -> datetime:
 
 class AssessmentRun(Base):
     __tablename__ = "assessment_runs"
+    __table_args__ = (
+        Index("ix_assessment_runs_status", "status"),
+        Index(
+            "uq_active_assessment_per_session", "session_id", unique=True,
+            sqlite_where=text(_ACTIVE_STATUSES_SQL),
+            postgresql_where=text(_ACTIVE_STATUSES_SQL),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     session_id: Mapped[str] = mapped_column(

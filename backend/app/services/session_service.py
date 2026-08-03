@@ -1,15 +1,16 @@
 from sqlalchemy.orm import Session
 
+from app.core.constants import ROLE_STUDENT
 from app.core.exceptions import (
+    ForbiddenError,
     SessionNotFoundError,
     TranscriptEmptyError,
     TranscriptLockedError,
 )
 from app.core.logging import get_logger
-from app.models import InterviewSession
+from app.models import InterviewSession, User
 from app.patient_engine.case_loader import load_case
 from app.repositories.session_repository import SessionRepository
-from app.repositories.student_repository import StudentRepository
 from app.repositories.transcript_repository import TranscriptRepository
 from app.schemas.interview_schema import MessageOut, TurnCreateRequest, TurnOut
 from app.schemas.session_schema import SessionCreateRequest, SessionResponse
@@ -57,11 +58,19 @@ def _turn_out(turn) -> TurnOut:
     )
 
 
-def create_session(db: Session, payload: SessionCreateRequest) -> SessionResponse:
+def create_session(
+    db: Session, payload: SessionCreateRequest, current_user: User
+) -> SessionResponse:
     import json as _json
 
     case = load_case(payload.case_id)  # raises CaseNotFoundError for unknown ids
-    student = StudentRepository(db).get_or_create(payload.student_name.strip(), payload.student_id.strip())
+    # A3: the session owner is ALWAYS the authenticated student's linked profile.
+    # Any student_name / student_id in the request body is display-only and is
+    # never used to decide ownership, so a caller cannot create a session under
+    # another student's identity.
+    if not current_user.student_id or current_user.student is None:
+        raise ForbiddenError("This account is not linked to a student profile.")
+    student = current_user.student
     capabilities = ["standard_interview"]
     if case.case_category == "referral":
         capabilities.append("advanced_referral")  # future referral assessment pipeline
@@ -81,6 +90,19 @@ def create_session(db: Session, payload: SessionCreateRequest) -> SessionRespons
     except Exception:  # snapshot is best-effort; never block starting an interview
         logger.warning("config_snapshot_failed case_id=%s", payload.case_id)
     db.commit()
+    # B2: register the session in the live-activity registry (in-memory only).
+    try:
+        from app.core.telemetry import get_telemetry
+
+        get_telemetry().live.start_session(
+            session_id=session.id,
+            student_name=student.name,
+            student_number=student.student_number,
+            case_id=session.case_id,
+            case_name=getattr(case, "display_name", session.case_id) or session.case_id,
+        )
+    except Exception:  # telemetry must never block starting an interview
+        pass
     return _to_response(db, session)
 
 
@@ -112,6 +134,12 @@ def complete_session(db: Session, session_id: str) -> SessionResponse:
 
     repo.complete_and_lock(session)
     db.commit()
+    try:
+        from app.core.telemetry import get_telemetry
+
+        get_telemetry().live.complete_session(session_id)
+    except Exception:
+        pass
     logger.info(
         "session_completed session_id=%s backend_turn_count=%d transcript_locked=True",
         session_id, student_turns + patient_turns,
@@ -126,13 +154,24 @@ def list_turns(db: Session, session_id: str) -> list[TurnOut]:
     return [_turn_out(t) for t in TranscriptRepository(db).list_turns(session_id)]
 
 
-def append_turn(db: Session, session_id: str, payload: TurnCreateRequest) -> TurnOut:
-    """Idempotent single-turn append (canonical transcript endpoint).
+def append_student_turn(db: Session, session_id: str, payload: TurnCreateRequest) -> TurnOut:
+    """Idempotent single-turn append for STUDENT-authored turns (recovery/retry).
 
-    The normal chat flow persists both turns atomically inside the exchange
-    endpoint; this endpoint exists for recovery/retry paths and future tooling.
+    A4 - transcript write integrity:
+    - The speaker is enforced server-side as STUDENT. A client that claims
+      speaker="patient" is rejected: a student must never be able to fabricate a
+      patient reply. Patient turns are persisted only by the trusted generation
+      path (interview_service / interview_stream_service).
+    - Only student input sources (typed/speech) are accepted here; the
+      openai/system sources are reserved for the trusted server path.
+    - Writing to a completed/locked session is rejected.
     Repeating the same session_id + client_turn_id returns the existing turn.
     """
+    if payload.speaker != ROLE_STUDENT:
+        raise ForbiddenError("Only student turns can be submitted here; patient replies are server-generated.")
+    if payload.source not in ("typed", "speech"):
+        raise ForbiddenError("Unsupported turn source for a student-authored turn.")
+
     session = SessionRepository(db).get(session_id)
     if session is None:
         raise SessionNotFoundError(session_id)
@@ -143,7 +182,7 @@ def append_turn(db: Session, session_id: str, payload: TurnCreateRequest) -> Tur
     if existing is None:
         existing = transcript.append_turn(
             session_id,
-            payload.speaker,
+            ROLE_STUDENT,  # server-controlled identity, never trusts the body
             payload.content.strip(),
             client_turn_id=payload.client_turn_id,
             source=payload.source,
@@ -151,6 +190,6 @@ def append_turn(db: Session, session_id: str, payload: TurnCreateRequest) -> Tur
         db.commit()
         logger.info(
             "turn_saved session_id=%s client_turn_id=%s speaker=%s turn_index=%d",
-            session_id, payload.client_turn_id, payload.speaker, existing.turn_index,
+            session_id, payload.client_turn_id, ROLE_STUDENT, existing.turn_index,
         )
     return _turn_out(existing)

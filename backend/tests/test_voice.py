@@ -121,6 +121,36 @@ def _synth_payload(**overrides) -> dict:
     return payload
 
 
+def _carly_session(client, case_id="carly") -> str:
+    """Create an interview session owned by the authenticated default student.
+    Voice synthesis (A5) requires a session the caller owns."""
+    resp = client.post(
+        "/api/sessions", json={"studentName": "S", "studentId": "1", "caseId": case_id}
+    )
+    assert resp.status_code in (200, 201), resp.text
+    return resp.json()["sessionId"]
+
+
+def seed_owned_session(db, case_id="carly"):
+    """Direct-DB helper for tests that call the endpoint function directly:
+    returns (student_user, session_id) with the session owned by that student."""
+    from app.core.security import hash_password
+    from app.models import InterviewSession, Student, User
+
+    student = Student(name="Voice Student", student_number="V1", email="v1@school.edu")
+    db.add(student)
+    db.flush()
+    user = User(
+        email="v1@school.edu", password_hash=hash_password("x"), full_name="Voice Student",
+        role="student", student_id=student.id, is_active=True,
+    )
+    db.add(user)
+    session = InterviewSession(student_id=student.id, case_id=case_id, case_category="standard")
+    db.add(session)
+    db.commit()
+    return user, session.id
+
+
 # ------------------------------------------------- speech-style mapper
 def test_invalid_speech_labels_fall_back_to_defaults():
     normalized = normalize_speech_labels(
@@ -270,7 +300,8 @@ def test_synthesize_success_streams_audio_with_pause_header(engine, monkeypatch)
     give_carly_a_voice_id(monkeypatch)
     fake = FakeElevenLabsClient()
     with make_voice_client(engine, fake, monkeypatch) as client:
-        response = client.post("/api/voice/synthesize", json=_synth_payload())
+        sid = _carly_session(client)
+        response = client.post("/api/voice/synthesize", json=_synth_payload(sessionId=sid))
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("audio/mpeg")
     assert response.content == b"ID3fakemp3audio-bytes"
@@ -282,10 +313,12 @@ def test_synthesize_success_streams_audio_with_pause_header(engine, monkeypatch)
 def test_synthesize_invalid_speech_labels_use_safe_defaults(engine, monkeypatch):
     give_carly_a_voice_id(monkeypatch)
     fake = FakeElevenLabsClient()
-    payload = _synth_payload(
-        speechStyle={"emotion": "rage", "pace": "hyper", "energy": "x", "hesitation": "??", "pauseBeforeMs": 123456}
-    )
     with make_voice_client(engine, fake, monkeypatch) as client:
+        sid = _carly_session(client)
+        payload = _synth_payload(
+            sessionId=sid,
+            speechStyle={"emotion": "rage", "pace": "hyper", "energy": "x", "hesitation": "??", "pauseBeforeMs": 123456},
+        )
         response = client.post("/api/voice/synthesize", json=payload)
     assert response.status_code == 200
     # Invalid labels -> profile baseline (clamped); pause clamped to 1500.
@@ -298,7 +331,8 @@ def test_synthesize_invalid_speech_labels_use_safe_defaults(engine, monkeypatch)
 def test_synthesize_upstream_failure_is_safe_502(engine, monkeypatch):
     give_carly_a_voice_id(monkeypatch)
     with make_voice_client(engine, FakeElevenLabsClient(fail=True), monkeypatch) as client:
-        response = client.post("/api/voice/synthesize", json=_synth_payload())
+        sid = _carly_session(client)
+        response = client.post("/api/voice/synthesize", json=_synth_payload(sessionId=sid))
     assert response.status_code == 502
     body = response.json()
     assert body["error"]["code"] == "voice_synthesis_failed"
@@ -310,9 +344,10 @@ def test_synthesize_upstream_failure_is_safe_502(engine, monkeypatch):
 def test_synthesize_frontend_cannot_override_voice_id(engine, monkeypatch):
     give_carly_a_voice_id(monkeypatch)
     fake = FakeElevenLabsClient()
-    payload = _synth_payload()
-    payload["voiceId"] = "attacker-chosen-voice"  # unknown field: ignored
     with make_voice_client(engine, fake, monkeypatch) as client:
+        sid = _carly_session(client)
+        payload = _synth_payload(sessionId=sid)
+        payload["voiceId"] = "attacker-chosen-voice"  # unknown field: ignored
         response = client.post("/api/voice/synthesize", json=payload)
     assert response.status_code == 200
     assert fake.calls[0]["voice_id"] == "real-voice-id"
@@ -358,8 +393,9 @@ def test_synthesize_caches_completed_audio(engine, monkeypatch):
     give_carly_a_voice_id(monkeypatch)
     fake = FakeElevenLabsClient()
     with make_voice_client(engine, fake, monkeypatch) as client:
-        first = client.post("/api/voice/synthesize", json=_synth_payload())
-        second = client.post("/api/voice/synthesize", json=_synth_payload())
+        sid = _carly_session(client)
+        first = client.post("/api/voice/synthesize", json=_synth_payload(sessionId=sid))
+        second = client.post("/api/voice/synthesize", json=_synth_payload(sessionId=sid))
     assert first.status_code == second.status_code == 200
     assert first.content == second.content
     assert len(fake.calls) == 1  # second response came from the cache
@@ -516,8 +552,10 @@ def test_endpoint_streams_without_full_buffering_and_never_caches_partials(
     monkeypatch.setattr(settings, "elevenlabs_enabled", True)
 
     fake = LazyFakeElevenLabs()
+    user, sid = seed_owned_session(db_session)
     response = synthesize(
-        VoiceSynthesizeRequest(case_id="carly", text="hello there"), db=db_session, client=fake
+        VoiceSynthesizeRequest(case_id="carly", text="hello there", session_id=sid),
+        current_user=user, db=db_session, client=fake,
     )
     # Exactly one chunk was read eagerly (upstream error detection) - the
     # response did NOT buffer the full stream before starting.
@@ -554,8 +592,10 @@ def test_endpoint_caches_only_complete_streams(engine, db_session, monkeypatch):
     monkeypatch.setattr(settings, "elevenlabs_enabled", True)
 
     fake = LazyFakeElevenLabs()
+    user, sid = seed_owned_session(db_session)
     response = synthesize(
-        VoiceSynthesizeRequest(case_id="carly", text="hello there"), db=db_session, client=fake
+        VoiceSynthesizeRequest(case_id="carly", text="hello there", session_id=sid),
+        current_user=user, db=db_session, client=fake,
     )
 
     async def consume_all():

@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { Assessment, AssessmentTurn, ReferralEvidence } from "../../types/assessment";
 import type { PatientCase } from "../../types/case";
+import { useAuth } from "../../state/AuthContext";
+import { caseHubPath } from "../../services/authRouting";
 import styles from "./ReferralAssessmentView.module.css";
 
 interface Props {
@@ -22,6 +24,7 @@ const levelClass = (l: string) => {
 
 export function ReferralAssessmentView({ assessment, patientCase, turns }: Props) {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const referral = assessment.referral;
   const [selected, setSelected] = useState<ReferralEvidence | null>(null);
   const [showTranscript, setShowTranscript] = useState(false);
@@ -41,7 +44,7 @@ export function ReferralAssessmentView({ assessment, patientCase, turns }: Props
       <header className={styles.progress}>
         <span>✓ Case Introduction</span><i /><span>✓ Interview</span><i />
         <span className={styles.activeStep}>3 Assessment</span><i /><span>Complete</span>
-        <button onClick={() => navigate("/cases")}>← Back to Cases</button>
+        <button onClick={() => navigate(caseHubPath(user?.role))}>← Back to Cases</button>
       </header>
 
       <section className={styles.hero}>

@@ -19,7 +19,7 @@
  * exactly once. Late events from a cancelled turn are absorbed by the pure
  * queue reducer (CANCEL is terminal).
  */
-import { API_BASE_URL, fetchVoiceStatus } from "./api";
+import { API_BASE_URL, fetchVoiceStatus, withAuthHeaders } from "./api";
 import {
   cancelSpeech as cancelBrowserSpeech,
   isTtsSupported as isBrowserTtsSupported,
@@ -223,12 +223,15 @@ export function startStreamingExchange(options: StartStreamingOptions): Streamin
           if (next.index === 0) devTiming("first sentence -> TTS request start", t0, turn);
           const response = await fetch(`${API_BASE_URL}/api/voice/synthesize`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: withAuthHeaders({ "Content-Type": "application/json" }),
             signal: controller.signal,
             body: JSON.stringify({
               caseId: options.caseId,
               text: next.text,
-              sessionId: "",
+              // Live sentence streaming: the turn is not committed yet, so there
+              // is no turnId. The backend authorizes by session ownership and
+              // caps the length (see voice.py A5 mode 2).
+              sessionId: options.sessionId,
               turnId: "",
               speechStyle: earlySpeech,
               correlationId: `${turn}:s${next.index}`,
@@ -389,7 +392,7 @@ export function startStreamingExchange(options: StartStreamingOptions): Streamin
         `${API_BASE_URL}/api/interviews/${encodeURIComponent(options.sessionId)}/messages/stream`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: withAuthHeaders({ "Content-Type": "application/json" }),
           signal: sseAbort.signal,
           body: JSON.stringify({
             text: options.text,

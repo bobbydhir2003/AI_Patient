@@ -1,13 +1,18 @@
 import importlib
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import (
+    access,
     admin,
+    admin_load_tests,
     admin_runtime,
     admin_system,
+    admin_traffic,
+    admin_users,
     assessments,
     auth,
     cases,
@@ -24,11 +29,59 @@ from app.core.logging import configure_logging
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI):
+    settings = get_settings()
+    workers_on = settings.background_workers_enabled
+    # Startup: begin the live-chart sampler and the assessment queue worker.
+    if workers_on:
+        from app.core.assessment_worker import get_assessment_worker
+        from app.core.telemetry import get_telemetry
+
+        get_telemetry().start_sampler(
+            settings.telemetry_sample_interval_seconds, settings.active_user_window_seconds
+        )
+        if settings.assessment_queue_enabled:
+            get_assessment_worker().start()
     yield
-    # Shutdown: release the shared keep-alive connection pool to ElevenLabs.
+    # Shutdown: stop background workers and release the ElevenLabs keep-alive pool.
     from app.voice.elevenlabs_client import close_http_client
 
-    close_http_client()
+    try:
+        if workers_on:
+            from app.core.assessment_worker import get_assessment_worker
+            from app.core.telemetry import get_telemetry
+
+            get_assessment_worker().stop()
+            get_telemetry().stop_sampler()
+    finally:
+        close_http_client()
+
+
+def _install_telemetry_middleware(_app: FastAPI) -> None:
+    from app.core.security import decode_access_token
+    from app.core.telemetry import get_telemetry
+
+    @_app.middleware("http")
+    async def _telemetry_mw(request: Request, call_next):
+        tele = get_telemetry()
+        # Attribute activity to the authenticated user (best-effort, no DB hit).
+        auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+        if auth_header.lower().startswith("bearer "):
+            try:
+                sub = decode_access_token(auth_header.split(" ", 1)[1].strip()).get("sub")
+                if sub:
+                    tele.live.touch_user(sub)
+            except Exception:
+                pass
+        start = time.monotonic()
+        tele.http_in_flight.inc()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            tele.http_in_flight.dec()
+            tele.record_http(status_code, (time.monotonic() - start) * 1000.0)
 
 
 def create_app() -> FastAPI:
@@ -45,6 +98,7 @@ def create_app() -> FastAPI:
         # Lets the browser read the TTS pause hint on streamed audio responses.
         expose_headers=["X-Pause-Before-Ms"],
     )
+    _install_telemetry_middleware(_app)
     register_exception_handlers(_app)
 
     _app.include_router(health.router, prefix="/api")
@@ -54,6 +108,11 @@ def create_app() -> FastAPI:
     _app.include_router(cases.router, prefix="/api")
     _app.include_router(admin_system.router, prefix="/api")
     _app.include_router(admin_runtime.router, prefix="/api")
+    _app.include_router(admin_traffic.router, prefix="/api")
+    _app.include_router(admin_load_tests.router, prefix="/api")
+    _app.include_router(admin_users.router, prefix="/api")
+    _app.include_router(access.public_router, prefix="/api")
+    _app.include_router(access.admin_router, prefix="/api")
     _app.include_router(sessions.router, prefix="/api")
     _app.include_router(interviews.router, prefix="/api")
     _app.include_router(assessments.router, prefix="/api")

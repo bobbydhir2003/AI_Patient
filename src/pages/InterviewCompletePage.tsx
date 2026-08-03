@@ -1,5 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { ProgressSteps } from "../components/layout/ProgressSteps";
+import { useAuth } from "../state/AuthContext";
+import { caseHubPath } from "../services/authRouting";
 import styles from "./InterviewCompletePage.module.css";
 
 const PROGRESS_STEPS = ["Case Introduction", "Interview", "Complete"];
@@ -10,6 +12,7 @@ const PROGRESS_STEPS = ["Case Introduction", "Interview", "Complete"];
  */
 export function InterviewCompletePage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   return (
     <div className="page">
@@ -25,7 +28,7 @@ export function InterviewCompletePage() {
             <button
               type="button"
               className="btn btn-secondary"
-              onClick={() => navigate("/cases")}
+              onClick={() => navigate(caseHubPath(user?.role))}
             >
               Try Another Case
             </button>

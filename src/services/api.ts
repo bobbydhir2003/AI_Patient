@@ -10,6 +10,34 @@ import type { PatientSpeechStyle } from "../types/interview";
 export const API_BASE_URL: string =
   (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://localhost:8000";
 
+/**
+ * localStorage key under which AuthContext persists the bearer token. Kept in
+ * sync with src/state/AuthContext.tsx (TOKEN_KEY).
+ */
+export const AUTH_TOKEN_STORAGE_KEY = "ptai-auth-token";
+
+/**
+ * Current bearer token (or null). The student-facing session, interview,
+ * assessment and voice endpoints now REQUIRE authentication, so every request
+ * that goes through this module attaches the token when present. Public
+ * endpoints (cases, health) simply ignore it.
+ */
+export function getStoredAuthToken(): string | null {
+  try {
+    return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** Build headers with the bearer token attached when available. */
+export function withAuthHeaders(
+  base: Record<string, string> = {},
+): Record<string, string> {
+  const token = getStoredAuthToken();
+  return token ? { ...base, Authorization: `Bearer ${token}` } : { ...base };
+}
+
 export interface ApiMessage {
   id: string;
   sender: "student" | "patient";
@@ -77,8 +105,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
     response = await fetch(url, {
-      headers: { "Content-Type": "application/json" },
       ...init,
+      // Attach the bearer token (auth-required endpoints) while preserving any
+      // caller-supplied headers.
+      headers: withAuthHeaders({
+        "Content-Type": "application/json",
+        ...((init?.headers as Record<string, string>) ?? {}),
+      }),
     });
   } catch (networkError) {
     // fetch() itself rejected (backend unreachable, DNS, CORS preflight blocked).
