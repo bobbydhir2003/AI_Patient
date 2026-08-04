@@ -56,11 +56,14 @@ def main() -> int:
         if existing is not None:
             existing.role = USER_ROLE_ADMIN
             existing.is_active = True
+            # This is the seeded/default SYSTEM admin: mark it so it lands directly
+            # on the Admin Dashboard (unlike a user later promoted to admin).
+            existing.is_system_admin = True
             existing.password_hash = hash_password(password)
             if full_name:
                 existing.full_name = full_name
             db.commit()
-            print(f"Updated existing account '{email}' -> admin (password reset).")
+            print(f"Updated existing account '{email}' -> system admin (password reset).")
         else:
             user = repo.create(
                 email=email,
@@ -70,8 +73,10 @@ def main() -> int:
                 student_id=None,
                 is_active=True,
             )
+            # Seeded/default system admin -> direct Admin Dashboard landing.
+            user.is_system_admin = True
             db.commit()
-            print(f"Created admin account '{email}' (id={user.id}).")
+            print(f"Created system admin account '{email}' (id={user.id}).")
         return 0
     finally:
         db.close()

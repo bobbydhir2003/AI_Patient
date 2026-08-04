@@ -67,6 +67,14 @@ def _runtime_override_profile(case_id: str, speaker_id: str) -> tuple[VoiceProfi
         return None
 
 
+def case_file_speaker(case) -> str:
+    """Which speaker the case-file ``voice_profile`` represents. For a
+    caregiver-primary case (e.g. Camden, whose 4-year-old never speaks) the sole
+    spoken voice is the caregiver (his mother), so the case-file voice_profile is
+    the mother's voice. Every other case's case-file voice is the patient's."""
+    return "caregiver" if getattr(case, "caregiver_primary_only", False) else "patient"
+
+
 def load_voice_profile(case_id: str, speaker_id: str = "patient") -> ResolvedVoice:
     """Resolve the voice configuration for `case_id` / `speaker_id`.
 
@@ -82,6 +90,21 @@ def load_voice_profile(case_id: str, speaker_id: str = "patient") -> ResolvedVoi
     if override is not None and settings.elevenlabs_enabled and settings.elevenlabs_api_key:
         prof, model_id = override
         return ResolvedVoice(available=True, reason="", profile=prof, model_id=model_id)
+
+    # The case-file voice_profile represents exactly ONE speaker: the caregiver
+    # for a caregiver-primary case (Camden's mother), otherwise the patient. Any
+    # OTHER speaker gets a voice only from a runtime override (handled above);
+    # with none we report unavailable so the frontend falls back to a browser
+    # voice rather than borrowing the wrong speaker's ElevenLabs voice. This is
+    # what guarantees Camden's child ("patient") voice can never be synthesized.
+    cf_speaker = case_file_speaker(case)
+    if speaker_id not in ("", cf_speaker):
+        return ResolvedVoice(
+            available=False,
+            reason="no_runtime_voice_for_speaker",
+            profile=VoiceProfile(),
+            model_id=settings.elevenlabs_default_model,
+        )
 
     profile = case.voice_profile or VoiceProfile()
 

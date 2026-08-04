@@ -167,6 +167,19 @@ export function AdminTopbar() {
       <div className="pt-topbar-brand">
         <img className="pt-topbar-logo" src="/branding/unmc-logo.png" alt="UNMC" />
         <span className="pt-topbar-title">PT AI Patient Simulator</span>
+        {/* Prominent bridge back to the simulator (for admins/professors who
+            opened Admin Management from it, and system admins who want to try it). */}
+        <button
+          type="button"
+          className="pt-topbar-back"
+          onClick={() => navigate("/student/dashboard")}
+          title="Back to the Patient Simulator"
+          aria-label="Back to Patient Simulator"
+        >
+          <span className="pt-topbar-back-arrow" aria-hidden="true">←</span>
+          <span className="pt-topbar-back-full">Back to Patient Simulator</span>
+          <span className="pt-topbar-back-short" aria-hidden="true">Simulator</span>
+        </button>
       </div>
 
       <div className="pt-topbar-search" role="search">
@@ -322,7 +335,7 @@ export function AdminTopbar() {
           {menuOpen && (
             <div className="pt-user-menu" role="menu">
               <button role="menuitem" onClick={() => go("/admin/profile")}>Profile</button>
-              <button role="menuitem" onClick={() => { logout(); navigate("/login"); }}>
+              <button role="menuitem" onClick={logout}>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
                   <IconLogout width={15} height={15} /> Logout
                 </span>

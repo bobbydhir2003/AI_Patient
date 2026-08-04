@@ -17,6 +17,32 @@
 .welcome { margin: 0; font-size: clamp(1.8rem, 3vw, 2.4rem); font-weight: 800; color: #fff; }
 .welcomeSub { margin: 6px 0 0; color: var(--color-text-secondary); }
 
+/* right cluster: Admin Management control (admins only) + profile */
+.headRight { display: flex; align-items: center; gap: 14px; }
+
+/* Compact, subtle Admin Management control: dark fill + red accent, gear icon.
+   Not a popup/dropdown/sidebar — a plain button that opens the Admin Dashboard. */
+.adminMgmt {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 38px; padding: 0 14px;
+  border-radius: 10px; cursor: pointer;
+  font-family: inherit; font-size: 0.85rem; font-weight: 600; line-height: 1;
+  color: #ff6b70;
+  background: rgba(217, 39, 46, 0.10);
+  border: 1px solid rgba(217, 39, 46, 0.55);
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.adminMgmt:hover { background: rgba(217, 39, 46, 0.20); border-color: rgba(217, 39, 46, 0.85); color: #ff8489; }
+.adminMgmt:focus-visible { outline: 2px solid #ff6b70; outline-offset: 2px; }
+.adminMgmt svg { flex: 0 0 auto; }
+.adminMgmtShort { display: none; }
+/* On narrow screens shorten the label to just "Admin". */
+@media (max-width: 560px) {
+  .adminMgmtFull { display: none; }
+  .adminMgmtShort { display: inline; }
+  .adminMgmt { padding: 0 10px; }
+}
+
 .account { position: relative; }
 .accountSummary {
   display: flex; align-items: center; gap: 10px; cursor: pointer;

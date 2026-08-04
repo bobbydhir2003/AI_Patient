@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   apiLogin,
   apiLogout,
@@ -47,6 +48,7 @@ function readToken(): string | null {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const navigate = useNavigate();
   const [token, setToken] = useState<string | null>(readToken);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState<boolean>(!!readToken());
@@ -66,7 +68,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     persistToken(null);
     setUser(null);
     if (current) apiLogout(current).catch(() => undefined);
-  }, [token, persistToken]);
+    // Single, consistent logout destination for EVERY user type: the main
+    // PT AI Patient Simulator home/login page ("/"), never the admin-only
+    // "/login" sign-in page. Navigating here also unmounts any ProtectedRoute
+    // so its unauthenticated -> /login redirect never fires on logout.
+    navigate("/", { replace: true });
+  }, [token, persistToken, navigate]);
 
   // Validate an existing token on first load; drop it if invalid/expired.
   useEffect(() => {

@@ -1,11 +1,9 @@
-import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../state/AuthContext";
 import { ActiveBadge, LoadingState } from "../../portal/ui";
 import { fmtDate, fmtDateTime } from "../../portal/format";
 
 export function AdminProfilePage() {
   const { user, logout } = useAuth();
-  const navigate = useNavigate();
 
   if (!user) return <LoadingState label="Loading profile…" />;
 
@@ -38,10 +36,7 @@ export function AdminProfilePage() {
         <div className="pt-row" style={{ marginTop: 20 }}>
           <button
             className="pt-btn pt-btn-danger pt-btn-sm"
-            onClick={() => {
-              logout();
-              navigate("/login");
-            }}
+            onClick={logout}
           >
             Log out
           </button>

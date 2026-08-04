@@ -31,7 +31,7 @@ from app.services import system_service
 from app.voice.audio_cache import get_audio_cache, make_cache_key
 from app.voice.elevenlabs_client import ElevenLabsClient, get_elevenlabs_client, media_type_for
 from app.voice.speech_style_mapper import map_speech_style
-from app.voice.voice_profile_loader import load_voice_profile
+from app.voice.voice_profile_loader import case_file_speaker, load_voice_profile
 
 logger = get_logger(__name__)
 
@@ -64,7 +64,13 @@ def preview_voice(
 
     Uses only a predefined sample (never free-form text). Returns real audio on
     success or an honest error (voice not available / not configured)."""
-    resolved = load_voice_profile(case_id)  # 404 for unknown case ids
+    # Preview the case's sole spoken voice: the caregiver (mother) for a
+    # caregiver-primary case like Camden, else the patient.
+    from app.patient_engine import case_loader
+
+    resolved = load_voice_profile(
+        case_id, case_file_speaker(case_loader.load_case(case_id))
+    )  # 404 for unknown case ids
     sample = VOICE_PREVIEW_SAMPLES.get(case_id)
     if not sample:
         raise ValidationFailedError("No preview sample is defined for this case.")

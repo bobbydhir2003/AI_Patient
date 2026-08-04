@@ -39,8 +39,13 @@ _voice_rate_limit = rate_limit("voice", lambda s: s.voice_rate_limit)
 
 @router.get("/status/{case_id}", response_model=VoiceStatusOut)
 def voice_status(case_id: str) -> VoiceStatusOut:
-    """Student-safe availability check (no voice IDs, no key material)."""
-    resolved = load_voice_profile(case_id)  # 404 for unknown cases
+    """Student-safe availability check (no voice IDs, no key material). For a
+    caregiver-primary case (Camden) the sole spoken voice is the caregiver, so
+    availability reflects the mother's voice, never the unused child voice."""
+    from app.patient_engine import case_loader
+    from app.voice.voice_profile_loader import case_file_speaker
+
+    resolved = load_voice_profile(case_id, case_file_speaker(case_loader.load_case(case_id)))  # 404 for unknown cases
     return VoiceStatusOut(
         case_id=case_id,
         available=resolved.available,
@@ -123,8 +128,18 @@ def synthesize(
     # voice speaks. Camden -> child ("patient") voice; the mother -> "caregiver"
     # voice. A missing caregiver voice reports unavailable so the frontend falls
     # back to a browser adult voice (never Camden's child voice).
+    #
+    # Caregiver-primary cases (Camden): EVERY patient turn is the caregiver, so
+    # always use the caregiver voice - for committed playback AND for the live
+    # streamed sentences that are spoken before the turn is committed (no
+    # turn_id yet). This guarantees the child's voice is never used.
+    from app.patient_engine import case_loader
+
     speaker_key = "patient"
-    if payload.session_id and payload.turn_id:
+    case = case_loader.load_case(payload.case_id)  # 404 for unknown cases
+    if getattr(case, "caregiver_primary_only", False):
+        speaker_key = "caregiver"
+    elif payload.session_id and payload.turn_id:
         turn = db.get(ConversationTurn, payload.turn_id)
         if turn is not None and getattr(turn, "speaker_id", "patient") == "mother":
             speaker_key = "caregiver"

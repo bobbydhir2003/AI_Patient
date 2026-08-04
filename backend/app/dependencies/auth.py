@@ -9,7 +9,12 @@ import jwt
 from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
-from app.core.constants import ADMIN_ROLES, USER_ROLE_STUDENT, USER_ROLE_SUPER_ADMIN
+from app.core.constants import (
+    ADMIN_ROLES,
+    USER_ROLE_STUDENT,
+    USER_ROLE_SUPER_ADMIN,
+    USER_ROLES,
+)
 from app.core.exceptions import (
     AssessmentNotFoundError,
     ForbiddenError,
@@ -86,6 +91,19 @@ def require_super_admin(current_user: User = Depends(get_current_user)) -> User:
 def require_student(current_user: User = Depends(get_current_user)) -> User:
     if current_user.role != USER_ROLE_STUDENT:
         raise ForbiddenError("This resource is only available to student accounts.")
+    return current_user
+
+
+def require_simulator_access(current_user: User = Depends(get_current_user)) -> User:
+    """Gate for the patient-simulator flow (create session, run interview, view
+    own sessions/assessments). Any authenticated, active account may use the
+    simulator: students for coursework, and admins/super-admins for testing the
+    full workflow. This is deliberately broader than `require_student` so that a
+    promoted admin/professor is no longer blocked from running patient cases,
+    while remaining strictly authenticated (never public). Admin-created sessions
+    are separately flagged as practice so they do not affect student analytics."""
+    if current_user.role not in USER_ROLES:
+        raise ForbiddenError("Simulator access is not permitted for this account.")
     return current_user
 
 

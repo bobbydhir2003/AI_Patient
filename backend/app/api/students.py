@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.assessment import assessment_service
 from app.core.exceptions import AssessmentNotFoundError
 from app.database.connection import get_db
-from app.dependencies.auth import require_session_access, require_student
+from app.dependencies.auth import require_session_access, require_simulator_access
 from app.models import InterviewSession, User
 from app.schemas.admin import SessionSummaryOut, TranscriptMessageOut
 from app.schemas.assessment_schema import AssessmentOut
@@ -22,13 +22,13 @@ router = APIRouter(prefix="/students", tags=["students"])
 
 
 @router.get("/me", response_model=UserOut)
-def my_profile(current_user: User = Depends(require_student)) -> UserOut:
+def my_profile(current_user: User = Depends(require_simulator_access)) -> UserOut:
     return UserOut.model_validate(current_user)
 
 
 @router.get("/me/sessions", response_model=list[SessionSummaryOut])
 def my_sessions(
-    current_user: User = Depends(require_student),
+    current_user: User = Depends(require_simulator_access),
     db: Session = Depends(get_db),
 ) -> list[SessionSummaryOut]:
     if not current_user.student_id:

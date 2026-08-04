@@ -69,20 +69,19 @@ def test_service_status_is_configured_not_connected(client, engine):
 
 
 # ------------------------------------------------------------------ voices
-def test_voices_include_mother_as_not_configured_and_mask_ids(client, engine):
+def test_voices_include_camden_mother_only_and_mask_ids(client, engine):
     tok = admin_token(client, engine)
     d = client.get("/api/admin/system/overview", headers=auth_header(tok)).json()
     voices = d["voices"]
-    labels = [(v["speakerLabel"], v["status"]) for v in voices]
+    labels = [v["speakerLabel"] for v in voices]
 
-    # Camden has two speakers; the mother has no distinct voice -> not configured.
-    assert ("Mother", "not_configured") in labels
-    mother = next(v for v in voices if v["speakerLabel"] == "Mother")
-    assert mother["maskedVoiceId"] is None
-
-    camden = next(v for v in voices if v["speakerLabel"] == "Camden (Patient)")
-    assert camden["status"] == "active"
-    assert camden["maskedVoiceId"] and "••••" in camden["maskedVoiceId"]
+    # Camden exposes a SINGLE voice speaker: his mother (sourced from the case
+    # file). There is no separate Camden child ("patient") voice entry.
+    assert "Camden's Mother" in labels
+    assert "Camden (Patient)" not in labels
+    mother = next(v for v in voices if v["speakerLabel"] == "Camden's Mother")
+    assert mother["status"] == "active"
+    assert mother["maskedVoiceId"] and "••••" in mother["maskedVoiceId"]
 
 
 def test_full_voice_ids_never_leak(client, engine):
@@ -165,8 +164,8 @@ def test_voice_preview_returns_real_audio(engine, monkeypatch):
         r = c.post("/api/admin/system/voices/camden/preview", headers=auth_header(tok))
         assert r.status_code == 200
         assert r.content  # real audio bytes were streamed
-        # A fixed sample sentence (never free-form) was synthesized.
-        assert fake.calls and fake.calls[0]["text"] == "Hi, my name is Camden."
+        # Camden is voiced by his mother, so the preview auditions HER fixed sample.
+        assert fake.calls and fake.calls[0]["text"] == "Hi, I'm Camden's mother. I can help answer your questions."
 
         # Unknown case -> 404, not a fabricated success.
         assert c.post("/api/admin/system/voices/nobody/preview", headers=auth_header(tok)).status_code == 404

@@ -142,9 +142,21 @@ def test_student_cannot_manage_users(engine):
         assert c.post("/api/admin/users/x/role", json={"role": "admin"}, headers=h).status_code == 403
 
 
-def test_require_student_still_enforced_for_admin(engine):
-    """Admins still cannot create student interview sessions (RBAC preserved)."""
+def test_admin_can_create_practice_session_excluded_from_analytics(engine):
+    """Admins/professors CAN run the simulator (require_simulator_access), but
+    their sessions are practice ("admin_test") and never counted in student
+    analytics. Unauthenticated callers are still rejected."""
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
         ah = _admin_headers(c, engine, email="rbac_admin@school.edu")
+        # Admin can now create a simulator session (practice profile provisioned).
         r = c.post("/api/sessions", json={"studentName": "x", "caseId": "camden"}, headers=ah)
-        assert r.status_code == 403 and r.json()["error"]["code"] == "forbidden"
+        assert r.status_code == 201
+        # ...but it does NOT pollute the academic dashboard (practice excluded).
+        dash = c.get("/api/admin/dashboard", headers=ah).json()
+        assert dash["totalSessions"] == 0
+        assert dash["totalStudents"] == 0
+        # ...and the admin session list is empty too.
+        sessions = c.get("/api/admin/sessions", headers=ah).json()
+        assert sessions["total"] == 0
+        # Unauthenticated simulator access is still refused (401).
+        assert c.post("/api/sessions", json={"studentName": "x", "caseId": "camden"}).status_code == 401

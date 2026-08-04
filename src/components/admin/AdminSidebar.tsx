@@ -1,4 +1,4 @@
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink } from "react-router-dom";
 import { useAuth } from "../../state/AuthContext";
 import {
   IconAssessments,
@@ -45,7 +45,6 @@ const SECTIONS: { title: string; items: NavItem[] }[] = [
 
 export function AdminSidebar() {
   const { logout, isSuperAdmin } = useAuth();
-  const navigate = useNavigate();
 
   return (
     <nav className="pt-sidebar" aria-label="Admin navigation">
@@ -80,10 +79,7 @@ export function AdminSidebar() {
         <button
           type="button"
           className="pt-navlink"
-          onClick={() => {
-            logout();
-            navigate("/login");
-          }}
+          onClick={logout}
         >
           <IconLogout />
           <span>Logout</span>

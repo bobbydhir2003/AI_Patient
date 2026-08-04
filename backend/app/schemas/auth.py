@@ -47,6 +47,7 @@ class UserOut(CamelModel):
     role: str
     account_status: str = "ACTIVE"
     is_active: bool
+    is_system_admin: bool = False
     student_id: str | None = None
     created_at: datetime
     last_login_at: datetime | None = None

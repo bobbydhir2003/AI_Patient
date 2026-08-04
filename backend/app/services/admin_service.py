@@ -55,6 +55,13 @@ _COMPLETED = constants.SESSION_STATUS_COMPLETED
 _ARCHIVED = constants.SESSION_STATUS_ARCHIVED
 _ACTIVE = constants.SESSION_STATUS_ACTIVE
 
+# Admin/professor practice ("admin_test") data must never appear in the academic
+# roster, dashboard counts or analytics. These reusable predicates keep every
+# query consistent. All pre-existing rows default is_practice=False, so real
+# student data and counts are completely unaffected.
+_REAL_SESSION = InterviewSession.is_practice.is_(False)
+_REAL_STUDENT = Student.is_practice.is_(False)
+
 # Canonical display order for the assessment-level summary. Standard rubric
 # levels first, then the advanced-referral levels, so mixed data still renders
 # in a sensible order. Any other stored value is appended afterwards.
@@ -136,26 +143,43 @@ def _audit(db: Session, admin: User, *, action, record_type, record_id, descript
 
 # ------------------------------------------------------------------ dashboard
 def get_dashboard(db: Session) -> DashboardOut:
-    total_students = int(db.execute(select(func.count(Student.id))).scalar_one())
-    active_students = int(
-        db.execute(select(func.count(Student.id)).where(Student.is_active.is_(True))).scalar_one()
+    total_students = int(
+        db.execute(select(func.count(Student.id)).where(_REAL_STUDENT)).scalar_one()
     )
-    total_sessions = int(db.execute(select(func.count(InterviewSession.id))).scalar_one())
+    active_students = int(
+        db.execute(
+            select(func.count(Student.id)).where(_REAL_STUDENT, Student.is_active.is_(True))
+        ).scalar_one()
+    )
+    total_sessions = int(
+        db.execute(select(func.count(InterviewSession.id)).where(_REAL_SESSION)).scalar_one()
+    )
     completed = int(
         db.execute(
-            select(func.count(InterviewSession.id)).where(InterviewSession.status == _COMPLETED)
+            select(func.count(InterviewSession.id)).where(
+                _REAL_SESSION, InterviewSession.status == _COMPLETED
+            )
         ).scalar_one()
     )
     archived = int(
         db.execute(
-            select(func.count(InterviewSession.id)).where(InterviewSession.status == _ARCHIVED)
+            select(func.count(InterviewSession.id)).where(
+                _REAL_SESSION, InterviewSession.status == _ARCHIVED
+            )
         ).scalar_one()
     )
-    total_assessments = int(db.execute(select(func.count(AssessmentRun.id))).scalar_one())
+    total_assessments = int(
+        db.execute(
+            select(func.count(AssessmentRun.id))
+            .join(InterviewSession, AssessmentRun.session_id == InterviewSession.id)
+            .where(_REAL_SESSION)
+        ).scalar_one()
+    )
 
     recent_rows = list(
         db.execute(
             select(InterviewSession)
+            .where(_REAL_SESSION)
             .order_by(InterviewSession.started_at.desc())
             .limit(8)
         ).scalars().all()
@@ -200,7 +224,8 @@ def _assessment_level_summary(db: Session) -> list[AssessmentLevelCount]:
     """
     rows = db.execute(
         select(AssessmentRun.overall_level, func.count(AssessmentRun.id))
-        .where(AssessmentRun.overall_level.is_not(None))
+        .join(InterviewSession, AssessmentRun.session_id == InterviewSession.id)
+        .where(AssessmentRun.overall_level.is_not(None), _REAL_SESSION)
         .group_by(AssessmentRun.overall_level)
     ).all()
     counts = {level: int(n) for level, n in rows if level}
@@ -218,6 +243,7 @@ def _needs_attention(db: Session, *, incomplete: int) -> NeedsAttentionOut:
     completed_without_assessment = int(
         db.execute(
             select(func.count(InterviewSession.id)).where(
+                _REAL_SESSION,
                 InterviewSession.status == _COMPLETED,
                 ~InterviewSession.id.in_(select(AssessmentRun.session_id)),
             )
@@ -226,7 +252,7 @@ def _needs_attention(db: Session, *, incomplete: int) -> NeedsAttentionOut:
     # Students with 2+ still-active (incomplete) sessions.
     multi = db.execute(
         select(InterviewSession.student_id)
-        .where(InterviewSession.status == _ACTIVE)
+        .where(_REAL_SESSION, InterviewSession.status == _ACTIVE)
         .group_by(InterviewSession.student_id)
         .having(func.count(InterviewSession.id) >= 2)
     ).all()
@@ -234,6 +260,7 @@ def _needs_attention(db: Session, *, incomplete: int) -> NeedsAttentionOut:
     stale = int(
         db.execute(
             select(func.count(InterviewSession.id)).where(
+                _REAL_SESSION,
                 InterviewSession.status == _ACTIVE,
                 InterviewSession.started_at < cutoff,
             )
@@ -260,6 +287,7 @@ def _recent_sessions_with_level(db: Session, *, limit: int = 6) -> list[RecentSe
     rows = list(
         db.execute(
             select(InterviewSession)
+            .where(_REAL_SESSION)
             .order_by(InterviewSession.started_at.desc())
             .limit(limit)
         ).scalars().all()
@@ -290,6 +318,7 @@ def _recent_students(db: Session, *, limit: int = 4) -> list[RecentStudentItem]:
             InterviewSession.student_id.label("sid"),
             func.max(InterviewSession.started_at).label("last"),
         )
+        .where(_REAL_SESSION)
         .group_by(InterviewSession.student_id)
         .subquery()
     )
@@ -297,6 +326,7 @@ def _recent_students(db: Session, *, limit: int = 4) -> list[RecentStudentItem]:
         db.execute(
             select(Student, last_activity.c.last)
             .join(last_activity, last_activity.c.sid == Student.id)
+            .where(_REAL_STUDENT)
             .order_by(last_activity.c.last.desc())
             .limit(limit)
         ).all()
@@ -333,11 +363,12 @@ def search(db: Session, *, query: str, limit: int = 6) -> SearchResultsOut:
         db.execute(
             select(Student)
             .where(
+                _REAL_STUDENT,
                 or_(
                     func.lower(Student.name).like(like),
                     func.lower(Student.email).like(like),
                     func.lower(Student.student_number).like(like),
-                )
+                ),
             )
             .order_by(func.lower(Student.name).asc())
             .limit(limit)
@@ -359,11 +390,12 @@ def search(db: Session, *, query: str, limit: int = 6) -> SearchResultsOut:
             select(InterviewSession)
             .join(Student, InterviewSession.student_id == Student.id)
             .where(
+                _REAL_SESSION,
                 or_(
                     func.lower(InterviewSession.id).like(like),
                     func.lower(InterviewSession.case_id).like(like),
                     func.lower(Student.name).like(like),
-                )
+                ),
             )
             .order_by(InterviewSession.started_at.desc())
             .limit(limit)
@@ -393,7 +425,7 @@ def list_students(
     page: int = 1,
     page_size: int = 20,
 ) -> PaginatedStudents:
-    stmt = select(Student)
+    stmt = select(Student).where(_REAL_STUDENT)
     if search.strip():
         like = f"%{search.strip().lower()}%"
         stmt = stmt.where(
@@ -438,13 +470,14 @@ def _student_counts(db: Session, student_id: str) -> tuple[int, int, int, dateti
     session_count = int(
         db.execute(
             select(func.count(InterviewSession.id)).where(
-                InterviewSession.student_id == student_id
+                _REAL_SESSION, InterviewSession.student_id == student_id
             )
         ).scalar_one()
     )
     completed_count = int(
         db.execute(
             select(func.count(InterviewSession.id)).where(
+                _REAL_SESSION,
                 InterviewSession.student_id == student_id,
                 InterviewSession.status == _COMPLETED,
             )
@@ -454,12 +487,12 @@ def _student_counts(db: Session, student_id: str) -> tuple[int, int, int, dateti
         db.execute(
             select(func.count(AssessmentRun.id))
             .join(InterviewSession, AssessmentRun.session_id == InterviewSession.id)
-            .where(InterviewSession.student_id == student_id)
+            .where(_REAL_SESSION, InterviewSession.student_id == student_id)
         ).scalar_one()
     )
     last_activity = db.execute(
         select(func.max(InterviewSession.started_at)).where(
-            InterviewSession.student_id == student_id
+            _REAL_SESSION, InterviewSession.student_id == student_id
         )
     ).scalar_one()
     return session_count, completed_count, assessment_count, last_activity
@@ -532,7 +565,7 @@ def list_sessions(
     page: int = 1,
     page_size: int = 20,
 ) -> PaginatedSessions:
-    stmt = select(InterviewSession)
+    stmt = select(InterviewSession).where(_REAL_SESSION)
     if case_id.strip():
         stmt = stmt.where(InterviewSession.case_id == case_id.strip())
     if status and status != "all":

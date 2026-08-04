@@ -29,6 +29,11 @@ class InterviewSession(Base):
     protected_reference_version: Mapped[str] = mapped_column(String(20), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default=SESSION_STATUS_ACTIVE)
     locked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Admin/professor practice ("admin_test") session. Set True when the session
+    # owner is an admin at creation time so admin testing never contaminates
+    # student completion stats, class analytics or assessment aggregates. The full
+    # interview -> assessment workflow still runs; it is simply not counted.
+    is_practice: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     disclosed_fact_ids: Mapped[str] = mapped_column(Text, nullable=False, default="[]")  # JSON list
     # Frozen config used when this interview started (JSON): model, voice version,
     # streaming, token limit, prompt version. Never contains secrets. Lets an

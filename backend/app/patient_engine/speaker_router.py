@@ -155,7 +155,19 @@ def participant_meta(case, speaker_id: str) -> tuple[str, str, str]:
 
 def resolve_for_case(case, message: str, turns, topics=None) -> RoutingResult:
     """Route only for multi-participant cases; single-speaker cases keep the
-    generic single 'patient' speaker (no behavior change)."""
+    generic single 'patient' speaker (no behavior change).
+
+    Caregiver-primary lock (Dr. Dexter's requirement for Camden): when the case
+    is flagged ``caregiver_primary_only``, the designated primary caregiver (the
+    mother) answers EVERY normal interview turn. The decision is deterministic
+    and made BEFORE any model call, so the child's persona/voice is never
+    generated - even when the student addresses the child directly or asks for
+    "both". The generic dynamic router below is preserved unchanged for any
+    future multi-participant case that does NOT set this flag.
+    """
     if not is_multi_participant(case):
         return RoutingResult("patient", 1.0, "single-speaker case")
+    if getattr(case, "caregiver_primary_only", False):
+        primary = getattr(case, "primary_speaker", "") or getattr(case, "default_speaker", "") or SPEAKER_MOTHER
+        return RoutingResult(primary, 1.0, "caregiver-primary lock -> primary historian")
     return route(message, previous_speaker=previous_patient_speaker(turns), topics=topics)

@@ -25,6 +25,12 @@ class Student(Base):
     # Admin archive flag. Authoritative status for the student profile; kept in
     # sync with the linked User.is_active so an archived student cannot log in.
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # True only for a profile that was auto-provisioned so an admin/professor can
+    # test-drive the simulator. These profiles are NEVER real academic records and
+    # are excluded from the admin roster, dashboard counts and analytics. A real
+    # student who is later promoted to admin keeps is_practice=False (their prior
+    # sessions remain real); only their newly created admin sessions are flagged.
+    is_practice: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
 
     sessions = relationship("InterviewSession", back_populates="student")

@@ -55,11 +55,14 @@ function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
 
-        {/* Student portal */}
+        {/* Patient Simulator portal. Open to any authenticated account: students
+            for coursework, and promoted admins/professors for practice. The
+            backend still enforces per-session ownership, so users only ever see
+            their own sessions/assessments here. */}
         <Route
           path="/student/dashboard"
           element={
-            <ProtectedRoute role="student">
+            <ProtectedRoute>
               <StudentDashboardPage />
             </ProtectedRoute>
           }
@@ -67,7 +70,7 @@ function App() {
         <Route
           path="/student/sessions/:sessionId"
           element={
-            <ProtectedRoute role="student">
+            <ProtectedRoute>
               <StudentSessionPage />
             </ProtectedRoute>
           }
@@ -75,7 +78,7 @@ function App() {
         <Route
           path="/student/sessions/:sessionId/assessment"
           element={
-            <ProtectedRoute role="student">
+            <ProtectedRoute>
               <StudentSessionPage initialTab="assessment" />
             </ProtectedRoute>
           }

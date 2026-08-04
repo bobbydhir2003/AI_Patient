@@ -52,10 +52,13 @@ test("admin login shows Administrator Sign In + Back to Student Portal", () => {
   assert.match(login, /to="\/"/);
 });
 
-test("admin login routes admins to /admin and rejects students", () => {
-  assert.match(login, /navigate\(\s*["']\/admin["']/);
+test("admin login routes admins by landing rule and rejects students", () => {
+  // System/super admins -> /admin; promoted admins -> Patient Simulator. The
+  // landing decision is centralized in postLoginPath (not a hardcoded /admin).
+  assert.match(login, /postLoginPath\(/);
   assert.match(login, /isAdminRole/);
   assert.match(login, /administrator accounts only/i);
+  assert.match(login, /STUDENT_ON_ADMIN/);
 });
 
 test("admin login has NO student account creation and NO request access", () => {

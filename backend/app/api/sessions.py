@@ -5,7 +5,7 @@ from app.database.connection import get_db
 from app.dependencies.auth import (
     get_current_user,
     require_session_access,
-    require_student,
+    require_simulator_access,
 )
 from app.models import InterviewSession, User
 from app.schemas.interview_schema import TurnCreateRequest, TurnOut
@@ -25,10 +25,11 @@ router = APIRouter(
 @router.post("", response_model=SessionResponse, status_code=201)
 def create_session(
     payload: SessionCreateRequest,
-    current_user: User = Depends(require_student),
+    current_user: User = Depends(require_simulator_access),
     db: Session = Depends(get_db),
 ) -> SessionResponse:
-    # A3: ownership comes from the authenticated student, never the request body.
+    # A3: ownership comes from the authenticated account, never the request body.
+    # Students and admins/professors (practice) may both create sessions.
     return session_service.create_session(db, payload, current_user)
 
 

@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 
-from app.core.constants import ROLE_STUDENT
+from app.core.constants import ADMIN_ROLES, ROLE_STUDENT
 from app.core.exceptions import (
     ForbiddenError,
     SessionNotFoundError,
@@ -8,7 +8,7 @@ from app.core.exceptions import (
     TranscriptLockedError,
 )
 from app.core.logging import get_logger
-from app.models import InterviewSession, User
+from app.models import InterviewSession, Student, User
 from app.patient_engine.case_loader import load_case
 from app.repositories.session_repository import SessionRepository
 from app.repositories.transcript_repository import TranscriptRepository
@@ -64,13 +64,28 @@ def create_session(
     import json as _json
 
     case = load_case(payload.case_id)  # raises CaseNotFoundError for unknown ids
-    # A3: the session owner is ALWAYS the authenticated student's linked profile.
+    # A3: the session owner is ALWAYS the authenticated account's linked profile.
     # Any student_name / student_id in the request body is display-only and is
     # never used to decide ownership, so a caller cannot create a session under
-    # another student's identity.
-    if not current_user.student_id or current_user.student is None:
-        raise ForbiddenError("This account is not linked to a student profile.")
-    student = current_user.student
+    # another identity.
+    is_admin = current_user.role in ADMIN_ROLES
+    student = current_user.student if current_user.student_id else None
+    if student is None:
+        if is_admin:
+            # Provision a one-time practice profile so an admin/professor can run
+            # the full simulator. It is flagged is_practice=True and therefore is
+            # excluded from the student roster and all class analytics.
+            student = Student(
+                name=current_user.full_name or "Administrator",
+                student_number="",
+                email=current_user.email,
+                is_practice=True,
+            )
+            db.add(student)
+            db.flush()
+            current_user.student_id = student.id
+        else:
+            raise ForbiddenError("This account is not linked to a student profile.")
     capabilities = ["standard_interview"]
     if case.case_category == "referral":
         capabilities.append("advanced_referral")  # future referral assessment pipeline
@@ -80,6 +95,9 @@ def create_session(
         case_category=case.case_category,
         assessment_capabilities=_json.dumps(capabilities),
         protected_reference_version="1.0",
+        # Admin/professor sessions are practice ("admin_test") and never counted
+        # in student completion stats or academic analytics.
+        is_practice=is_admin,
     )
     # Freeze the active (non-secret) config this interview should keep using, so
     # an admin editing the model/voice mid-way cannot alter an in-progress

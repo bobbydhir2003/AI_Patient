@@ -149,7 +149,8 @@ STORAGE_WARNING_PERCENT = 80.0
 
 # Fixed, safe voice-preview sample sentences (never free-form text).
 VOICE_PREVIEW_SAMPLES = {
-    "camden": "Hi, my name is Camden.",
+    # Camden is voiced only by his mother, so the preview auditions her voice.
+    "camden": "Hi, I'm Camden's mother. I can help answer your questions.",
     "carly": "Hi, I'm Carly. Thank you for meeting with me.",
     "sofia": "Hi, I'm Sofia.",
     "jayden": "Hi, I'm Jayden. I'm ready to get started.",

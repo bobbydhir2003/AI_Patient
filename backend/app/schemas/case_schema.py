@@ -139,6 +139,11 @@ class CaseDefinition(BaseModel):
     # for single-speaker cases, which behave exactly as before.
     participants: list[CaseParticipant] = Field(default_factory=list)
     default_speaker: str = ""  # speaker id used when routing is ambiguous
+    # When true, the designated primary caregiver answers EVERY normal interview
+    # turn and the interview never dynamically switches speakers (e.g. Camden, a
+    # 4-year-old, whose mother is the sole historian). The participant/voice
+    # architecture is preserved; routing simply resolves to primary_speaker.
+    caregiver_primary_only: bool = False
     # Structured PAVING results read from the patient's completed worksheet:
     # {"source_file","source_page","values": {category_key: int}}. Drives the
     # digital radar chart; the old scanned image is no longer the visible chart.

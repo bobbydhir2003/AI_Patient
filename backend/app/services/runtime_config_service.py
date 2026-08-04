@@ -446,13 +446,14 @@ def ai_configuration(db: Session) -> dict:
 # =====================================================================
 #  Voices
 # =====================================================================
-_SPEAKERS = [("camden", "patient"), ("camden", "caregiver"),
+# Camden is voiced ONLY by his mother (the 4-year-old never speaks), so the case
+# exposes a single "caregiver" voice - there is no separate Camden child voice.
+_SPEAKERS = [("camden", "caregiver"),
              ("carly", "patient"), ("sofia", "patient"), ("jayden", "patient")]
-_SPEAKER_LABEL = {("camden", "patient"): "Camden (Patient)", ("camden", "caregiver"): "Mother",
+_SPEAKER_LABEL = {("camden", "caregiver"): "Camden's Mother",
                   ("carly", "patient"): "Carly (Patient)", ("sofia", "patient"): "Sofia (Patient)",
                   ("jayden", "patient"): "Jayden (Patient)"}
 PREVIEW_SAMPLES = {
-    ("camden", "patient"): "Hi, my name is Camden.",
     ("camden", "caregiver"): "Hi, I'm Camden's mother. I can help answer your questions.",
     ("carly", "patient"): "Hi, I'm Carly. Thank you for meeting with me.",
     ("sofia", "patient"): "Hi, I'm Sofia.",
@@ -492,8 +493,12 @@ def resolve_voice(db: Session, case_id: str, speaker_id: str = "patient") -> Res
         return ResolvedRuntimeVoice(case_id, speaker_id, ov.voice_id, ov.model_id or el.model,
                                     ov.stability, ov.similarity_boost, ov.style, ov.speed,
                                     ov.speaker_boost, True, "runtime")
-    if speaker_id == "patient":
-        case = case_loader.load_case(case_id)
+    # The case-file voice_profile represents the case's sole spoken voice: the
+    # caregiver for a caregiver-primary case (Camden's mother), else the patient.
+    _cf_case = case_loader.load_case(case_id)
+    from app.voice.voice_profile_loader import case_file_speaker
+    if speaker_id == case_file_speaker(_cf_case):
+        case = _cf_case
         p = case.voice_profile
         if p and p.voice_id.strip() and not p.voice_id.startswith("PASTE_") and p.enabled:
             return ResolvedRuntimeVoice(case_id, speaker_id, p.voice_id, p.model_id or el.model,

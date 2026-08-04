@@ -50,9 +50,9 @@ export function WelcomePage() {
     try {
       // Real student authentication happens HERE on "/" (not via /login).
       const signedIn = await login(email.trim(), password);
-      // ACTIVE student -> student home; an admin who signs in here still goes to
-      // /admin (never the student interview flow).
-      navigate(postLoginPath(signedIn.role), { replace: true });
+      // ACTIVE student -> student home; a promoted admin/professor also lands on
+      // the Patient Simulator; only the system/super admin goes straight to /admin.
+      navigate(postLoginPath(signedIn), { replace: true });
     } catch (err) {
       // Account-status (403) and invalid-credential (401) messages come straight
       // from the backend; a true connection failure is a distinct message.
@@ -105,9 +105,9 @@ export function WelcomePage() {
                   <button
                     type="button"
                     className="pt-btn pt-btn-block"
-                    onClick={() => navigate(homeCta(user.role).to)}
+                    onClick={() => navigate(homeCta(user).to)}
                   >
-                    {homeCta(user.role).label}
+                    {homeCta(user).label}
                   </button>
                 </>
               ) : (

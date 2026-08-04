@@ -175,6 +175,61 @@
   border-left: 1px solid var(--color-border-strong);
   padding-left: var(--space-3);
 }
+/* Prominent "Back to Patient Simulator" bridge in the admin top bar. Dark fill,
+   red UNMC accent border + glow so it reads as a clear primary navigation
+   control (not a tiny secondary text link). */
+.pt-topbar-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 18px;
+  margin-left: var(--space-3);
+  border-radius: 10px;
+  border: 1.5px solid var(--color-accent);
+  background: rgba(217, 39, 46, 0.12);
+  color: #fff;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 0 0 3px rgba(217, 39, 46, 0.10), 0 2px 12px rgba(217, 39, 46, 0.28);
+  transition: background 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+.pt-topbar-back:hover {
+  background: rgba(217, 39, 46, 0.22);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(217, 39, 46, 0.18), 0 4px 18px rgba(217, 39, 46, 0.4);
+}
+.pt-topbar-back:active {
+  transform: translateY(1px);
+}
+.pt-topbar-back:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+.pt-topbar-back-arrow {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+.pt-topbar-back-short {
+  display: none;
+}
+/* Stay visible and prominent on smaller screens; just shorten the label. */
+@media (max-width: 720px) {
+  .pt-topbar-back {
+    padding: 0 12px;
+    font-size: 0.82rem;
+  }
+  .pt-topbar-back-full {
+    display: none;
+  }
+  .pt-topbar-back-short {
+    display: inline;
+  }
+}
 .pt-topbar-search {
   position: relative;
   flex: 1;

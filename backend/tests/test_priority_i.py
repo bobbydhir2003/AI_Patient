@@ -65,18 +65,25 @@ def test_blank_voice_id_preserves_current(engine):
         db.close()
 
 
-def test_camden_mother_not_configured_then_configurable(engine):
+def test_camden_mother_voice_from_case_file_then_override(engine):
     db = _db(engine)
     try:
+        # Camden's ONLY voice is the mother; it is sourced from the case-file
+        # voice_profile (the single source of truth) with no override yet.
         row = rc.get_voice_row(db, "camden", "caregiver")
-        assert row["status"] == "not_configured" and row["source"] == "none"
-        assert row["masked_voice_id"] is None  # nothing invented / not copied from child
+        assert row["status"] == "active" and row["source"] == "case_file"
+        assert row["masked_voice_id"]  # a real (masked) mother voice id
+        # A runtime override takes priority over the case-file value.
         rc.set_voice(db, case_id="camden", speaker_id="caregiver",
                      patch={"voice_id": "MotherVoiceId12345"}, admin_email="a@x")
         db.commit()
         after = rc.get_voice_row(db, "camden", "caregiver")
         assert after["status"] == "active" and after["source"] == "runtime"
         assert rc.resolve_voice(db, "camden", "caregiver").voice_id == "MotherVoiceId12345"
+        # The child ("patient") speaker is no longer a valid Camden voice.
+        import pytest
+        with pytest.raises(Exception):
+            rc.get_voice_row(db, "camden", "patient")
     finally:
         db.close()
 

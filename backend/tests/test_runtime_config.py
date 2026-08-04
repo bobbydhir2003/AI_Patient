@@ -178,17 +178,24 @@ def test_voice_edit_persists_and_rejects_bad_id(client, engine, admins):
     assert bad.status_code >= 400
 
 
-def test_camden_and_mother_are_separate_records(client, engine, admins):
+def test_camden_only_mother_voice_is_configurable(client, engine, admins):
+    """Camden exposes a SINGLE voice speaker: the mother (caregiver). The child
+    ('patient') speaker no longer exists, so editing it is rejected; only the
+    caregiver record can be created."""
     admin = login_token(client, "admin@school.edu", "adminpass1")
-    client.patch("/api/admin/runtime/voices/camden/patient",
-                 json={"voiceId": "CamdenVoice0001"}, headers=auth_header(admin))
-    client.patch("/api/admin/runtime/voices/camden/caregiver",
-                 json={"voiceId": "MotherVoice0002"}, headers=auth_header(admin))
+    # The Camden child voice speaker is gone -> rejected.
+    rejected = client.patch("/api/admin/runtime/voices/camden/patient",
+                            json={"voiceId": "CamdenVoice0001"}, headers=auth_header(admin))
+    assert rejected.status_code >= 400
+    # Only the mother/caregiver voice is configurable.
+    ok = client.patch("/api/admin/runtime/voices/camden/caregiver",
+                      json={"voiceId": "MotherVoice0002"}, headers=auth_header(admin))
+    assert ok.status_code == 200
     db = sessionmaker(bind=engine, expire_on_commit=False)()
     rows = db.query(PatientVoiceSetting).filter_by(case_id="camden").all()
     speakers = {r.speaker_id: r.voice_id for r in rows}
     db.close()
-    assert speakers == {"patient": "CamdenVoice0001", "caregiver": "MotherVoice0002"}
+    assert speakers == {"caregiver": "MotherVoice0002"}
 
 
 def test_preview_does_not_save(client, engine, admins):

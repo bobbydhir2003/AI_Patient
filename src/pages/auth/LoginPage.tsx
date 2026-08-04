@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../state/AuthContext";
 import { ApiError } from "../../services/api";
-import { isAdminRole } from "../../services/authRouting";
+import { isAdminRole, postLoginPath } from "../../services/authRouting";
 import styles from "./LoginPage.module.css";
 
 const STUDENT_ON_ADMIN = "This login is for administrator accounts only.";
@@ -21,11 +21,12 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // Already-authenticated visits: admins go straight to /admin; a signed-in
-  // student sees the admin-only notice (never routed into the student sim here).
+  // Already-authenticated visits: admins are routed to their landing page (the
+  // system/super admin to /admin, a promoted admin to the Patient Simulator);
+  // a signed-in student sees the admin-only notice.
   useEffect(() => {
     if (user && isAdminRole(user.role)) {
-      navigate("/admin", { replace: true });
+      navigate(postLoginPath(user), { replace: true });
     } else if (user) {
       setError("This portal is for administrators only.");
     }
@@ -38,7 +39,9 @@ export function LoginPage() {
     try {
       const signedIn = await login(email.trim(), password);
       if (isAdminRole(signedIn.role)) {
-        navigate("/admin", { replace: true });
+        // System/super admin -> /admin; promoted admin -> Patient Simulator
+        // (they open the Admin Dashboard from the Admin Management control).
+        navigate(postLoginPath(signedIn), { replace: true });
       } else {
         // Valid student credentials, but this is the admin portal.
         setError(STUDENT_ON_ADMIN);

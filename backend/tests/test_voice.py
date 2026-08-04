@@ -353,6 +353,49 @@ def test_synthesize_frontend_cannot_override_voice_id(engine, monkeypatch):
     assert fake.calls[0]["voice_id"] == "real-voice-id"
 
 
+def test_camden_mother_turn_uses_single_case_file_voice(engine, monkeypatch, fake_client):
+    """TEST 4/5/7: for Camden the mother is the sole speaker and the case-file
+    voice_profile IS the mother's voice (one source of truth). A committed mother
+    turn synthesizes with that voice; the child ('patient') speaker resolves to
+    no voice at all, so Camden's child voice can never be synthesized."""
+    from app.patient_engine import case_loader
+    from app.voice.voice_profile_loader import load_voice_profile
+
+    # The case-file voice_profile is now the MOTHER's single source of truth.
+    camden = case_loader.load_case("camden")
+    monkeypatch.setattr(camden.voice_profile, "voice_id", "mother-voice-id")
+
+    # There is no usable child voice path: the 'patient' speaker is unavailable.
+    assert load_voice_profile("camden", "patient").available is False
+    assert load_voice_profile("camden", "caregiver").profile.voice_id == "mother-voice-id"
+
+    fake = FakeElevenLabsClient()
+    with make_voice_client(engine, fake, monkeypatch) as client:
+        client.app.dependency_overrides[
+            __import__("app.patient_engine.openai_client", fromlist=["get_openai_client"]).get_openai_client
+        ] = lambda: fake_client
+        session = client.post(
+            "/api/sessions", json={"studentName": "S", "studentId": "1", "caseId": "camden"}
+        ).json()
+        turn = client.post(
+            f"/api/interviews/{session['sessionId']}/messages",
+            json={"text": "How has his energy been?", "caseId": "camden", "clientTurnId": "cam1", "source": "typed"},
+        ).json()
+        # TEST 6: the stored turn is the mother.
+        assert turn["speakerId"] == "mother" and turn["speakerLabel"] == "Camden's Mother"
+        response = client.post(
+            "/api/voice/synthesize",
+            json=_synth_payload(
+                caseId="camden",
+                sessionId=session["sessionId"],
+                turnId=turn["turnId"],
+            ),
+        )
+        # The mother turn is voiced with the single case-file (mother) voice.
+        assert response.status_code == 200
+        assert fake.calls[0]["voice_id"] == "mother-voice-id"
+
+
 def test_synthesize_turn_reference_uses_saved_patient_text(engine, monkeypatch, fake_client):
     """With session+turn ids, the SAVED patient turn is synthesized verbatim -
     mismatched/arbitrary text cannot be voiced through the turn path."""
