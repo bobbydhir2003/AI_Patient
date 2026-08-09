@@ -435,6 +435,10 @@
   }
 
   .layout {
+    /* Natural vertical flow on phones (not the desktop fixed-height grid), so
+       the conversation card can take its real height and the page scrolls. */
+    display: flex;
+    flex-direction: column;
     width: calc(100% - 32px);
     padding: 0 0 24px;
     gap: 16px;
@@ -486,12 +490,46 @@
     font-size: 0.84rem;
   }
 
-  .sidebar {
-    display: none;
+  /* Conversation column first; the audio-settings + End Interview controls
+     (from the sidebar) flow underneath it. */
+  .mainPanel {
+    order: 1;
+    height: auto; /* flow — do NOT keep the desktop 100% fixed height */
   }
 
+  /* ROOT-CAUSE FIX: on mobile the conversation card must take its natural
+     content height and never clip. On desktop it stays flex:1 1 0 + overflow
+     hidden (a fixed-height internal-scroll region) — untouched. */
   .mainPanel :global(.card) {
-    min-height: auto;
+    flex: none;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  /* Show the audio settings + End Interview (the rest of the desktop sidebar is
+     replaced by the compact mobile header). */
+  .sidebar {
+    display: flex;
+    order: 2;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 12px;
+    width: calc(100% - 32px);
+    margin: 0 16px 20px;
+    padding: 0;
+    overflow: visible;
+  }
+  .patientPanel {
+    display: none; /* desktop patient card — replaced by the mobile patient header */
+  }
+  .audioSettings {
+    flex: 1 1 0;
+    min-width: 0;
+    margin: 0;
+  }
+  .endButton {
+    flex: 1 1 0;
+    min-width: 0;
   }
 
   .mainHeader {

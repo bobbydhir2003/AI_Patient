@@ -132,12 +132,19 @@
 /* ---- Phones: the transcript keeps its own bounded, internally-scrolling
    region so the composer + voice control stay visible above the keyboard. ---- */
 @media (max-width: 767px) {
+  /* Natural block flow on phones: welcome card, a visible/scrollable transcript
+     box, the voice control and the composer all stack and are always visible.
+     (Desktop keeps the fixed-height flex column above — untouched.) */
   .panel {
-    /* On phones the page itself may scroll; keep the transcript bounded. */
-    flex: 0 1 auto;
+    display: block;
+    flex: none;
+    overflow: visible;
+    min-height: 0;
   }
   .messages {
-    max-height: 48dvh;
+    flex: none;
+    min-height: 240px;       /* the chat box is never collapsed/hidden */
+    max-height: 55dvh;       /* grows, then scrolls internally, when messages exist */
     -webkit-overflow-scrolling: touch;
   }
   .inputBar {
