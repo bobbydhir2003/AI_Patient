@@ -192,7 +192,18 @@ export function AssessmentLoadingPage() {
               </div>
 
               <div className={styles.actions}>
-                <button className="btn btn-secondary" disabled>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    // Stop the frontend polling only. The assessment is generated
+                    // by the backend worker (fire-and-forget); leaving this page
+                    // does NOT cancel grading — it keeps running and the result
+                    // stays available under the session's assessment.
+                    setPolling(false);
+                    navigate(studentHome);
+                  }}
+                >
                   ← Back to Cases
                 </button>
               </div>

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { AppImage } from "../components/common/AppImage";
 import { PavingWheel } from "../components/cases/PavingWheel";
@@ -5,6 +6,7 @@ import { ProgressSteps } from "../components/layout/ProgressSteps";
 import { usePatientCase } from "../services/cases";
 import { useAuth } from "../state/AuthContext";
 import { caseHubPath } from "../services/authRouting";
+import { joinQueue } from "../services/queueApi";
 import styles from "./CaseIntroductionPage.module.css";
 
 const PROGRESS_STEPS = ["Case Introduction", "Interview", "Complete"];
@@ -12,9 +14,32 @@ const PROGRESS_STEPS = ["Case Introduction", "Interview", "Complete"];
 export function CaseIntroductionPage() {
   const { caseId } = useParams<{ caseId: string }>();
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, token } = useAuth();
   const { patientCase, loading, error, retry } = usePatientCase(caseId);
   const studentHome = caseHubPath(user?.role);
+  const [starting, setStarting] = useState(false);
+
+  // Start flow: check REAL interview capacity. If a slot is free → normal
+  // interview flow. If the system is at capacity → the queue screen (never a
+  // raw 503). Guarded so rapid double-clicks can't create duplicate entries.
+  async function handleStart(id: string) {
+    if (starting) return;
+    setStarting(true);
+    try {
+      const r = await joinQueue(token, id);
+      if (r.admitted || r.state === "admitted") {
+        navigate(`/interview/${id}`);
+      } else {
+        navigate(`/queue/${id}`, { state: { entryId: r.entry_id } });
+      }
+    } catch {
+      // Queue check unavailable — don't block the student; the interview page
+      // has its own capacity handling.
+      navigate(`/interview/${id}`);
+    } finally {
+      setStarting(false);
+    }
+  }
 
   if (loading && !patientCase) {
     return (
@@ -208,9 +233,10 @@ export function CaseIntroductionPage() {
           <button
             type="button"
             className="btn btn-primary"
-            onClick={() => navigate(`/interview/${patientCase.id}`)}
+            onClick={() => void handleStart(patientCase.id)}
+            disabled={starting}
           >
-            Start Interview
+            {starting ? "Checking availability…" : "Start Interview"}
           </button>
         </div>
       </div>

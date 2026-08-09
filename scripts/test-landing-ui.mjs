@@ -14,9 +14,9 @@ const read = (p) => readFileSync(join(root, p), "utf8");
 
 const welcome = read("src/pages/WelcomePage.tsx");
 const welcomeCss = read("src/pages/WelcomePage.module.css");
-const login = read("src/pages/auth/LoginPage.tsx");
-const loginCss = read("src/pages/auth/LoginPage.module.css");
 const app = read("src/App.tsx");
+const protectedRoute = read("src/portal/ProtectedRoute.tsx");
+const authRouting = read("src/services/authRouting.ts");
 
 // ------------------------------ STUDENT "/" ------------------------------
 test("student home uses the local Home.webp background", () => {
@@ -26,7 +26,7 @@ test("student home uses the local Home.webp background", () => {
 test('student home has a real login form that calls the auth API (not /login nav)', () => {
   assert.match(welcome, /await login\(/, "must call the real login() auth API");
   assert.match(welcome, /Welcome back/);
-  assert.match(welcome, /type="password"/);
+  assert.match(welcome, /student-password/);
   assert.match(welcome, /Sign In/);
   // Student Sign In must NOT navigate to the admin /login route.
   assert.ok(!/navigate\(\s*["']\/login["']/.test(welcome), "student Sign In must not go to /login");
@@ -41,35 +41,25 @@ test('student home "Create an account" routes to /register', () => {
   assert.match(welcome, /to="\/register"/);
 });
 
-// ------------------------------ ADMIN "/login" ------------------------------
-test("admin login uses the local admin.webp background", () => {
-  assert.match(loginCss, /url\(["']\/home\/admin\.webp["']\)/);
+// -------------------- SINGLE LOGIN ENTRY POINT (no admin /login) --------------------
+test("there is ONE canonical login route and it is the main portal '/'", () => {
+  assert.match(authRouting, /LOGIN_ROUTE\s*=\s*["']\/["']/);
 });
 
-test("admin login shows Administrator Sign In + Back to Student Portal", () => {
-  assert.match(login, /Administrator Sign In/);
-  assert.match(login, /Back to Student Portal/);
-  assert.match(login, /to="\/"/);
+test("the old /login admin screen is removed from the flow (redirects to '/')", () => {
+  // /login must not render the admin sign-in page; it redirects to the main login.
+  assert.match(app, /path="\/login"\s+element=\{<Navigate to="\/" replace \/>\}/);
+  assert.ok(!/<LoginPage/.test(app), "App must not render the admin LoginPage");
 });
 
-test("admin login routes admins by landing rule and rejects students", () => {
-  // System/super admins -> /admin; promoted admins -> Patient Simulator. The
-  // landing decision is centralized in postLoginPath (not a hardcoded /admin).
-  assert.match(login, /postLoginPath\(/);
-  assert.match(login, /isAdminRole/);
-  assert.match(login, /administrator accounts only/i);
-  assert.match(login, /STUDENT_ON_ADMIN/);
-});
-
-test("admin login has NO student account creation and NO request access", () => {
-  assert.ok(!/Create an account/i.test(login), "admin login must not offer registration");
-  assert.ok(!/\/register/.test(login), "admin login must not link to /register");
-  assert.ok(!/request-access/i.test(login) && !/Request access/i.test(login));
+test("unauthenticated guard sends users to the main login (LOGIN_ROUTE), not /login", () => {
+  assert.match(protectedRoute, /LOGIN_ROUTE/);
+  assert.ok(!/to="\/login"/.test(protectedRoute), "guard must not redirect to /login");
 });
 
 // ------------------------------ GLOBAL ------------------------------
 test("no Request Access anywhere in the primary entry UI", () => {
-  for (const [name, src] of [["welcome", welcome], ["login", login], ["app", app]]) {
+  for (const [name, src] of [["welcome", welcome], ["app", app]]) {
     assert.ok(!/request-access/i.test(src), `${name} must not reference request-access`);
     assert.ok(!/Request access/i.test(src), `${name} must not show a Request access link`);
   }

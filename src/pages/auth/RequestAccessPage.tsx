@@ -34,9 +34,9 @@ export function RequestAccessPage() {
           <div className="pt-access-result" role="status">
             <p style={{ marginTop: 0 }}>{result.message}</p>
             {result.result === "ALREADY_APPROVED" ? (
-              <Link className="pt-btn pt-btn-block" to="/login">Continue to sign in</Link>
+              <Link className="pt-btn pt-btn-block" to="/">Continue to sign in</Link>
             ) : (
-              <Link className="pt-link" to="/login">Back to sign in</Link>
+              <Link className="pt-link" to="/">Back to sign in</Link>
             )}
           </div>
         ) : (
@@ -61,7 +61,7 @@ export function RequestAccessPage() {
             </button>
 
             <p className="pt-muted" style={{ marginTop: 16, fontSize: "0.88rem" }}>
-              Already have an account? <Link className="pt-link" to="/login">Sign in</Link>
+              Already have an account? <Link className="pt-link" to="/">Sign in</Link>
             </p>
           </>
         )}

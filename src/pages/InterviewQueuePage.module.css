@@ -1,0 +1,70 @@
+.page {
+  min-height: calc(100vh - 68px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(16px, 4vw, 48px);
+  background:
+    radial-gradient(circle at 50% 12%, rgba(120, 14, 22, 0.10), transparent 34%),
+    #030405;
+}
+
+.card {
+  width: 100%;
+  max-width: 1040px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 24px;
+  padding: clamp(20px, 3vw, 36px);
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(145deg, rgba(18, 20, 24, 0.92), rgba(8, 9, 11, 0.95));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 24px 60px rgba(0, 0, 0, 0.4);
+}
+
+.main { min-width: 0; }
+
+.statusHead { display: flex; align-items: center; gap: 12px; }
+.badge { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: rgba(217, 39, 46, 0.14); border: 1px solid rgba(217, 39, 46, 0.4); }
+.badgeDot { width: 10px; height: 10px; border-radius: 50%; background: #ff4148; animation: qpulse 1.6s ease-in-out infinite; }
+@keyframes qpulse { 0%,100%{opacity:1} 50%{opacity:0.35} }
+.title { margin: 0; font-size: clamp(1.4rem, 2.4vw, 1.9rem); font-weight: 800; color: #fff; }
+.subtitle { margin: 8px 0 0; color: rgba(210, 216, 226, 0.78); font-size: 1rem; }
+
+.positionBox { margin: 18px 0; padding: 16px 18px; border-radius: 14px; border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(12, 14, 18, 0.7); font-size: 1.15rem; color: rgba(224, 229, 237, 0.9); }
+.positionBox strong { color: #ff5c62; font-size: 1.6rem; }
+.expired { color: #f5b638; }
+.ready { color: #4ade80; }
+
+.progress { list-style: none; margin: 18px 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.step { display: flex; align-items: center; gap: 12px; color: rgba(170, 178, 190, 0.7); }
+.stepMark { width: 26px; height: 26px; flex: 0 0 auto; border-radius: 50%; display: grid; place-items: center; font-size: 0.8rem; font-weight: 700; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.03); }
+.stepLabel { font-size: 0.94rem; }
+.stepDone { color: rgba(220, 225, 233, 0.9); }
+.stepDone .stepMark { background: rgba(74, 222, 128, 0.16); border-color: rgba(74, 222, 128, 0.4); color: #4ade80; }
+.stepActive { color: #fff; }
+.stepActive .stepMark { background: linear-gradient(180deg, #b61f25, #821116); border-color: transparent; color: #fff; box-shadow: 0 0 14px rgba(208, 36, 42, 0.35); }
+
+.estimate { margin: 4px 0 0; color: #f5b638; font-size: 0.92rem; font-weight: 600; }
+.keepOpen { margin: 14px 0 0; color: rgba(196, 202, 211, 0.72); font-size: 0.9rem; line-height: 1.5; }
+.error { margin: 12px 0 0; color: #ff8a8a; font-size: 0.86rem; }
+
+.actions { display: flex; gap: 12px; margin-top: 20px; flex-wrap: wrap; }
+.actions .btn { min-height: 44px; }
+
+.sideCard { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding: 18px; border-radius: 18px; border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(12, 13, 15, 0.85); align-self: start; }
+.sideLabel { align-self: flex-start; color: rgba(196, 202, 211, 0.7); font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+.patientImg { width: 130px; height: 130px; border-radius: 16px; object-fit: cover; object-position: center top; border: 1px solid rgba(255, 255, 255, 0.1); background: #090a0c; }
+.patientName { color: #fff; font-weight: 800; font-size: 1.15rem; margin-top: 6px; }
+.patientMeta { color: rgba(210, 216, 226, 0.78); font-size: 0.9rem; }
+.assessType { margin-top: 4px; padding: 2px 10px; border-radius: 999px; font-size: 0.72rem; color: #ff5056; border: 1px solid rgba(194, 39, 45, 0.42); }
+.autoNote { margin: 12px 0 0; color: rgba(180, 188, 200, 0.7); font-size: 0.8rem; line-height: 1.45; }
+
+@media (max-width: 767px) {
+  .card { grid-template-columns: 1fr; }
+  .sideCard { order: -1; flex-direction: row; text-align: left; align-items: center; }
+  .sideCard .sideLabel { display: none; }
+  .patientImg { width: 84px; height: 84px; }
+  .autoNote { display: none; }
+  .actions .btn { flex: 1; justify-content: center; }
+}

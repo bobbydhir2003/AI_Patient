@@ -19,6 +19,7 @@ from app.api import (
     cases,
     health,
     interviews,
+    queue as queue_api,
     sessions,
     students,
     voice,
@@ -122,6 +123,7 @@ def create_app() -> FastAPI:
     _app.include_router(access.admin_router, prefix="/api")
     _app.include_router(sessions.router, prefix="/api")
     _app.include_router(interviews.router, prefix="/api")
+    _app.include_router(queue_api.router, prefix="/api")
     _app.include_router(assessments.router, prefix="/api")
     _app.include_router(voice.router, prefix="/api")
 

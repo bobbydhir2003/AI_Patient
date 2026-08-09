@@ -1,14 +1,14 @@
-import { Route, Routes, useLocation } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AppHeader } from "./components/layout/AppHeader";
 import { AppFooter } from "./components/layout/AppFooter";
 import { WelcomePage } from "./pages/WelcomePage";
 import { CaseCatalogPage } from "./pages/CaseCatalogPage";
 import { CaseIntroductionPage } from "./pages/CaseIntroductionPage";
 import { InterviewPage } from "./pages/InterviewPage";
+import { InterviewQueuePage } from "./pages/InterviewQueuePage";
 import { InterviewCompletePage } from "./pages/InterviewCompletePage";
 import { AssessmentLoadingPage } from "./pages/AssessmentLoadingPage";
 import { AssessmentReviewPage } from "./pages/AssessmentReviewPage";
-import { LoginPage } from "./pages/auth/LoginPage";
 import { RegisterPage } from "./pages/auth/RegisterPage";
 import { StudentDashboardPage } from "./pages/student/StudentDashboardPage";
 import { StudentSessionPage } from "./pages/student/StudentSessionPage";
@@ -54,11 +54,14 @@ function App() {
         <Route path="/cases/:caseId" element={<CaseIntroductionPage />} />
         <Route path="/interview/complete" element={<InterviewCompletePage />} />
         <Route path="/interview/:caseId" element={<InterviewPage />} />
+        <Route path="/queue/:caseId" element={<InterviewQueuePage />} />
         <Route path="/assessment/:sessionId/loading" element={<AssessmentLoadingPage />} />
         <Route path="/assessment/:sessionId" element={<AssessmentReviewPage />} />
 
         {/* Authentication */}
-        <Route path="/login" element={<LoginPage />} />
+        {/* The separate admin sign-in page is removed. Any old link or bookmark
+            to /login now lands on the single main login at "/". */}
+        <Route path="/login" element={<Navigate to="/" replace />} />
         <Route path="/register" element={<RegisterPage />} />
 
         {/* Patient Simulator portal. Open to any authenticated account: students

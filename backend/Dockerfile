@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # excluded by .dockerignore, so they are never baked into the image.
 COPY . .
 
+# Make the entrypoint executable before dropping privileges.
+RUN chmod +x scripts/start.sh
+
 # A11: create and run as a non-root user. Files are owned by the app user so the
 # process has no unnecessary write access to the image contents.
 RUN adduser --disabled-password --gecos "" --uid 10001 appuser \
@@ -22,5 +25,8 @@ USER appuser
 
 EXPOSE 8000
 
-# Deployment command is unchanged (preserves AWS compatibility).
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Apply pending DB migrations (idempotent, additive) and THEN start the API, so
+# the deployed schema always matches the code and endpoints can't 500 on a
+# missing table. Set RUN_MIGRATIONS=false to skip when a separate migration
+# pipeline stage handles it.
+CMD ["sh", "scripts/start.sh"]

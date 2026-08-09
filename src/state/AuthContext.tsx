@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
+import { LOGIN_ROUTE } from "../services/authRouting";
 import {
   apiLogin,
   apiLogout,
@@ -67,11 +68,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     persistToken(null);
     setUser(null);
     if (current) apiLogout(current).catch(() => undefined);
-    // Single, consistent logout destination for EVERY user type: the main
-    // PT AI Patient Simulator home/login page ("/"), never the admin-only
-    // "/login" sign-in page. Navigating here also unmounts any ProtectedRoute
-    // so its unauthenticated -> /login redirect never fires on logout.
-    navigate("/", { replace: true });
+    // Single, consistent logout destination for EVERY user type (student, admin,
+    // promoted professor, system admin): the main PT AI Patient Simulator
+    // home/login page (LOGIN_ROUTE = "/"). There is no separate admin login page.
+    navigate(LOGIN_ROUTE, { replace: true });
   }, [token, persistToken, navigate]);
 
   // Validate an existing token on first load; drop it if invalid/expired.

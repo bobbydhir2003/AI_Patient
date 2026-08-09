@@ -43,7 +43,7 @@ export function RegisterPage() {
         <div className="pt-card pt-auth-card">
           <h1 className="pt-h1">Account created</h1>
           <p className="pt-sub">{pendingMessage}</p>
-          <Link className="pt-btn pt-btn-block" to="/login">Back to sign in</Link>
+          <Link className="pt-btn pt-btn-block" to="/">Back to sign in</Link>
         </div>
       </div>
     );
@@ -87,7 +87,7 @@ export function RegisterPage() {
         </button>
 
         <p className="pt-muted" style={{ marginTop: 16, fontSize: "0.88rem" }}>
-          Already have an account? <Link className="pt-link" to="/login">Sign in</Link>
+          Already have an account? <Link className="pt-link" to="/">Sign in</Link>
         </p>
       </form>
     </div>

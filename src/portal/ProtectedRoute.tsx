@@ -1,11 +1,14 @@
 import type { ReactNode } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "../state/AuthContext";
+import { LOGIN_ROUTE } from "../services/authRouting";
 import { Spinner } from "./ui";
 
 /** Guards a subtree by authentication and (optionally) role. Unauthenticated
- * users are sent to /login; authenticated users lacking the required role are
- * routed to their own home so they never see another role's pages. */
+ * users (incl. expired sessions) are sent to the single main login (LOGIN_ROUTE
+ * = "/"), never a separate admin login page; authenticated users lacking the
+ * required role are routed to their own home so they never see another role's
+ * pages. */
 export function ProtectedRoute({
   role,
   children,
@@ -28,7 +31,7 @@ export function ProtectedRoute({
     );
   }
   if (!isAuthenticated) {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+    return <Navigate to={LOGIN_ROUTE} replace state={{ from: location.pathname }} />;
   }
   if (!roleSatisfied) {
     // Both roles' home is the Patient Cases dashboard; a student who tries to

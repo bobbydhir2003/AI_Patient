@@ -22,6 +22,10 @@ export interface RoutingUser {
 /** Case-hub / Patient Cases destination shared by both roles. */
 export const PATIENT_CASES_PATH = "/student/dashboard";
 
+/** THE single login entry point + logout / unauthenticated / session-expired
+ * destination for the whole app. There is no separate admin login screen. */
+export const LOGIN_ROUTE = "/";
+
 export function isAdminRole(role: Role | null | undefined): boolean {
   return role === "admin";
 }
