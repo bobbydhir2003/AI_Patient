@@ -6,11 +6,16 @@ import {
   clearAudioCache,
   fetchVoicePreview,
   type AiConfiguration,
+  type Concurrency,
+  type ConcurrencyLane,
   type CredentialStatus,
+  type InfraCheck,
   type SystemActivity,
   type SystemAlert,
   type SystemOverview,
   type VoiceRow,
+  type WorkerFleet,
+  type WorkerRow,
 } from "../../../services/systemApi";
 import { ConfirmModal, EmptyState, useToast } from "../../../portal/ui";
 import {
@@ -30,14 +35,15 @@ type BadgeTone = "green" | "amber" | "red" | "gray";
 
 const TONE: Record<string, BadgeTone> = {
   healthy: "green", connected: "green", configured: "green", active: "green", ok: "green", enabled: "green",
-  warning: "amber", degraded: "amber",
-  failed: "red", critical: "red", error: "red",
+  warning: "amber", degraded: "amber", stale: "amber", local_only: "amber",
+  failed: "red", critical: "red", error: "red", misconfigured: "red",
   unavailable: "gray", not_configured: "gray", disabled: "gray", unknown: "gray",
 };
 
 const LABEL: Record<string, string> = {
   healthy: "Healthy", connected: "Connected", configured: "Configured", active: "Active",
-  warning: "Warning", unavailable: "Unavailable", not_configured: "Not configured",
+  warning: "Warning", degraded: "Degraded", stale: "Stale", local_only: "Local only",
+  unavailable: "Unavailable", not_configured: "Not configured", misconfigured: "Misconfigured",
   disabled: "Disabled", failed: "Failed", ok: "OK",
 };
 
@@ -170,6 +176,174 @@ export function SystemHealthOverview({ data }: { data: SystemOverview }) {
           Audio queue: {audioQueue.message}
         </p>
       )}
+    </section>
+  );
+}
+
+// -------------------------------------------------- live worker architecture
+const MONITORING_BADGE: Record<string, { tone: string; label: string }> = {
+  observed: { tone: "green", label: "Observed live" },
+  local_only: { tone: "amber", label: "Local only" },
+  unavailable: { tone: "red", label: "Unavailable" },
+};
+
+function fmtUptime(seconds: number | null | undefined): string {
+  if (seconds == null) return "—";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+function ArchNode({ title, status, lines, note }: { title: string; status?: string; lines: string[]; note?: string }) {
+  return (
+    <div className="pt-arch-node">
+      <div className="pt-arch-node-head">
+        <span className="pt-arch-node-title">{title}</span>
+        {status && <StatusBadge status={status} />}
+      </div>
+      {lines.map((l, i) => (
+        <div key={i} className="pt-arch-node-line">{l}</div>
+      ))}
+      {note && <div className="pt-arch-node-note">{note}</div>}
+    </div>
+  );
+}
+
+function WorkerCard({ w, ttl }: { w: WorkerRow; ttl: number | null }) {
+  const val = (n: number | null | undefined, suffix = "") => (n == null ? "Unavailable" : `${n}${suffix}`);
+  return (
+    <div className="pt-panel pt-worker-card">
+      <div className="pt-worker-card-head">
+        <span className="pt-worker-card-title">{w.hostname ? `${w.hostname}` : "worker"}{w.pid != null ? ` · pid ${w.pid}` : ""}</span>
+        <StatusBadge status={w.health} />
+      </div>
+      <dl className="pt-sys-card-rows">
+        <div><dt>Uptime</dt><dd>{fmtUptime(w.uptimeSeconds)}</dd></div>
+        <div><dt>Heartbeat age</dt><dd>{w.heartbeatAgeSeconds != null ? `${w.heartbeatAgeSeconds}s${ttl ? ` / ${ttl}s TTL` : ""}` : "—"}</dd></div>
+        <div><dt>Requests handled</dt><dd>{val(w.requestsTotal)}</dd></div>
+        <div><dt>Req/min</dt><dd>{val(w.requestsPerMinute)}</dd></div>
+        <div><dt>In-flight (HTTP)</dt><dd>{val(w.httpInFlight)}</dd></div>
+        <div><dt>Interview / TTS</dt><dd>{val(w.interviewInFlight)} / {val(w.ttsInFlight)}</dd></div>
+        <div><dt>Memory</dt><dd>{w.memoryMb != null ? `${w.memoryMb} MB` : "Unavailable"}</dd></div>
+        <div><dt>Current task</dt><dd>{w.currentTask ?? "Unavailable"}</dd></div>
+      </dl>
+    </div>
+  );
+}
+
+export function WorkerArchitectureSection({
+  fleet,
+  concurrency,
+  database,
+}: {
+  fleet: WorkerFleet;
+  concurrency: Concurrency;
+  database: SystemOverview["database"];
+}) {
+  const badge = MONITORING_BADGE[fleet.monitoring] ?? MONITORING_BADGE.unavailable;
+  const observedLabel =
+    fleet.observed != null ? `${fleet.observed} observed` : fleet.monitoring === "local_only" ? "local only" : "unavailable";
+  return (
+    <section className="pt-section" aria-labelledby="arch-h">
+      <div className="pt-arch-header">
+        <h2 id="arch-h" className="pt-panel-title" style={{ margin: 0 }}>Live Backend Worker Architecture</h2>
+        <span className={`pt-badge pt-badge-${badge.tone}`}>{badge.label}</span>
+      </div>
+
+      <div className="pt-panel pt-arch-flow">
+        <ArchNode title="Client Requests" lines={["Inbound HTTP"]} />
+        <span className="pt-arch-arrow">→</span>
+        <ArchNode title="Nginx" lines={["Reverse proxy"]} note="Not observable by the app" />
+        <span className="pt-arch-arrow">→</span>
+        <ArchNode title="FastAPI" status={/* real backend health handled above */ "healthy"} lines={["App router"]} />
+        <span className="pt-arch-arrow">→</span>
+        <ArchNode
+          title="Uvicorn Workers"
+          status={fleet.status === "local_only" ? "warning" : fleet.status}
+          lines={[`Configured: ${fleet.configured}`, `Observed: ${observedLabel}`]}
+        />
+        <span className="pt-arch-arrow">→</span>
+        <ArchNode
+          title="Redis / PostgreSQL"
+          status={concurrency.redis.status === "connected" ? "connected" : concurrency.redis.status}
+          lines={[`Redis: ${concurrency.redis.status}`, `DB: ${database.status}`]}
+        />
+        <span className="pt-arch-arrow">→</span>
+        <ArchNode title="OpenAI / ElevenLabs" lines={["External providers"]} note="See concurrency below" />
+      </div>
+
+      {fleet.note && <p className="pt-muted" style={{ fontSize: "0.82rem", marginTop: "var(--space-2)" }}>{fleet.note}</p>}
+
+      {fleet.workers.length > 0 ? (
+        <div className="pt-worker-grid">
+          {fleet.workers.map((w) => (
+            <WorkerCard key={w.workerId} w={w} ttl={fleet.heartbeatTtlSeconds} />
+          ))}
+        </div>
+      ) : (
+        <p className="pt-muted" style={{ marginTop: "var(--space-3)" }}>
+          {fleet.monitoring === "unavailable"
+            ? "Worker monitoring is unavailable (Redis unreachable)."
+            : "No workers observed."}
+        </p>
+      )}
+    </section>
+  );
+}
+
+// ------------------------------------------------ global concurrency & capacity
+function ConcurrencyBar({ lane }: { lane: ConcurrencyLane }) {
+  const pct = lane.limit > 0 ? Math.min(100, Math.round((lane.active / lane.limit) * 100)) : 0;
+  const tone = pct >= 90 ? "red" : pct >= 70 ? "amber" : "green";
+  return (
+    <div className="pt-conc-lane">
+      <div className="pt-conc-lane-head">
+        <span>{lane.name}</span>
+        <span className="pt-muted">
+          {lane.active} / {lane.limit} ({pct}%) · {lane.scope}
+          {lane.waiting != null ? ` · ${lane.waiting} waiting` : ""}
+          {lane.queued != null ? ` · ${lane.queued} queued` : ""}
+        </span>
+      </div>
+      <div className="pt-conc-track"><div className={`pt-conc-fill pt-conc-${tone}`} style={{ width: `${pct}%` }} /></div>
+    </div>
+  );
+}
+
+export function GlobalConcurrencySection({ concurrency }: { concurrency: Concurrency }) {
+  return (
+    <section className="pt-panel pt-section" aria-labelledby="conc-h">
+      <div className="pt-arch-header">
+        <h2 id="conc-h" className="pt-panel-title" style={{ margin: 0 }}>Global Concurrency &amp; Capacity</h2>
+        <span className="pt-muted" style={{ fontSize: "0.8rem" }}>Scope: {concurrency.scope}</span>
+      </div>
+      <ConcurrencyBar lane={concurrency.openai} />
+      <ConcurrencyBar lane={concurrency.tts} />
+      <ConcurrencyBar lane={concurrency.assessment} />
+      <p className="pt-muted" style={{ fontSize: "0.78rem", marginTop: "var(--space-2)" }}>
+        Active counts are fleet-wide via the Redis semaphore when scope is “global”; otherwise per-process. Denominators are the live configured limits.
+      </p>
+    </section>
+  );
+}
+
+// ------------------------------------------------ realtime infrastructure checks
+export function RealtimeChecksSection({ checks }: { checks: InfraCheck[] }) {
+  return (
+    <section className="pt-panel pt-section" aria-labelledby="checks-h">
+      <h2 id="checks-h" className="pt-panel-title" style={{ marginBottom: "var(--space-3)" }}>Realtime Infrastructure Checks</h2>
+      <ul className="pt-checks">
+        {checks.map((c) => (
+          <li key={c.key} className="pt-check-row">
+            <StatusBadge status={c.status} />
+            <span className="pt-check-label">{c.label}</span>
+            {c.detail && <span className="pt-muted pt-check-detail">{c.detail}</span>}
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

@@ -10,6 +10,8 @@ import {
   cancelPatientSpeech as cancelVoicePlayback,
   speakPatientResponse,
 } from "../services/patientVoiceService";
+import { resumeSharedAudioContext, unlockAudioPlayback } from "../services/audioUnlock";
+import { checkBrowserVoicePreconditions, describeMicError } from "../services/mediaErrors";
 import type { PatientExchange } from "../types/interview";
 import {
   createVoiceActivityDetector,
@@ -107,6 +109,10 @@ export function useVoiceConversation(
   const timersRef = useRef<number[]>([]);
   const inFlightRef = useRef(false);
   const interruptionInProgressRef = useRef(false); // duplicate-trigger lock
+  // Watchdog so the UI can never stay stuck on "Requesting microphone…" if the
+  // getUserMedia prompt is dismissed/ignored and the promise never settles.
+  const permissionWatchdogRef = useRef<number | null>(null);
+  const PERMISSION_TIMEOUT_MS = 30_000;
 
   const supported = isSpeechRecognitionSupported();
   const tts = isTtsSupported();
@@ -129,6 +135,13 @@ export function useVoiceConversation(
     timersRef.current = [];
   }, []);
 
+  const clearPermissionWatchdog = useCallback(() => {
+    if (permissionWatchdogRef.current !== null) {
+      window.clearTimeout(permissionWatchdogRef.current);
+      permissionWatchdogRef.current = null;
+    }
+  }, []);
+
   const stopRecognition = useCallback(() => {
     recognizerRef.current?.abort();
     recognizerRef.current = null;
@@ -144,10 +157,11 @@ export function useVoiceConversation(
   /** Stop everything the voice loop owns (mic, VAD, TTS, timers). */
   const teardown = useCallback(() => {
     clearTimers();
+    clearPermissionWatchdog();
     stopRecognition();
     vadRef.current?.stopMonitoring();
     cancelVoicePlayback(); // aborts pending TTS + stops ElevenLabs/browser audio
-  }, [clearTimers, stopRecognition]);
+  }, [clearTimers, clearPermissionWatchdog, stopRecognition]);
 
   // ------------------------------------------------------------------
   const startListening = useCallback(() => {
@@ -290,35 +304,73 @@ export function useVoiceConversation(
   }
 
   // ------------------------------------------------------------------
-  const startConversation = useCallback(() => {
-    if (!supported || !optionsRef.current.enabled) return;
-    const current = machineRef.current.state;
-    const next =
-      current === "PAUSED" ? dispatch({ type: "RESUME" }) : dispatch({ type: "START" });
-    if (next.state !== "REQUESTING_PERMISSION") return;
+  /** Shared permission → mic → calibrate → listen flow. Assumes the machine is
+   * already in REQUESTING_PERMISSION. Centralizes the mobile-critical pieces:
+   * pre-flight capability check, a watchdog so the UI never hangs, and
+   * per-error-type messaging. */
+  const acquireMicAndListen = useCallback(
+    async (calibrateMs: number) => {
+      const pre = checkBrowserVoicePreconditions();
+      if (!pre.ok && pre.info) {
+        dispatch({ type: "PERMISSION_DENIED", message: pre.info.message });
+        return;
+      }
+      clearPermissionWatchdog();
+      permissionWatchdogRef.current = window.setTimeout(() => {
+        permissionWatchdogRef.current = null;
+        if (machineRef.current.state === "REQUESTING_PERMISSION") {
+          releaseMedia();
+          dispatch({
+            type: "PERMISSION_DENIED",
+            message:
+              "The microphone request timed out. Tap Retry to try again, or continue by typing.",
+          });
+        }
+      }, PERMISSION_TIMEOUT_MS);
 
-    void (async () => {
       try {
         if (!streamRef.current) {
           streamRef.current = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
           devLogTrackSettings(streamRef.current);
           vadRef.current = createVoiceActivityDetector(streamRef.current);
         }
+        // Keep the shared playback context warm (it was unlocked on the gesture).
+        resumeSharedAudioContext();
         // Ambient-noise calibration (initial floor for the echo baseline).
-        await vadRef.current?.calibrate(600);
+        await vadRef.current?.calibrate(calibrateMs);
+        clearPermissionWatchdog();
+        // If the watchdog fired or the user stopped while we awaited, don't force
+        // LISTENING onto a stale state.
+        if (machineRef.current.state !== "REQUESTING_PERMISSION") {
+          releaseMedia();
+          return;
+        }
         const granted = dispatch({ type: "PERMISSION_GRANTED" });
         if (granted.state === "LISTENING") startListening();
       } catch (err) {
+        clearPermissionWatchdog();
         console.error("Microphone unavailable:", err);
         releaseMedia();
-        dispatch({
-          type: "PERMISSION_DENIED",
-          message:
-            "Microphone access was denied or no microphone is available. Allow access and retry, or continue by typing.",
-        });
+        const info = describeMicError(err);
+        dispatch({ type: "PERMISSION_DENIED", message: info.message });
       }
-    })();
-  }, [dispatch, releaseMedia, startListening, supported]);
+    },
+    [dispatch, releaseMedia, startListening, clearPermissionWatchdog],
+  );
+
+  const startConversation = useCallback(() => {
+    // CRITICAL (iOS Safari): unlock audio playback from THIS user gesture, before
+    // any await, so the patient's TTS (produced after the backend round-trip)
+    // is allowed to play without a second tap.
+    unlockAudioPlayback();
+    if (!optionsRef.current.enabled) return;
+    if (!supported) return; // ConversationControl shows the "type instead" note
+    const current = machineRef.current.state;
+    const next =
+      current === "PAUSED" ? dispatch({ type: "RESUME" }) : dispatch({ type: "START" });
+    if (next.state !== "REQUESTING_PERMISSION") return;
+    void acquireMicAndListen(600);
+  }, [dispatch, acquireMicAndListen, supported]);
 
   const stopConversation = useCallback(() => {
     teardown();
@@ -347,29 +399,15 @@ export function useVoiceConversation(
   }, []);
 
   const retry = useCallback(() => {
+    // Retry is also a user gesture — re-unlock in case the first attempt failed
+    // before audio was primed.
+    unlockAudioPlayback();
     if (machineRef.current.state !== "ERROR") return;
     // Re-enter through permission/calibration (stream may still be alive).
     const next = dispatch({ type: "RETRY" });
     if (next.state !== "REQUESTING_PERMISSION") return;
-    void (async () => {
-      try {
-        if (!streamRef.current) {
-          streamRef.current = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
-          devLogTrackSettings(streamRef.current);
-          vadRef.current = createVoiceActivityDetector(streamRef.current);
-        }
-        await vadRef.current?.calibrate(400);
-        const granted = dispatch({ type: "PERMISSION_GRANTED" });
-        if (granted.state === "LISTENING") startListening();
-      } catch {
-        releaseMedia();
-        dispatch({
-          type: "PERMISSION_DENIED",
-          message: "Microphone access is still unavailable. You can continue by typing.",
-        });
-      }
-    })();
-  }, [dispatch, releaseMedia, startListening]);
+    void acquireMicAndListen(400);
+  }, [dispatch, acquireMicAndListen]);
 
   const reset = useCallback(() => {
     teardown();
@@ -413,16 +451,42 @@ export function useVoiceConversation(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Background / screen-lock safety. When the tab is hidden (app switch, screen
+  // lock, incoming call) we stop mic capture + recognition, cancel patient
+  // audio, release the microphone, and move to PAUSED. We NEVER auto-resume on
+  // return — the student explicitly taps Resume — so no duplicate turns and no
+  // runaway AudioContext processing in the background.
+  useEffect(() => {
+    function pauseForBackground() {
+      if (!isConversationActive(machineRef.current.state)) return;
+      teardown();
+      releaseMedia();
+      optionsRef.current.onInterim("");
+      dispatch({ type: "STOP" }); // → PAUSED (resumable)
+    }
+    function onVisibility() {
+      if (document.visibilityState === "hidden") pauseForBackground();
+      else resumeSharedAudioContext(); // foreground: keep ctx warm, don't listen
+    }
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pagehide", pauseForBackground);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pagehide", pauseForBackground);
+    };
+  }, [teardown, releaseMedia, dispatch]);
+
   // Full cleanup on unmount - the microphone must never stay active.
   useEffect(() => {
     return () => {
       clearTimers();
+      clearPermissionWatchdog();
       recognizerRef.current?.abort();
       cancelVoicePlayback();
       vadRef.current?.dispose();
       streamRef.current?.getTracks().forEach((track) => track.stop());
     };
-  }, [clearTimers]);
+  }, [clearTimers, clearPermissionWatchdog]);
 
   return {
     state: machine.state,

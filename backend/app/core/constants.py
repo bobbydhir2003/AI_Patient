@@ -81,12 +81,19 @@ ROLE_STUDENT = "student"
 ROLE_PATIENT = "patient"
 
 # --- User account roles (authentication / RBAC) ---
+# The application has exactly TWO roles. Every admin holds ALL administrative
+# powers; there is no separate super/system admin tier anymore.
 USER_ROLE_STUDENT = "student"
 USER_ROLE_ADMIN = "admin"
+USER_ROLES = (USER_ROLE_STUDENT, USER_ROLE_ADMIN)
+# Roles that may reach the admin area.
+ADMIN_ROLES = (USER_ROLE_ADMIN,)
+
+# LEGACY (do NOT use for authorization). Kept only so the role-consolidation
+# migration and defensive normalization can recognize pre-existing rows whose
+# role was "super_admin" and treat them as ordinary admins.
 USER_ROLE_SUPER_ADMIN = "super_admin"
-USER_ROLES = (USER_ROLE_STUDENT, USER_ROLE_ADMIN, USER_ROLE_SUPER_ADMIN)
-# Roles that may reach the admin area (super_admin is a strict superset of admin).
-ADMIN_ROLES = (USER_ROLE_ADMIN, USER_ROLE_SUPER_ADMIN)
+LEGACY_ADMIN_ROLES = ("super_admin", "system_admin")
 
 # --- Account status (separate from role; approval lifecycle) ---
 ACCOUNT_STATUS_PENDING = "PENDING"    # newly registered; awaiting admin approval

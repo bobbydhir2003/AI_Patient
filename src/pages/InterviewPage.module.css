@@ -1,223 +1,516 @@
+.page {
+  flex: 1;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  height: calc(100vh - 68px);
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 20%, rgba(18, 30, 48, 0.14), transparent 38%),
+    #020304;
+}
+
 .layout {
   display: grid;
-  grid-template-columns: 280px 1fr;
-  gap: var(--space-5);
-  align-items: start;
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: 24px;
+  align-items: stretch;
+  width: calc(100% - 80px);
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 0 0 24px;
+  height: calc(100% - 68px);
+  min-height: 0;
+}
+
+.offlineBanner,
+.errorBanner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: calc(100% - 80px);
+  max-width: 1500px;
+  margin: 0 auto 16px;
+  padding: 14px 18px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(145deg, rgba(16, 20, 27, 0.88), rgba(8, 11, 16, 0.92));
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.offlineBanner {
+  border-color: rgba(185, 28, 28, 0.55);
+}
+
+.offlineText {
+  color: rgba(208, 214, 224, 0.76);
+  font-size: 0.9rem;
+  margin: 6px 0 0;
+}
+
+.errorBanner {
+  border-color: rgba(217, 119, 6, 0.45);
+  color: #fff;
+  font-size: 0.92rem;
+}
+
+.mobilePatientHeader {
+  display: none;
 }
 
 .sidebar {
-  padding: var(--space-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-  position: sticky;
-  top: var(--space-5);
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
 }
 
-.statusRow {
+.patientPanel {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  border-top: 1px solid var(--color-border);
-  padding-top: var(--space-4);
+  gap: 18px;
+  padding: 22px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: linear-gradient(145deg, rgba(16, 20, 27, 0.88), rgba(8, 11, 16, 0.92));
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
-.statusItem {
+.patientHero {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 18px;
+  align-items: center;
+}
+
+.patientImage {
+  width: 132px;
+  height: 132px;
+  object-fit: cover;
+  object-position: center top;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #0a0f14;
+}
+
+.patientIdentity {
+  min-width: 0;
+}
+
+.patientName {
+  margin: 0;
+  color: #fff;
+  font-size: 1.6rem;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.patientAge {
+  margin: 8px 0 0;
+  color: rgba(204, 210, 220, 0.76);
+  font-size: 1rem;
+}
+
+.statusCard {
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(11, 16, 24, 0.64);
+}
+
+.statusPanelRow {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  font-size: 0.85rem;
+  gap: 12px;
+  padding: 16px 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.statusLabel {
-  color: var(--color-text-muted);
+.statusPanelRow:first-child {
+  border-top: 0;
+}
+
+.statusInfoLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(223, 228, 236, 0.88);
+  font-size: 1rem;
 }
 
 .statusValue {
-  font-weight: 600;
+  color: #fff;
+  font-weight: 700;
+  font-size: 1.05rem;
 }
 
-.statusBadge {
+.statusBadge,
+.headerPill {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-1) var(--space-3);
+  gap: 8px;
+  min-height: 30px;
+  padding: 0 12px;
   border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  background-color: var(--color-bg-elevated);
-  border: 1px solid var(--color-border-strong);
-  width: fit-content;
+  font-size: 0.84rem;
+  font-weight: 700;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+  color: #fff;
+  white-space: nowrap;
 }
 
 .statusDot {
   width: 8px;
   height: 8px;
-  border-radius: 50%;
-  background-color: var(--color-text-muted);
+  border-radius: 999px;
+  background: #6b7280;
 }
 
-.statusBadge.idle .statusDot,
-.statusBadge.finished .statusDot {
-  background-color: var(--color-text-muted);
+.idle .statusDot,
+.finished .statusDot {
+  background: #9ca3af;
 }
 
-.statusBadge.listening .statusDot,
-.statusBadge.processing .statusDot,
-.statusBadge.cooldown .statusDot {
-  background-color: var(--color-warning);
+.listening .statusDot,
+.processing .statusDot,
+.cooldown .statusDot {
+  background: #f59e0b;
 }
 
-.statusBadge.speaking .statusDot {
-  background-color: var(--color-success);
+.speaking .statusDot,
+.conn-connected .statusDot {
+  background: #22c55e;
 }
 
-.statusBadge.error .statusDot {
-  background-color: var(--color-danger);
+.error .statusDot,
+.conn-offline .statusDot,
+.conn-error .statusDot {
+  background: #ef4444;
 }
 
-.statusBadge.conn-connected .statusDot {
-  background-color: var(--color-success);
+.conn-connecting .statusDot {
+  background: #f59e0b;
 }
 
-.statusBadge.conn-connecting .statusDot {
-  background-color: var(--color-warning);
+.audioSettings {
+  margin-top: 14px;
+  padding: 20px 22px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: linear-gradient(145deg, rgba(16, 20, 27, 0.88), rgba(8, 11, 16, 0.92));
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
-.statusBadge.conn-offline .statusDot,
-.statusBadge.conn-error .statusDot {
-  background-color: var(--color-danger);
+.audioSettingsSummary {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  cursor: pointer;
+  list-style: none;
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.audioSettingsSummary::-webkit-details-marker {
+  display: none;
+}
+
+.audioSettingsSummary::before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  margin-right: 10px;
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 56, 65, 0.28), rgba(255, 56, 65, 0.02)),
+    rgba(255, 255, 255, 0.03);
+  box-shadow: inset 0 0 0 1px rgba(194, 39, 45, 0.35);
+}
+
+.audioSettingsBody {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding-top: 16px;
 }
 
 .voiceToggle {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  font-size: 0.82rem;
-  color: var(--color-text-secondary);
-  cursor: pointer;
+  gap: 12px;
+  color: rgba(223, 228, 236, 0.9);
+  font-size: 0.96rem;
+}
+
+.voiceToggle input[type="checkbox"] {
+  accent-color: #dc2626;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
 }
 
 .sensitivityRow {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
-  font-size: 0.82rem;
-  color: var(--color-text-secondary);
+  gap: 12px;
+  color: rgba(223, 228, 236, 0.9);
+  font-size: 0.96rem;
 }
 
 .sensitivitySelect {
-  background-color: var(--color-bg-elevated);
-  color: var(--color-text-primary);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
-  font-size: 0.8rem;
-  padding: 4px 8px;
-}
-
-.sensitivitySelect:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  min-height: 42px;
+  min-width: 154px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(8, 12, 18, 0.86);
+  color: #fff;
+  font-size: 0.92rem;
 }
 
 .settingDisabled {
-  opacity: 0.6;
+  opacity: 0.58;
 }
 
+.toggleText {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settingSubtitle,
 .settingNote {
-  font-size: 0.72rem;
-  color: var(--color-text-muted);
-  margin: -4px 0 0;
+  color: rgba(168, 176, 189, 0.7);
+  font-size: 0.78rem;
   line-height: 1.4;
 }
 
-.offlineBanner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  padding: var(--space-4) var(--space-5);
-  margin-bottom: var(--space-5);
-  border-color: var(--color-danger);
+.settingNote {
+  margin: -6px 0 0 30px;
 }
 
-.offlineText {
-  color: var(--color-text-secondary);
-  font-size: 0.88rem;
-  margin-top: var(--space-1);
+.endButton {
+  width: 100%;
+  min-height: 58px;
+  margin-top: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(59, 130, 246, 0.85);
+  background: rgba(4, 12, 24, 0.55);
+  color: #60a5fa;
+  font-size: 1rem;
+  font-weight: 700;
+  box-shadow:
+    0 0 16px rgba(59, 130, 246, 0.12),
+    inset 0 0 12px rgba(59, 130, 246, 0.04);
 }
 
-.errorBanner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  padding: var(--space-3) var(--space-5);
-  margin-bottom: var(--space-5);
-  border-color: var(--color-warning);
-  font-size: 0.9rem;
-}
-
-.connectCard {
-  max-width: 480px;
-  padding: var(--space-6);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  align-items: flex-start;
-}
-
-.devSourceLabel {
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
+.endButton:hover:not(:disabled) {
+  border-color: #60a5fa;
+  box-shadow:
+    0 0 24px rgba(59, 130, 246, 0.28),
+    inset 0 0 12px rgba(59, 130, 246, 0.05);
 }
 
 .mainPanel {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  min-height: 0;
+  height: 100%;
 }
 
 .mainHeader {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 18px;
+  flex-shrink: 0;
+}
+
+.mainHeaderText {
+  min-width: 0;
 }
 
 .mainTitle {
-  font-size: 1.2rem;
-  font-weight: 700;
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
+  margin: 0;
+  color: #fff;
+  font-size: clamp(1.75rem, 2vw, 2rem);
+  font-weight: 800;
+  line-height: 1.08;
+  letter-spacing: -0.04em;
+}
+
+.mainSubtitle {
+  margin: 8px 0 0;
+  color: rgba(202, 209, 220, 0.82);
+  font-size: 0.98rem;
+  line-height: 1.45;
 }
 
 .advancedChip {
-  font-size: 0.66rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--color-accent-hover);
-  border: 1px solid var(--color-accent-border);
+  display: inline-flex;
+  align-items: center;
+  margin-left: 12px;
+  min-height: 24px;
+  padding: 0 10px;
   border-radius: 999px;
-  padding: 3px 10px;
+  border: 1px solid rgba(194, 39, 45, 0.42);
+  color: #ff5056;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  vertical-align: middle;
 }
 
-@media (max-width: 900px) {
+.headerPill {
+  min-height: 50px;
+  padding: 0 18px;
+  border-color: rgba(34, 197, 94, 0.26);
+  background: rgba(7, 43, 24, 0.4);
+  color: #4ade80;
+}
+
+.mainPanel :global(.card) {
+  background: linear-gradient(145deg, rgba(16, 20, 27, 0.88), rgba(8, 11, 16, 0.92));
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 20px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  /* The card fills the remaining space in the fixed-height main panel and clips
+     internally, so the transcript (inside .messages) is the ONLY scroll area.
+     min-height:0 is required or the flex child refuses to shrink below content. */
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.statusFooter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+  flex-shrink: 0;
+}
+
+.footerItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(10, 14, 20, 0.82);
+  color: rgba(205, 212, 224, 0.82);
+  font-size: 0.82rem;
+}
+
+@media (max-width: 1100px) {
+  .page {
+    height: auto;
+    min-height: calc(100vh - 68px);
+    overflow: visible;
+  }
+
   .layout {
     grid-template-columns: 1fr;
+    height: auto;
+    min-height: 0;
+    width: calc(100% - 48px);
   }
 
   .sidebar {
-    position: static;
+    overflow: visible;
+    padding-right: 0;
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 767px) {
+  .page {
+    min-height: calc(100vh - 60px);
+  }
+
+  .layout {
+    width: calc(100% - 32px);
+    padding: 0 0 24px;
+    gap: 16px;
+  }
+
+  .offlineBanner,
+  .errorBanner {
+    margin: 0 16px 14px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .mobilePatientHeader {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: calc(100% - 32px);
+    margin: 0 16px 16px;
+    padding: 14px;
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    background: linear-gradient(145deg, rgba(16, 20, 27, 0.88), rgba(8, 11, 16, 0.92));
+  }
+
+  .mobilePatientImg {
+    width: 64px;
+    height: 64px;
+    border-radius: 12px;
+    object-fit: cover;
+    object-position: center top;
+  }
+
+  .mobilePatientMeta {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .mobilePatientName {
+    color: #fff;
+    font-weight: 800;
+    font-size: 1rem;
+  }
+
+  .mobilePatientAge,
+  .mobilePatientStatus {
+    color: rgba(204, 210, 220, 0.74);
+    font-size: 0.84rem;
+  }
+
+  .sidebar {
+    display: none;
+  }
+
+  .mainPanel :global(.card) {
+    min-height: auto;
+  }
+
   .mainHeader {
     flex-direction: column;
     align-items: stretch;
-    gap: var(--space-3);
+  }
+
+  .headerPill {
+    align-self: flex-start;
+    min-height: 42px;
+  }
+
+  .statusFooter {
+    gap: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .endButton {
+    transition: none;
   }
 }

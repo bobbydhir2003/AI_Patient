@@ -10,18 +10,15 @@ export function ProtectedRoute({
   role,
   children,
 }: {
-  role?: "student" | "admin" | "super_admin";
+  role?: "student" | "admin";
   children: ReactNode;
 }) {
   const { loading, isAuthenticated, user } = useAuth();
   const location = useLocation();
 
-  // super_admin is a strict superset of admin, so it satisfies an "admin" gate.
-  // A "super_admin" gate is satisfied only by a super_admin.
-  const roleSatisfied =
-    !role ||
-    user?.role === role ||
-    (role === "admin" && user?.role === "super_admin");
+  // Two roles only. A gate is satisfied when no role is required or the user's
+  // role matches exactly.
+  const roleSatisfied = !role || user?.role === role;
 
   if (loading) {
     return (
@@ -34,9 +31,9 @@ export function ProtectedRoute({
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }
   if (!roleSatisfied) {
-    const home =
-      user?.role === "admin" || user?.role === "super_admin" ? "/admin" : "/student/dashboard";
-    return <Navigate to={home} replace />;
+    // Both roles' home is the Patient Cases dashboard; a student who tries to
+    // reach an admin route is sent there (never to an admin-only page).
+    return <Navigate to="/student/dashboard" replace />;
   }
   return <>{children}</>;
 }

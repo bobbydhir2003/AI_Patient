@@ -2,7 +2,6 @@ import { useNavigate } from "react-router-dom";
 import type { PatientCase } from "../../types/case";
 import { AppImage } from "../common/AppImage";
 import styles from "./CaseCard.module.css";
-import catalogStyles from "./CaseCatalog.module.css";
 
 interface CaseCardProps {
   patientCase: PatientCase;
@@ -19,21 +18,24 @@ export function CaseCard({ patientCase }: CaseCardProps) {
         alt={`${patientCase.name} patient portrait`}
         className={styles.image}
       />
-      <h3 className={styles.name}>{patientCase.name}</h3>
-      <p className={styles.age}>Age: {patientCase.age}</p>
-      <p className={styles.description}>{patientCase.shortDescription}</p>
-      {patientCase.setting && (
-        <div className={catalogStyles.cardMeta}>
-          <span>{patientCase.setting}</span>
-        </div>
-      )}
-      <button
-        type="button"
-        className="btn btn-primary"
-        onClick={() => navigate(`/cases/${patientCase.id}`)}
-      >
-        Start Case
-      </button>
+      <div className={styles.body}>
+        {patientCase.setting && (
+          <div className={styles.metaRow}>
+            <span className={styles.settingBadge}>{patientCase.setting}</span>
+          </div>
+        )}
+        <h3 className={styles.name}>{patientCase.name}</h3>
+        <p className={styles.age}>Age: {patientCase.age}</p>
+        <p className={styles.description}>{patientCase.shortDescription}</p>
+        <button
+          type="button"
+          className={styles.startButton}
+          onClick={() => navigate(`/cases/${patientCase.id}`)}
+        >
+          <span>Start Interview</span>
+          <span className={styles.buttonArrow} aria-hidden="true">›</span>
+        </button>
+      </div>
     </article>
   );
 }

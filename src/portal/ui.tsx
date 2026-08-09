@@ -1,4 +1,48 @@
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
+
+/** Accessible modal shell: role=dialog, ESC to cancel, focus trap, restores
+ * focus on close, respects the backdrop click. Shared by every confirm dialog
+ * so keyboard users and screen readers are handled consistently. */
+function useModalA11y(onCancel: () => void, busy: boolean) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const node = ref.current;
+    // Focus the first sensible control inside the dialog.
+    const focusables = () =>
+      Array.from(
+        node?.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      ).filter((el) => !el.hasAttribute("disabled"));
+    focusables()[0]?.focus();
+
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape" && !busy) {
+        e.stopPropagation();
+        onCancel();
+      } else if (e.key === "Tab") {
+        const items = focusables();
+        if (items.length === 0) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      previouslyFocused?.focus?.();
+    };
+  }, [onCancel, busy]);
+  return ref;
+}
 
 // ------------------------------------------------------------------ states
 export function Spinner({ label = "Loading…" }: { label?: string }) {
@@ -149,11 +193,22 @@ export function ConfirmModal({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const ref = useModalA11y(onCancel, busy);
+  const titleId = useId();
+  const bodyId = useId();
   return (
     <div className="pt-modal-backdrop" onClick={busy ? undefined : onCancel}>
-      <div className={`pt-modal ${danger ? "danger" : ""}`} onClick={(e) => e.stopPropagation()}>
-        <h3>{title}</h3>
-        <div className="pt-sub" style={{ marginBottom: 0 }}>{body}</div>
+      <div
+        ref={ref}
+        className={`pt-modal ${danger ? "danger" : ""}`}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={bodyId}
+      >
+        <h3 id={titleId}>{title}</h3>
+        <div id={bodyId} className="pt-sub" style={{ marginBottom: 0 }}>{body}</div>
         <div className="pt-modal-actions">
           <button className="pt-btn pt-btn-secondary" onClick={onCancel} disabled={busy}>
             Cancel

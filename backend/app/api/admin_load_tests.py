@@ -1,16 +1,17 @@
 """Load & Capacity Testing admin API (Priority J).
 
-SUPER-ADMIN ONLY. Every route requires require_super_admin, so a regular admin
-or a student receives 403. The load generator runs in a SEPARATE process; these
-endpoints only create/read/stop jobs and return REAL measured telemetry. Real
-(paid) provider modes require an explicit confirmation flag before they start.
+ADMIN ONLY. Every route requires require_admin, so a student receives 403 while
+every administrator has full access. The load generator runs in a SEPARATE
+process; these endpoints only create/read/stop jobs and return REAL measured
+telemetry. Real (paid) provider modes require an explicit confirmation flag
+before they start.
 """
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.database.connection import get_db
-from app.dependencies.auth import require_super_admin
+from app.dependencies.auth import require_admin
 from app.models.user import User
 from app.schemas.load_test_schema import LoadTestCreateRequest
 from app.services import load_test_service
@@ -18,7 +19,7 @@ from app.services import load_test_service
 router = APIRouter(
     prefix="/admin/system/load-tests",
     tags=["admin-load-tests"],
-    dependencies=[Depends(require_super_admin)],
+    dependencies=[Depends(require_admin)],
 )
 
 
@@ -43,7 +44,7 @@ def config() -> dict:
 @router.post("")
 def create(
     payload: LoadTestCreateRequest,
-    current_user: User = Depends(require_super_admin),
+    current_user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> dict:
     job = load_test_service.create_job(db, req=payload, created_by=current_user.email)

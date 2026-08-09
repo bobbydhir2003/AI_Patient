@@ -190,16 +190,24 @@ def test_history_never_stores_raw_key(engine, enc):
         db.close()
 
 
-def test_credential_replace_requires_super_admin(engine, enc):
-    from tests.test_auth import make_admin
+def test_credential_replace_allowed_for_any_admin(engine, enc):
+    """Two-role model: every admin may replace credentials (no super-admin tier).
+    A student is still forbidden."""
+    from tests.test_auth import make_admin, register
 
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
         make_admin(engine, email="norm_admin@school.edu")  # role=admin
         ah = bearer(login_token(c, "norm_admin@school.edu", "adminpass1"))
-        # normal admin can view + test, but NOT replace
+        # normal admin can view AND replace
         assert c.get("/api/admin/runtime/credentials", headers=ah).status_code == 200
         r = c.post("/api/admin/runtime/credentials/openai", json={"key": "sk-new-123456789"}, headers=ah)
-        assert r.status_code == 403
+        assert r.status_code == 200
+
+        # a student is forbidden
+        register(c, email="stud_cred@school.edu", password="studpass1", number="SC1")
+        sh = bearer(login_token(c, "stud_cred@school.edu", "studpass1"))
+        assert c.post("/api/admin/runtime/credentials/openai",
+                      json={"key": "sk-new-123456789"}, headers=sh).status_code == 403
 
 
 def test_masked_keys_viewable_without_secret(engine):

@@ -17,6 +17,16 @@ def get_engine():
         kwargs: dict = {"pool_pre_ping": True}
         if settings.database_url.startswith("sqlite"):
             kwargs = {"connect_args": {"check_same_thread": False}}
+        else:
+            # Explicit, configurable pool sizing for multi-worker deployments.
+            # Fleet-wide connections ~= app_workers x (pool_size + max_overflow);
+            # size Postgres max_connections accordingly (see docs/DEPLOYMENT.md).
+            kwargs.update({
+                "pool_size": settings.db_pool_size,
+                "max_overflow": settings.db_max_overflow,
+                "pool_recycle": settings.db_pool_recycle_seconds,
+                "pool_timeout": settings.db_pool_timeout_seconds,
+            })
         _engine = create_engine(settings.database_url, **kwargs)
         _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False, expire_on_commit=False)
     return _engine

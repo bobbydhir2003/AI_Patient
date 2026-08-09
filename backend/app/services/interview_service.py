@@ -158,6 +158,16 @@ def send_student_message(
 
     db.commit()
 
+    # Record real per-session OpenAI usage AFTER the turn is persisted. One event
+    # per real model request (a joint 'both' turn made two requests → two events).
+    # Best-effort: never raises, never slows the turn's own transaction.
+    from app.services import usage_recorder
+
+    for result in results:
+        usage_recorder.record_openai_usage(
+            db, session.id, session.student_id, session.case_id, result.usage
+        )
+
     primary = patient_turns[0]
     logger.info(
         "turn_completed session_id=%s client_turn_id=%s case_id=%s turn=%d speaker=%s "

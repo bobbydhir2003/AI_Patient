@@ -18,6 +18,7 @@ from app.core.constants import (
     STANDARD_CASE_IDS,
     STORAGE_WARNING_PERCENT,
 )
+from app.core.redis_client import redis_health
 from app.database.connection import get_engine
 from app.patient_engine import case_loader
 from app.repositories.audit_repository import AuditRepository
@@ -27,15 +28,22 @@ from app.schemas.system_schema import (
     AlertOut,
     AudioQueueHealthOut,
     BackendHealthOut,
+    ConcurrencyLaneOut,
+    ConcurrencyOut,
     ConversationSettingsOut,
     CredentialStatusOut,
     DatabaseHealthOut,
     ElevenLabsConfigOut,
+    InfraCheckOut,
     OpenAIConfigOut,
+    RedisHealthOut,
     ServiceHealthOut,
     StorageHealthOut,
+    SystemLiveOut,
     SystemOverviewOut,
     VoiceRowOut,
+    WorkerFleetOut,
+    WorkerOut,
 )
 from app.voice.audio_cache import get_audio_cache
 from app.voice.voice_profile_loader import load_voice_profile
@@ -84,6 +92,19 @@ def check_database(db: Session) -> DatabaseHealthOut:
         latency_ms=latency,
         migration_version=migration_version,
         checked_at=checked_at,
+    )
+
+
+def check_redis() -> RedisHealthOut:
+    """Real reachability check for the global-concurrency-control backing
+    store. Never fabricated: not_configured when REDIS_URL is unset,
+    unavailable when configured but unreachable."""
+    h = redis_health()
+    return RedisHealthOut(
+        status=h["status"],
+        required=h["required"],
+        latency_ms=h["latency_ms"],
+        checked_at=_now_iso(),
     )
 
 
@@ -275,6 +296,9 @@ def build_alerts(
     openai: ServiceHealthOut,
     elevenlabs: ServiceHealthOut,
     storage: StorageHealthOut,
+    redis: RedisHealthOut | None = None,
+    fleet: WorkerFleetOut | None = None,
+    concurrency: ConcurrencyOut | None = None,
 ) -> list[AlertOut]:
     """Alerts derived ONLY from the real checks just performed."""
     now = _now_iso()
@@ -282,6 +306,34 @@ def build_alerts(
     if database.status != "connected":
         alerts.append(AlertOut(id="db-unavailable", severity="critical", service="Database",
                                message="Database health check failed.", detected_at=now))
+    if redis is not None and redis.required and redis.status != "connected":
+        alerts.append(AlertOut(
+            id="redis-unavailable", severity="critical", service="Redis",
+            message="Redis is required for global concurrency control in this environment "
+                    "but is unreachable; OpenAI/TTS/assessment admission is failing closed.",
+            detected_at=now,
+        ))
+    # Worker fleet: only alert on a REAL observed shortfall (never in local_only,
+    # where the fleet is deliberately not claimed).
+    if fleet is not None and fleet.monitoring == "observed" and fleet.observed is not None:
+        if fleet.observed < fleet.configured:
+            alerts.append(AlertOut(
+                id="workers-degraded", severity="warning", service="Workers",
+                message=f"Configured {fleet.configured} workers but only {fleet.observed} "
+                        f"observed alive; the fleet is degraded.",
+                detected_at=now,
+            ))
+    # Concurrency near a configured limit (>=90% of the live cap).
+    if concurrency is not None:
+        for lane in (concurrency.openai, concurrency.tts):
+            if lane.limit and lane.active / lane.limit >= 0.9:
+                alerts.append(AlertOut(
+                    id=f"concurrency-{lane.name.lower().split()[0]}", severity="warning",
+                    service=lane.name,
+                    message=f"{lane.name} concurrency at {lane.active}/{lane.limit} "
+                            f"(near the configured limit).",
+                    detected_at=now,
+                ))
     if not openai.configured:
         alerts.append(AlertOut(id="openai-not-configured", severity="warning", service="OpenAI",
                                message="OpenAI API key is not configured.", detected_at=now))
@@ -318,9 +370,279 @@ def list_activity(db: Session, limit: int = 8) -> list[ActivityOut]:
     return out
 
 
+# ----------------------------- worker fleet -----------------------------
+def _worker_row(rec: dict, ttl_seconds: int) -> WorkerOut:
+    """Map a real Redis heartbeat record to the API shape. Health is derived
+    from heartbeat freshness only - a worker whose beat is aging toward its TTL
+    is 'stale', never silently 'healthy'."""
+    from datetime import datetime as _dt
+
+    age: float | None = None
+    hb = rec.get("heartbeat_at")
+    if hb:
+        try:
+            beat = _dt.fromisoformat(hb)
+            if beat.tzinfo is None:
+                beat = beat.replace(tzinfo=timezone.utc)
+            age = round((datetime.now(timezone.utc) - beat).total_seconds(), 1)
+        except Exception:
+            age = None
+    if age is None:
+        health = "healthy"  # present in Redis but timestamp unparseable; TTL still guards it
+    elif age <= ttl_seconds:
+        health = "healthy"
+    else:
+        health = "stale"
+    return WorkerOut(
+        worker_id=rec.get("worker_id", ""),
+        pid=rec.get("pid"),
+        hostname=rec.get("hostname", ""),
+        health=health,
+        uptime_seconds=rec.get("uptime_seconds"),
+        heartbeat_at=hb,
+        heartbeat_age_seconds=age,
+        requests_total=rec.get("requests_total"),
+        requests_per_minute=rec.get("requests_per_minute"),
+        http_in_flight=rec.get("http_in_flight"),
+        interview_in_flight=rec.get("interview_in_flight"),
+        tts_in_flight=rec.get("tts_in_flight"),
+        assessment_in_flight=rec.get("assessment_in_flight"),
+        memory_mb=rec.get("memory_mb"),
+        current_task=None,  # not recorded per-worker in this deployment
+    )
+
+
+def worker_fleet() -> WorkerFleetOut:
+    """Observed backend worker fleet, derived from live Redis heartbeats.
+
+    - Redis not configured  -> monitoring 'local_only': show only THIS process's
+      real record; do NOT claim fleet health (single-process/dev).
+    - Redis configured, up   -> monitoring 'observed': the live fleet.
+    - Redis configured, down -> monitoring 'unavailable': not observable."""
+    from app.core import worker_registry
+    from app.core.redis_client import redis_configured
+
+    s = get_settings()
+    configured = max(0, s.app_workers)
+    ttl = s.worker_heartbeat_ttl_seconds
+    base = dict(
+        mode=s.deployment_mode,
+        configured=configured,
+        heartbeat_interval_seconds=s.worker_heartbeat_interval_seconds,
+        heartbeat_ttl_seconds=ttl,
+    )
+
+    if not redis_configured():
+        # No shared store: the fleet cannot be observed across processes. Surface
+        # only this process, honestly labelled - never a fabricated 4/4.
+        me = _worker_row(worker_registry.get_heartbeat().local_payload(), ttl)
+        return WorkerFleetOut(
+            monitoring="local_only",
+            status="local_only",
+            observed=None,
+            healthy=None,
+            note="Redis is not configured; cross-worker monitoring is unavailable. "
+                 "Showing this process only (single-process/local development).",
+            workers=[me],
+            **base,
+        )
+
+    records = worker_registry.observed_workers()
+    if records is None:
+        return WorkerFleetOut(
+            monitoring="unavailable",
+            status="unavailable",
+            observed=None,
+            healthy=None,
+            note="Redis is configured but unreachable; worker fleet cannot be observed.",
+            workers=[],
+            **base,
+        )
+
+    workers = [_worker_row(r, ttl) for r in records]
+    observed = len(workers)
+    healthy = sum(1 for w in workers if w.health == "healthy")
+    return WorkerFleetOut(
+        monitoring="observed",
+        status=worker_registry.fleet_status(configured, observed),
+        observed=observed,
+        healthy=healthy,
+        note="",
+        workers=workers,
+        **base,
+    )
+
+
+# ----------------------------- global concurrency -----------------------------
+def concurrency_snapshot(db: Session | None = None) -> ConcurrencyOut:
+    """Real global concurrency across all workers. `active` is fleet-wide
+    (Redis semaphore ZCARD) when scope is 'global'; the denominators are the
+    live configured limits. Nothing here is an example number."""
+    from app.core.concurrency import interview_capacity, tts_capacity
+
+    s = get_settings()
+    redis = check_redis()
+    interview = interview_capacity()
+    tts = tts_capacity()
+
+    # Assessment: active in-flight (fleet-wide via its own semaphore) / configured
+    # worker cap; queued = real PENDING rows.
+    from app.core.distributed_semaphore import DistributedSemaphore
+    from app.core.telemetry import get_telemetry
+
+    assess_active = DistributedSemaphore("assessment").active_count()
+    assess_scope = "global"
+    if assess_active is None:
+        assess_active = get_telemetry().assessment_in_flight.value
+        assess_scope = "process"
+    queued: int | None = None
+    if db is not None:
+        try:
+            from app.assessment import assessment_service
+
+            queued = assessment_service.queue_stats(db).get("pending")
+        except Exception:
+            queued = None
+
+    return ConcurrencyOut(
+        scope="global (redis)" if redis.status == "connected" else "per_process",
+        redis=redis,
+        openai=ConcurrencyLaneOut(
+            name="OpenAI interviews",
+            active=interview["active"],
+            limit=interview["limit"],
+            scope=interview["active_scope"],
+            waiting=interview.get("waiting"),
+        ),
+        tts=ConcurrencyLaneOut(
+            name="ElevenLabs TTS",
+            active=tts["active"],
+            limit=tts["limit"],
+            scope=tts["active_scope"],
+        ),
+        assessment=ConcurrencyLaneOut(
+            name="Assessment jobs",
+            active=assess_active,
+            limit=max(1, s.assessment_worker_concurrency),
+            scope=assess_scope,
+            queued=queued,
+        ),
+    )
+
+
+# ----------------------------- realtime infra checks -----------------------------
+def realtime_checks(
+    *,
+    redis: RedisHealthOut,
+    database: DatabaseHealthOut,
+    openai: ServiceHealthOut,
+    elevenlabs: ServiceHealthOut,
+    fleet: WorkerFleetOut,
+) -> list[InfraCheckOut]:
+    """Each check reflects a REAL result. A green (healthy) state is only ever
+    returned when the underlying check actually succeeded."""
+    checks: list[InfraCheckOut] = []
+
+    # Redis connectivity
+    if redis.status == "connected":
+        checks.append(InfraCheckOut(key="redis", label="Redis connected", status="healthy",
+                                    detail=f"{redis.latency_ms} ms" if redis.latency_ms is not None else ""))
+    elif redis.status == "not_configured":
+        checks.append(InfraCheckOut(key="redis", label="Redis connected", status="not_configured",
+                                    detail="REDIS_URL not set (single-process/local)."))
+    else:
+        checks.append(InfraCheckOut(key="redis", label="Redis connected", status="unavailable",
+                                    detail="Configured but unreachable."))
+
+    # Worker heartbeat system
+    if fleet.monitoring == "observed":
+        checks.append(InfraCheckOut(key="heartbeat", label="Worker heartbeat system active",
+                                    status="healthy", detail=f"{fleet.observed} live worker(s)."))
+    elif fleet.monitoring == "local_only":
+        checks.append(InfraCheckOut(key="heartbeat", label="Worker heartbeat system active",
+                                    status="not_configured", detail="Local process only (no Redis)."))
+    else:
+        checks.append(InfraCheckOut(key="heartbeat", label="Worker heartbeat system active",
+                                    status="unavailable", detail="Redis unreachable."))
+
+    # Observed matches configured
+    if fleet.observed is None:
+        checks.append(InfraCheckOut(key="fleet_match", label="Observed workers match configured",
+                                    status="unavailable" if fleet.monitoring != "local_only" else "not_configured",
+                                    detail="Fleet not observable." if fleet.monitoring != "local_only"
+                                    else "Not measurable without Redis."))
+    elif fleet.observed == fleet.configured:
+        checks.append(InfraCheckOut(key="fleet_match", label="Observed workers match configured",
+                                    status="healthy", detail=f"{fleet.observed}/{fleet.configured}"))
+    else:
+        checks.append(InfraCheckOut(key="fleet_match", label="Observed workers match configured",
+                                    status="degraded", detail=f"{fleet.observed}/{fleet.configured}"))
+
+    # PostgreSQL reachable
+    if database.status == "connected":
+        label_db = database.db_type or "database"
+        checks.append(InfraCheckOut(key="postgres", label="PostgreSQL reachable", status="healthy",
+                                    detail=f"{label_db}, {database.latency_ms} ms"
+                                    if database.latency_ms is not None else label_db))
+    else:
+        checks.append(InfraCheckOut(key="postgres", label="PostgreSQL reachable",
+                                    status="unavailable", detail="Database health check failed."))
+
+    # OpenAI configured
+    checks.append(InfraCheckOut(key="openai", label="OpenAI key configured",
+                                status="healthy" if openai.configured else "misconfigured",
+                                detail="Configured" if openai.configured else "Not configured."))
+
+    # ElevenLabs configured
+    checks.append(InfraCheckOut(key="elevenlabs", label="ElevenLabs key configured",
+                                status="healthy" if elevenlabs.configured else "misconfigured",
+                                detail="Configured" if elevenlabs.configured else "Not configured/disabled."))
+
+    return checks
+
+
 # ----------------------------- overview -----------------------------
+def build_live(db: Session, started_perf: float) -> SystemLiveOut:
+    """Lean, fast-polling payload: only the sections that change second-to-second
+    (backend/db/redis health, worker fleet, global concurrency, infra checks,
+    alerts). Kept cheap so 3-5s polling never becomes a load source."""
+    database = check_database(db)
+    redis = check_redis()
+    openai = check_openai(db)
+    elevenlabs = check_elevenlabs(db)
+    storage = check_storage()
+    fleet = worker_fleet()
+    concurrency = concurrency_snapshot(db)
+    checks = realtime_checks(redis=redis, database=database, openai=openai,
+                             elevenlabs=elevenlabs, fleet=fleet)
+    alerts = build_alerts(database, openai, elevenlabs, storage, redis, fleet, concurrency)
+
+    s = get_settings()
+    response_time_ms = int((time.perf_counter() - started_perf) * 1000)
+    backend = BackendHealthOut(
+        status="healthy",
+        response_time_ms=response_time_ms,
+        version=APP_VERSION,
+        environment=s.environment,
+        checked_at=_now_iso(),
+    )
+    return SystemLiveOut(
+        generated_at=_now_iso(),
+        backend=backend,
+        database=database,
+        redis=redis,
+        openai=openai,
+        elevenlabs=elevenlabs,
+        workers=fleet,
+        concurrency=concurrency,
+        checks=checks,
+        alerts=alerts,
+    )
+
+
 def build_overview(db: Session, started_perf: float) -> SystemOverviewOut:
     database = check_database(db)
+    redis = check_redis()
     openai = check_openai(db)
     elevenlabs = check_elevenlabs(db)
     audio_queue = check_audio_queue()
@@ -328,7 +650,11 @@ def build_overview(db: Session, started_perf: float) -> SystemOverviewOut:
     ai_config = get_ai_configuration(db)
     credentials = get_credentials_status(db)
     voices = list_voices(db)
-    alerts = build_alerts(database, openai, elevenlabs, storage)
+    fleet = worker_fleet()
+    concurrency = concurrency_snapshot(db)
+    checks = realtime_checks(redis=redis, database=database, openai=openai,
+                             elevenlabs=elevenlabs, fleet=fleet)
+    alerts = build_alerts(database, openai, elevenlabs, storage, redis, fleet, concurrency)
     activity = list_activity(db)
 
     s = get_settings()
@@ -346,6 +672,7 @@ def build_overview(db: Session, started_perf: float) -> SystemOverviewOut:
         generated_at=_now_iso(),
         backend=backend,
         database=database,
+        redis=redis,
         openai=openai,
         elevenlabs=elevenlabs,
         audio_queue=audio_queue,
@@ -355,4 +682,7 @@ def build_overview(db: Session, started_perf: float) -> SystemOverviewOut:
         voices=voices,
         alerts=alerts,
         activity=activity,
+        workers=fleet,
+        concurrency=concurrency,
+        checks=checks,
     )

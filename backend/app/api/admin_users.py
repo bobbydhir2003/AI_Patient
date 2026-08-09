@@ -12,7 +12,14 @@ from sqlalchemy.orm import Session
 from app.database.connection import get_db
 from app.dependencies.auth import require_admin
 from app.models import User
-from app.schemas.auth import ReviewNoteIn, RoleChangeIn, UserOut
+from app.schemas.auth import (
+    BulkUserActionIn,
+    BulkUserResultOut,
+    ReviewNoteIn,
+    RoleChangeIn,
+    UserOut,
+    UserSummaryOut,
+)
 from app.services import user_admin_service
 
 router = APIRouter(prefix="/admin/users", tags=["admin-users"], dependencies=[Depends(require_admin)])
@@ -25,6 +32,48 @@ def list_users(
     db: Session = Depends(get_db),
 ) -> list[UserOut]:
     return [UserOut.model_validate(u) for u in user_admin_service.list_users(db, status=status, role=role)]
+
+
+@router.get("/summary", response_model=UserSummaryOut)
+def summary(db: Session = Depends(get_db)) -> UserSummaryOut:
+    """Real per-status account counts for the summary cards."""
+    return UserSummaryOut(**user_admin_service.status_summary(db))
+
+
+def _bulk_result(payload: BulkUserActionIn, res: dict) -> BulkUserResultOut:
+    return BulkUserResultOut(
+        requested=len(payload.user_ids),
+        succeeded=res["succeeded"],
+        skipped=[{"userId": s["user_id"], "reason": s["reason"]} for s in res["skipped"]],
+        summary=UserSummaryOut(**res["summary"]),
+    )
+
+
+@router.post("/bulk-approve", response_model=BulkUserResultOut)
+def bulk_approve(
+    payload: BulkUserActionIn, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> BulkUserResultOut:
+    res = user_admin_service.bulk_approve(db, admin, payload.user_ids)
+    return _bulk_result(payload, res)
+
+
+@router.post("/bulk-reject", response_model=BulkUserResultOut)
+def bulk_reject(
+    payload: BulkUserActionIn, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> BulkUserResultOut:
+    res = user_admin_service.bulk_reject(db, admin, payload.user_ids, payload.note)
+    return _bulk_result(payload, res)
+
+
+@router.post("/approve-all-pending", response_model=BulkUserResultOut)
+def approve_all_pending(admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> BulkUserResultOut:
+    res = user_admin_service.approve_all_pending(db, admin)
+    return BulkUserResultOut(
+        requested=len(res["succeeded"]) + len(res["skipped"]),
+        succeeded=res["succeeded"],
+        skipped=[{"userId": s["user_id"], "reason": s["reason"]} for s in res["skipped"]],
+        summary=UserSummaryOut(**res["summary"]),
+    )
 
 
 @router.post("/{user_id}/approve", response_model=UserOut)

@@ -61,7 +61,7 @@ function relTime(iso: string): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export function AdminTopbar() {
+export function AdminTopbar({ onToggleNav, navOpen = false }: { onToggleNav?: () => void; navOpen?: boolean } = {}) {
   const { token, user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -165,6 +165,18 @@ export function AdminTopbar() {
   return (
     <header className="pt-topbar" ref={rootRef}>
       <div className="pt-topbar-brand">
+        <button
+          type="button"
+          className="pt-hamburger"
+          onClick={onToggleNav}
+          aria-label={navOpen ? "Close navigation menu" : "Open navigation menu"}
+          aria-expanded={navOpen}
+          aria-controls="admin-main"
+        >
+          <span aria-hidden="true" />
+          <span aria-hidden="true" />
+          <span aria-hidden="true" />
+        </button>
         <img className="pt-topbar-logo" src="/branding/unmc-logo.png" alt="UNMC" />
         <span className="pt-topbar-title">PT AI Patient Simulator</span>
         {/* Prominent bridge back to the simulator (for admins/professors who

@@ -1,59 +1,87 @@
 .list {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  justify-content: center;
+  gap: 16px;
   list-style: none;
-  padding: 0;
-  margin: 0 0 var(--space-6) 0;
+  padding: 22px 32px 18px;
+  margin: 0 auto;
+  max-width: 1380px;
 }
 
 .step {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: var(--space-2);
-  color: var(--color-text-muted);
-  font-size: 0.85rem;
+  gap: 12px;
+  color: rgba(168, 176, 189, 0.78);
+  font-size: 0.98rem;
   font-weight: 600;
 }
 
 .step.active {
-  color: var(--color-text-primary);
+  color: #fff;
+}
+
+.step.complete {
+  color: rgba(219, 224, 231, 0.9);
 }
 
 .bullet {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: flex;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--color-border-strong);
-  background-color: var(--color-bg-card);
-  font-size: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(235, 239, 244, 0.88);
+  font-size: 0.92rem;
+  font-weight: 800;
 }
 
 .step.active .bullet {
-  border-color: var(--color-accent);
-  background-color: var(--color-accent);
+  border-color: rgba(194, 39, 45, 0.82);
+  background: linear-gradient(180deg, #f12735 0%, #c1131d 100%);
+  box-shadow: 0 0 22px rgba(194, 39, 45, 0.24);
   color: #fff;
 }
 
 .step.complete .bullet {
-  border-color: var(--color-accent);
-  color: var(--color-accent-hover);
+  border-color: rgba(194, 39, 45, 0.45);
+  color: #fda4af;
 }
 
 .connector {
-  width: 32px;
-  height: 1px;
-  background-color: var(--color-border-strong);
+  width: clamp(54px, 12vw, 176px);
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(194, 39, 45, 0.8), rgba(194, 39, 45, 0.14));
 }
 
-@media (max-width: 640px) {
-  .connector {
-    width: 16px;
+@media (max-width: 767px) {
+  .list {
+    gap: 10px;
+    padding: 16px 16px 14px;
   }
 
+  .step {
+    gap: 8px;
+    font-size: 0.84rem;
+  }
+
+  .bullet {
+    width: 30px;
+    height: 30px;
+    font-size: 0.8rem;
+  }
+
+  .connector {
+    width: 26px;
+  }
+}
+
+@media (max-width: 560px) {
   .step span:last-child {
     display: none;
   }

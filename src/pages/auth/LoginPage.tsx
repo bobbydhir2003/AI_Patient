@@ -10,8 +10,8 @@ const STUDENT_ON_ADMIN = "This login is for administrator accounts only.";
 /**
  * ADMIN-ONLY sign in (route "/login"). Students sign in on "/". This page uses
  * the same backend auth API; the difference is intent + role validation. Backend
- * RBAC (require_admin/require_super_admin) is the real protection - this only
- * routes correctly and refuses to send a student into the admin area.
+ * RBAC (require_admin) is the real protection - this only routes correctly and
+ * refuses to send a student into the admin area.
  */
 export function LoginPage() {
   const { login, user } = useAuth();
@@ -21,9 +21,8 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // Already-authenticated visits: admins are routed to their landing page (the
-  // system/super admin to /admin, a promoted admin to the Patient Simulator);
-  // a signed-in student sees the admin-only notice.
+  // Already-authenticated visits: admins are routed to Patient Cases (their
+  // landing page); a signed-in student sees the admin-only notice.
   useEffect(() => {
     if (user && isAdminRole(user.role)) {
       navigate(postLoginPath(user), { replace: true });
@@ -39,8 +38,8 @@ export function LoginPage() {
     try {
       const signedIn = await login(email.trim(), password);
       if (isAdminRole(signedIn.role)) {
-        // System/super admin -> /admin; promoted admin -> Patient Simulator
-        // (they open the Admin Dashboard from the Admin Management control).
+        // Admins land on Patient Cases and open the System Dashboard / Admin
+        // Management from the controls shown there.
         navigate(postLoginPath(signedIn), { replace: true });
       } else {
         // Valid student credentials, but this is the admin portal.

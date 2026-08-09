@@ -18,7 +18,6 @@ interface NavItem {
   label: string;
   icon: Icon;
   end?: boolean;
-  superAdminOnly?: boolean;
 }
 
 const SECTIONS: { title: string; items: NavItem[] }[] = [
@@ -38,21 +37,32 @@ const SECTIONS: { title: string; items: NavItem[] }[] = [
     items: [
       { to: "/admin/system", label: "System Dashboard", icon: IconDashboard, end: true },
       { to: "/admin/system/traffic", label: "Traffic Dashboard", icon: IconSessions },
-      { to: "/admin/system/load-testing", label: "Load & Capacity Testing", icon: IconSessions, superAdminOnly: true },
+      { to: "/admin/system/load-testing", label: "Load & Capacity Testing", icon: IconSessions },
+      { to: "/admin/system/usage", label: "AI Usage & Cost", icon: IconAssessments },
     ],
   },
 ];
 
-export function AdminSidebar() {
-  const { logout, isSuperAdmin } = useAuth();
+export function AdminSidebar({ open = false, onClose }: { open?: boolean; onClose?: () => void }) {
+  const { logout } = useAuth();
 
   return (
-    <nav className="pt-sidebar" aria-label="Admin navigation">
+    <>
+      {/* Backdrop only matters on mobile when the drawer is open. */}
+      <div
+        className={`pt-sidebar-backdrop ${open ? "show" : ""}`}
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <nav
+        className={`pt-sidebar ${open ? "open" : ""}`}
+        aria-label="Admin navigation"
+        aria-hidden={undefined}
+      >
       {SECTIONS.map((section) => (
         <div key={section.title}>
           <div className="pt-nav-section-label">{section.title}</div>
           {section.items
-            .filter((item) => !item.superAdminOnly || isSuperAdmin)
             .map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
@@ -70,6 +80,13 @@ export function AdminSidebar() {
       <div>
         <div className="pt-nav-section-label">Account</div>
         <NavLink
+          to="/student/dashboard"
+          className={({ isActive }) => `pt-navlink ${isActive ? "active" : ""}`}
+        >
+          <IconDashboard />
+          <span>Patient Simulator</span>
+        </NavLink>
+        <NavLink
           to="/admin/profile"
           className={({ isActive }) => `pt-navlink ${isActive ? "active" : ""}`}
         >
@@ -85,6 +102,7 @@ export function AdminSidebar() {
           <span>Logout</span>
         </button>
       </div>
-    </nav>
+      </nav>
+    </>
   );
 }

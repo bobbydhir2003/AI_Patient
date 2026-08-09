@@ -105,7 +105,7 @@ def test_queue_wait_metrics_and_timeout(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "max_concurrent_ai_interviews", 1)
     monkeypatch.setattr(s, "ai_interview_wait_seconds", 0.05)
-    monkeypatch.setattr(concurrency, "_interview_sem", concurrency._ResizableSemaphore())
+    monkeypatch.setattr(concurrency, "_interview_sem", concurrency.DistributedSemaphore("test_queue_wait"))
 
     with concurrency.interview_slot():
         pass
@@ -144,13 +144,19 @@ def test_worker_pauses_on_critical_and_resumes(engine, monkeypatch):
     from sqlalchemy.orm import sessionmaker
 
     from app.assessment.assessment_repository import AssessmentRepository
+    from app.core import assessment_worker as worker_module
     from app.core.assessment_worker import get_assessment_worker
     from app.core.config import get_settings
+    from app.core.distributed_semaphore import DistributedSemaphore
     from app.core.telemetry import reset_telemetry, get_telemetry
 
     s = get_settings()
     monkeypatch.setattr(s, "openai_tpm_limit", 1000)
     monkeypatch.setattr(s, "assessment_pause_on_critical", True)
+    # Fresh fleet-wide assessment semaphore so this test's claim (which is
+    # never followed by _execute/release) doesn't leak a permit into the
+    # module-level singleton used by other tests in the same process.
+    monkeypatch.setattr(worker_module, "_assessment_sem", DistributedSemaphore("test_assessment_cap"))
     reset_telemetry()
 
     factory = sessionmaker(bind=engine, expire_on_commit=False)

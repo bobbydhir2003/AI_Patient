@@ -30,7 +30,7 @@
   "voice_profile": {
     "provider": "elevenlabs",
     "voice_id": "GP1bgf0sjoFuuHkyrg8E",
-    "model_id": "eleven_turbo_v2_5",
+    "model_id": "eleven_flash_v2_5",
     "speed": 1.02,
     "stability": 0.44,
     "similarity_boost": 0.75,

@@ -1,7 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../../../state/AuthContext";
 import { ApiError } from "../../../services/api";
-import { fetchSystemOverview, type SystemOverview } from "../../../services/systemApi";
+import {
+  fetchSystemLive,
+  fetchSystemOverview,
+  type SystemOverview,
+} from "../../../services/systemApi";
 
 interface State {
   data: SystemOverview | null;
@@ -9,14 +13,19 @@ interface State {
   error: string | null;
   refreshing: boolean;
   lastChecked: Date | null;
+  live: boolean; // last auto-refresh poll succeeded (true) vs stale (false)
   refresh: () => void;
 }
 
+const POLL_MS = 4000; // 3-5s per requirements
+
 /**
- * Loads the real System Overview and re-runs the backend health checks on
- * demand (Refresh button) and every 60s while mounted. Never continuously
- * calls paid external services - the overview endpoint only reports
- * configuration + local checks; live external tests are explicit-only.
+ * Loads the full System Overview once (heavy config sections) and then keeps
+ * the LIVE sections (backend/db/redis health, observed worker fleet, global
+ * concurrency, infra checks, alerts) fresh by polling the lean /live endpoint
+ * every ~4s. On a failed poll we KEEP the last known state and flip `live` to
+ * false so the UI can warn the data is stale - we never silently present old
+ * data as live. Never continuously calls paid external services.
  */
 export function useSystemOverview(): State {
   const { token } = useAuth();
@@ -25,8 +34,10 @@ export function useSystemOverview(): State {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastChecked, setLastChecked] = useState<Date | null>(null);
+  const [live, setLive] = useState(true);
+  const mounted = useRef(true);
 
-  const load = useCallback(
+  const loadFull = useCallback(
     (isRefresh: boolean) => {
       if (!token) return;
       if (isRefresh) setRefreshing(true);
@@ -34,13 +45,18 @@ export function useSystemOverview(): State {
       setError(null);
       fetchSystemOverview(token)
         .then((d) => {
+          if (!mounted.current) return;
           setData(d);
           setLastChecked(new Date());
+          setLive(true);
         })
-        .catch((e) =>
-          setError(e instanceof ApiError ? e.message : "Could not load system status."),
-        )
+        .catch((e) => {
+          if (!mounted.current) return;
+          setError(e instanceof ApiError ? e.message : "Could not load system status.");
+          setLive(false);
+        })
         .finally(() => {
+          if (!mounted.current) return;
           setLoading(false);
           setRefreshing(false);
         });
@@ -48,11 +64,50 @@ export function useSystemOverview(): State {
     [token],
   );
 
+  // Lean poll: merge only the live subset into the existing overview.
+  const poll = useCallback(() => {
+    if (!token) return;
+    fetchSystemLive(token)
+      .then((d) => {
+        if (!mounted.current) return;
+        setData((prev) =>
+          prev
+            ? {
+                ...prev,
+                generatedAt: d.generatedAt,
+                backend: d.backend,
+                database: d.database,
+                redis: d.redis,
+                openai: d.openai,
+                elevenlabs: d.elevenlabs,
+                workers: d.workers,
+                concurrency: d.concurrency,
+                checks: d.checks,
+                alerts: d.alerts,
+              }
+            : prev,
+        );
+        setLastChecked(new Date());
+        setLive(true);
+        setError(null);
+      })
+      .catch((e) => {
+        if (!mounted.current) return;
+        // Keep last-known state; surface a stale warning instead of blanking.
+        setLive(false);
+        setError(e instanceof ApiError ? e.message : "Live refresh failed; showing last known state.");
+      });
+  }, [token]);
+
   useEffect(() => {
-    load(false);
-    const id = window.setInterval(() => load(true), 60_000);
-    return () => window.clearInterval(id);
-  }, [load]);
+    mounted.current = true;
+    loadFull(false);
+    const id = window.setInterval(poll, POLL_MS);
+    return () => {
+      mounted.current = false;
+      window.clearInterval(id);
+    };
+  }, [loadFull, poll]);
 
   return {
     data,
@@ -60,6 +115,7 @@ export function useSystemOverview(): State {
     error,
     refreshing,
     lastChecked,
-    refresh: () => load(true),
+    live,
+    refresh: () => loadFull(true),
   };
 }

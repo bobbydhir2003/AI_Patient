@@ -6,7 +6,7 @@
 import { API_BASE_URL, ApiError } from "./api";
 import type { Assessment } from "../types/assessment";
 
-export type UserRole = "student" | "admin" | "super_admin";
+export type UserRole = "student" | "admin";
 
 export interface AuthUser {
   id: string;
@@ -15,11 +15,10 @@ export interface AuthUser {
   studentNumber: string;
   role: UserRole;
   isActive: boolean;
-  /** True only for the seeded/default system admin (created via create_admin).
-   * Distinguishes it from a user who was later promoted to admin: the system
-   * admin lands directly on the Admin Dashboard, a promoted admin lands on the
-   * Patient Simulator and opens the dashboard via the Admin Management control. */
-  isSystemAdmin: boolean;
+  /** LEGACY / unused for routing or permissions. The backend may still send it
+   * for schema compatibility, but every admin has identical (full) powers and
+   * both roles land on Patient Cases, so nothing in the app reads this. */
+  isSystemAdmin?: boolean;
   studentId: string | null;
   createdAt: string;
   lastLoginAt: string | null;

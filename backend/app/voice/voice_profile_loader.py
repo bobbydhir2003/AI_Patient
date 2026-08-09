@@ -57,6 +57,13 @@ def _runtime_override_profile(case_id: str, speaker_id: str) -> tuple[VoiceProfi
                 stability=row.stability,
                 similarity_boost=row.similarity_boost,
                 style=row.style,
+                # BUGFIX: the admin-saved speed/pace MUST flow into the live
+                # runtime VoiceProfile. Previously it was omitted here, so a
+                # dashboard speed change persisted and previewed correctly but
+                # the next real interview TTS silently used the profile default
+                # (0.98) instead of the saved value. The speech-style mapper
+                # applies this as the base pace multiplier before ElevenLabs.
+                speed=row.speed,
                 speaker_boost=row.speaker_boost,
                 enabled=True,
             )

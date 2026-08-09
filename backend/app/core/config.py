@@ -51,6 +51,17 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg2://ptai:ptai@localhost:5432/ptai"
     auto_create_tables: bool = False  # convenience for local dev without alembic
 
+    # --- SQLAlchemy connection pool (PostgreSQL only; SQLite has none) ---
+    # Per-worker budget. Total fleet-wide connections ~= app_workers x
+    # (db_pool_size + db_max_overflow), plus a handful used by the assessment
+    # worker threads within the same pool. Defaults match SQLAlchemy's own
+    # implicit defaults (5 / 10) - now explicit and tunable for the planned
+    # multi-worker deployment instead of relying on library defaults.
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_recycle_seconds: int = 1800   # recycle connections periodically (avoids stale/dropped conns)
+    db_pool_timeout_seconds: float = 30.0  # wait for a free connection before raising
+
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
     openai_timeout_seconds: float = 30.0
@@ -144,20 +155,53 @@ class Settings(BaseSettings):
     telemetry_sample_interval_seconds: int = 15  # live-chart history sampling cadence
     live_session_idle_prune_seconds: int = 900   # drop live-session rows after inactivity
 
-    # Concurrency guards (threading semaphores; sync endpoints run in a threadpool).
+    # Concurrency guards. These are GLOBAL (fleet-wide) limits when Redis is
+    # configured (see redis_url below) - one shared OpenAI budget and one
+    # separate shared TTS budget across all uvicorn workers, not per-process.
     max_concurrent_ai_interviews: int = 20
     ai_interview_wait_seconds: float = 2.0       # bounded wait before a 503 overload
-    max_concurrent_tts_requests: int = 20
+    # Default sized for the planned eleven_flash_v2_5 TTS setup. This is a
+    # tuning knob, not a guaranteed provider limit - adjust to match real
+    # ElevenLabs concurrency headroom.
+    max_concurrent_tts_requests: int = 10
     tts_wait_seconds: float = 0.5                # brief wait; then degrade to text-only
+
+    # --- Redis (fleet-wide concurrency control across multiple uvicorn workers) ---
+    # Empty by default (single-worker/local-dev safe). REQUIRED in production/
+    # staging unless redis_required_for_concurrency is explicitly overridden -
+    # see _enforce_production_safety below. Without Redis, OpenAI/TTS/assessment
+    # concurrency limits are per-process only (effective limit = configured x
+    # worker count), which is unsafe once running more than one uvicorn worker.
+    redis_url: str = ""
+    # None = auto (required in production/staging, optional in development).
+    # Set explicitly to force either behavior.
+    redis_required_for_concurrency: bool | None = None
+    redis_connect_timeout_seconds: float = 0.5
+    redis_socket_timeout_seconds: float = 0.5
+    # How long a held concurrency slot survives without being released before
+    # it self-expires (protects against a crashed worker leaking a slot
+    # forever). Must comfortably exceed the slowest real call this guards
+    # (OpenAI/ElevenLabs timeout + retries, or an assessment job).
+    redis_semaphore_lease_seconds: float = 180.0
 
     # Master switch for background threads (telemetry sampler + assessment worker).
     # Disabled in the test suite, which drives the worker deterministically.
     background_workers_enabled: bool = True
 
+    # --- Worker presence monitoring (Redis-backed heartbeat; see
+    # core/worker_registry.py). Each uvicorn worker registers itself in Redis
+    # and refreshes a short-TTL record so the System Dashboard can observe the
+    # LIVE fleet (never a config-derived count). TTL must comfortably exceed the
+    # heartbeat interval so a slightly late beat does not flap a healthy worker.
+    worker_heartbeat_interval_seconds: int = 3   # ~2-5s per requirements
+    worker_heartbeat_ttl_seconds: int = 12       # record self-expires if beats stop
+
     # --- OpenAI capacity tracking (real provider-reported usage) ---
-    # Configure to match your OpenAI tier for the active model (gpt-4o-mini shown).
-    openai_tpm_limit: int = 200_000   # tokens per minute
-    openai_rpm_limit: int = 500       # requests per minute
+    # Configure to match your OpenAI project tier for the active model
+    # (gpt-4o-mini). Defaults below match a ~250K TPM / 3K RPM tier - override
+    # via OPENAI_TPM_LIMIT/OPENAI_RPM_LIMIT if your tier differs.
+    openai_tpm_limit: int = 250_000   # tokens per minute
+    openai_rpm_limit: int = 3_000     # requests per minute
     openai_capacity_busy_pct: float = 0.70
     openai_capacity_protecting_pct: float = 0.85
     openai_capacity_critical_pct: float = 0.95
@@ -194,7 +238,7 @@ class Settings(BaseSettings):
 
     # --- Load & Capacity Testing (J) ---
     load_test_enabled: bool = True
-    load_test_max_users: int = 100              # hard safety cap on target users
+    load_test_max_users: int = 170              # hard safety cap on target users (scalability target)
     load_test_max_duration_seconds: int = 3600  # 60 min ceiling (soak)
     load_test_target_base_url: str = "http://127.0.0.1:8000"
 
@@ -262,6 +306,17 @@ class Settings(BaseSettings):
     def is_strict_environment(self) -> bool:
         return self.environment.strip().lower() in STRICT_ENVIRONMENTS
 
+    @property
+    def redis_required(self) -> bool:
+        """Whether Redis is REQUIRED for global OpenAI/TTS/assessment
+        concurrency control. Explicit override wins; otherwise required in
+        production/staging (fail closed) and optional in development (local
+        per-process fallback), matching every other strict-vs-dev split in
+        this file (e.g. the JWT secret check below)."""
+        if self.redis_required_for_concurrency is not None:
+            return self.redis_required_for_concurrency
+        return self.is_strict_environment
+
     @staticmethod
     def _jwt_secret_is_insecure(secret: str) -> bool:
         secret = (secret or "").strip()
@@ -292,6 +347,24 @@ class Settings(BaseSettings):
                 logger.warning(
                     "CONFIG_ENCRYPTION_KEY is not set in '%s'; encrypted API-key "
                     "storage is disabled and provider keys fall back to env vars.",
+                    self.environment,
+                )
+            if self.redis_required and not self.redis_url.strip():
+                raise ConfigError(
+                    "REDIS_URL is not set, but global OpenAI/TTS/assessment concurrency "
+                    f"control is required in '{self.environment}' (defaults to required "
+                    "in production/staging so multiple uvicorn workers cannot silently "
+                    "multiply provider concurrency limits). Provision Redis and set "
+                    "REDIS_URL, or explicitly set REDIS_REQUIRED_FOR_CONCURRENCY=false to "
+                    "run with per-process concurrency limits instead (NOT safe with more "
+                    "than one uvicorn worker)."
+                )
+            if self.redis_required_for_concurrency is False:
+                logger.warning(
+                    "REDIS_REQUIRED_FOR_CONCURRENCY=false in '%s': OpenAI/TTS/assessment "
+                    "concurrency limits will be PER-PROCESS if Redis is unset or "
+                    "unreachable. With more than one uvicorn worker this multiplies the "
+                    "effective provider concurrency by the worker count.",
                     self.environment,
                 )
         elif self._jwt_secret_is_insecure(self.jwt_secret_key):

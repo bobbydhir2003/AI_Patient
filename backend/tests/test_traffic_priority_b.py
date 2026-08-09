@@ -147,8 +147,9 @@ def test_interview_slot_cap_and_release_on_success_and_exception(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "max_concurrent_ai_interviews", 1)
     monkeypatch.setattr(s, "ai_interview_wait_seconds", 0.05)
-    # fresh semaphore so the test is independent of prior state
-    monkeypatch.setattr(concurrency, "_interview_sem", concurrency._ResizableSemaphore())
+    # fresh semaphore so the test is independent of prior state (no REDIS_URL
+    # in tests, so this uses the local per-process fallback)
+    monkeypatch.setattr(concurrency, "_interview_sem", concurrency.DistributedSemaphore("test_interview_cap"))
 
     held = concurrency.interview_slot().__enter__()
     assert get_telemetry().interview_in_flight.value == 1
@@ -177,7 +178,7 @@ def test_interview_overload_returns_503(engine, monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "max_concurrent_ai_interviews", 1)
     monkeypatch.setattr(s, "ai_interview_wait_seconds", 0.05)
-    monkeypatch.setattr(concurrency, "_interview_sem", concurrency._ResizableSemaphore())
+    monkeypatch.setattr(concurrency, "_interview_sem", concurrency.DistributedSemaphore("test_interview_overload"))
 
     with make_client(engine, FakeOpenAIClient(text="ok"), authenticate=False) as c:
         h = bearer(register_student(c, email="ov@school.edu")["accessToken"])
@@ -202,7 +203,7 @@ def test_tts_slot_degrades_when_full(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "max_concurrent_tts_requests", 1)
     monkeypatch.setattr(s, "tts_wait_seconds", 0.05)
-    monkeypatch.setattr(concurrency, "_tts_sem", concurrency._ResizableSemaphore())
+    monkeypatch.setattr(concurrency, "_tts_sem", concurrency.DistributedSemaphore("test_tts_cap"))
 
     a = concurrency.tts_slot().acquire()
     assert a.ok is True

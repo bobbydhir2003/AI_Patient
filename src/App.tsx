@@ -12,6 +12,11 @@ import { LoginPage } from "./pages/auth/LoginPage";
 import { RegisterPage } from "./pages/auth/RegisterPage";
 import { StudentDashboardPage } from "./pages/student/StudentDashboardPage";
 import { StudentSessionPage } from "./pages/student/StudentSessionPage";
+import { StudentLayout } from "./pages/student/StudentLayout";
+import { StudentCasesPage } from "./pages/student/StudentCasesPage";
+import { StudentAssessmentsPage } from "./pages/student/StudentAssessmentsPage";
+import { StudentActivityPage } from "./pages/student/StudentActivityPage";
+import { StudentProfilePage } from "./pages/student/StudentProfilePage";
 import { AdminLayout } from "./pages/admin/AdminLayout";
 import { AdminDashboardPage } from "./pages/admin/AdminDashboardPage";
 import { AdminStudentsPage } from "./pages/admin/AdminStudentsPage";
@@ -29,6 +34,7 @@ import { LoadCapacityTestingPage } from "./pages/admin/system/LoadCapacityTestin
 import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
 import { AiConfigurationPage } from "./pages/admin/system/AiConfigurationPage";
 import { PatientVoicesPage } from "./pages/admin/system/PatientVoicesPage";
+import { AiUsageCostPage } from "./pages/admin/system/AiUsageCostPage";
 import { ApiCredentialsPage } from "./pages/admin/system/ApiCredentialsPage";
 import { SystemHealthPage } from "./pages/admin/system/subpages";
 import { ProtectedRoute } from "./portal/ProtectedRoute";
@@ -60,29 +66,23 @@ function App() {
             backend still enforces per-session ownership, so users only ever see
             their own sessions/assessments here. */}
         <Route
-          path="/student/dashboard"
           element={
             <ProtectedRoute>
-              <StudentDashboardPage />
+              <StudentLayout />
             </ProtectedRoute>
           }
-        />
-        <Route
-          path="/student/sessions/:sessionId"
-          element={
-            <ProtectedRoute>
-              <StudentSessionPage />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/student/sessions/:sessionId/assessment"
-          element={
-            <ProtectedRoute>
-              <StudentSessionPage initialTab="assessment" />
-            </ProtectedRoute>
-          }
-        />
+        >
+          <Route path="/student/dashboard" element={<StudentDashboardPage />} />
+          <Route path="/student/cases" element={<StudentCasesPage />} />
+          <Route path="/student/assessments" element={<StudentAssessmentsPage />} />
+          <Route path="/student/activity" element={<StudentActivityPage />} />
+          <Route path="/student/profile" element={<StudentProfilePage />} />
+          <Route path="/student/sessions/:sessionId" element={<StudentSessionPage />} />
+          <Route
+            path="/student/sessions/:sessionId/assessment"
+            element={<StudentSessionPage initialTab="assessment" />}
+          />
+        </Route>
 
         {/* Admin panel */}
         <Route
@@ -110,12 +110,9 @@ function App() {
           <Route path="system/traffic" element={<TrafficDashboardPage />} />
           <Route
             path="system/load-testing"
-            element={
-              <ProtectedRoute role="super_admin">
-                <LoadCapacityTestingPage />
-              </ProtectedRoute>
-            }
+            element={<LoadCapacityTestingPage />}
           />
+          <Route path="system/usage" element={<AiUsageCostPage />} />
           <Route path="system/voices" element={<PatientVoicesPage />} />
           <Route path="system/config" element={<AiConfigurationPage />} />
           <Route path="system/credentials" element={<ApiCredentialsPage />} />

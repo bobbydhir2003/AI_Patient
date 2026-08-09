@@ -296,6 +296,16 @@ def stream_patient_response(
     speech_raw = meta.get("speech") if metadata_ok else None
     speech = normalize_speech_labels(speech_raw) if isinstance(speech_raw, dict) else None
 
+    # Provider-reported usage from the completed stream (None if the stream was
+    # interrupted before completion — never fabricated).
+    stream_usage = None
+    if usage.get("input_tokens") is not None or usage.get("output_tokens") is not None:
+        stream_usage = {
+            "input_tokens": usage.get("input_tokens") or 0,
+            "output_tokens": usage.get("output_tokens") or 0,
+            "model": get_settings().openai_model,
+        }
+
     result = EngineResult(
         text=approved_text,
         topics=topics,
@@ -307,6 +317,7 @@ def stream_patient_response(
         newly_disclosed_fact_ids=newly_disclosed,
         validation_status="valid" if not rejected_tail else "valid_truncated_stream",
         speech=speech,
+        usage=stream_usage,
     )
 
     if settings_debug:

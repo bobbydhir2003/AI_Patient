@@ -62,11 +62,42 @@ class RegisterResult(CamelModel):
 
 
 class RoleChangeIn(CamelModel):
-    role: str = Field(pattern="^(student|admin|super_admin)$")
+    # Only two roles exist. super_admin/system_admin are no longer assignable.
+    role: str = Field(pattern="^(student|admin)$")
 
 
 class ReviewNoteIn(CamelModel):
     note: str = Field(default="", max_length=1000)
+
+
+class BulkUserActionIn(CamelModel):
+    """IDs to act on in a single bulk approve/reject. `note` applies to rejects."""
+
+    user_ids: list[str] = Field(default_factory=list, max_length=1000)
+    note: str = Field(default="", max_length=1000)
+
+
+class UserSummaryOut(CamelModel):
+    """Real per-status account counts for the summary cards."""
+
+    total: int
+    pending: int
+    active: int
+    disabled: int
+    rejected: int
+    admins: int
+
+
+class BulkSkipOut(CamelModel):
+    user_id: str
+    reason: str
+
+
+class BulkUserResultOut(CamelModel):
+    requested: int
+    succeeded: list[str]
+    skipped: list[BulkSkipOut]
+    summary: UserSummaryOut
 
 
 class TokenResponse(CamelModel):

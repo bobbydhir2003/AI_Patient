@@ -29,12 +29,10 @@ class User(Base):
     student_number: Mapped[str] = mapped_column(String(100), nullable=False, default="")
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False, default=USER_ROLE_STUDENT)
-    # Distinguishes the seeded/default "system" administrator (created by
-    # scripts/create_admin.py) from an ordinary user who was later PROMOTED to
-    # admin. The system admin lands directly on the Admin Dashboard after login;
-    # a promoted admin/professor lands on the Patient Simulator and reaches the
-    # dashboard via the "Admin Management" control. Role stays the source of
-    # truth for permissions; this only affects the post-login landing page.
+    # LEGACY / no-op. The application now has exactly two roles (student, admin)
+    # and every admin has all admin powers, so this column no longer affects
+    # authorization or routing. It is retained only for backward compatibility
+    # with the existing production schema; nothing reads it for access control.
     is_system_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # Approval lifecycle, SEPARATE from role. is_active is kept in lock-step with
     # account_status (ACTIVE => True, otherwise False) so all existing code that

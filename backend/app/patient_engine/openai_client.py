@@ -71,9 +71,13 @@ class OpenAIPatientClient:
             self._client_fingerprint = fingerprint
         return self._client
 
-    def _do_generate(self, messages: list[dict], schema: dict, schema_name: str, resolved_tokens: int) -> dict:
+    def _do_generate(self, messages: list[dict], schema: dict, schema_name: str, resolved_tokens: int, usage_out: dict | None = None) -> dict:
         settings = get_settings()
         if _mock_ai():
+            if usage_out is not None:
+                usage_out["input_tokens"] = 150
+                usage_out["output_tokens"] = 60
+                usage_out["model"] = "mock"
             return self._mock_structured(schema_name)
         rt = self._runtime()
         client = self._get_client(rt)
@@ -105,10 +109,15 @@ class OpenAIPatientClient:
         # completed (non-streaming) response. Never estimated.
         usage = getattr(response, "usage", None)
         if usage is not None:
-            get_telemetry().openai.record_tokens(
-                getattr(usage, "input_tokens", 0) or 0,
-                getattr(usage, "output_tokens", 0) or 0,
-            )
+            in_tok = getattr(usage, "input_tokens", 0) or 0
+            out_tok = getattr(usage, "output_tokens", 0) or 0
+            get_telemetry().openai.record_tokens(in_tok, out_tok)
+            # Surface provider-reported usage to the caller for per-session
+            # cost/usage recording (never estimated from string length).
+            if usage_out is not None:
+                usage_out["input_tokens"] = in_tok
+                usage_out["output_tokens"] = out_tok
+                usage_out["model"] = rt.model
         raw = (response.output_text or "").strip()
         if not raw:
             raise PatientEngineError("OpenAI returned an empty response.")
@@ -144,23 +153,27 @@ class OpenAIPatientClient:
         schema_name: str,
         max_output_tokens: int | None = None,
         allow_truncation_retry: bool = False,
+        usage_out: dict | None = None,
     ) -> dict:
-        """Generic structured-output call (Responses API, strict JSON schema)."""
+        """Generic structured-output call (Responses API, strict JSON schema).
+
+        `usage_out` (optional) is filled with provider-reported input/output
+        tokens + model on success, for per-session usage/cost recording."""
         rt = self._runtime()
         if not rt.api_key and not _mock_ai():
             raise PatientEngineError("OPENAI_API_KEY is not configured.")
 
         resolved_tokens = max_output_tokens or rt.max_output_tokens
         try:
-            return self._do_generate(messages, schema, schema_name, resolved_tokens)
+            return self._do_generate(messages, schema, schema_name, resolved_tokens, usage_out=usage_out)
         except StructuredOutputTruncatedError:
             if allow_truncation_retry:
                 retry_tokens = resolved_tokens + 1000
                 logger.warning(
-                    "truncation_retry_triggered task=%s initial_tokens=%s new_tokens=%s", 
+                    "truncation_retry_triggered task=%s initial_tokens=%s new_tokens=%s",
                     schema_name, resolved_tokens, retry_tokens
                 )
-                return self._do_generate(messages, schema, schema_name, retry_tokens)
+                return self._do_generate(messages, schema, schema_name, retry_tokens, usage_out=usage_out)
             raise
         except PatientEngineError:
             raise
@@ -288,11 +301,14 @@ class OpenAIPatientClient:
 
         return _deltas()
 
-    def generate(self, messages: list[dict]) -> PatientReply:
+    def generate(self, messages: list[dict], usage_out: dict | None = None) -> PatientReply:
         # Patient replies use the patient token limit
         rt = self._runtime()
         limit = rt.patient_max_output_tokens or rt.max_output_tokens
-        data = self.generate_structured(messages, PATIENT_REPLY_JSON_SCHEMA, "patient_reply", max_output_tokens=limit)
+        data = self.generate_structured(
+            messages, PATIENT_REPLY_JSON_SCHEMA, "patient_reply",
+            max_output_tokens=limit, usage_out=usage_out,
+        )
         return PatientReply.model_validate(data)
 
 

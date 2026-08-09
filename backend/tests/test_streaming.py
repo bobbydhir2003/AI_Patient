@@ -476,3 +476,121 @@ class TestStreamingInterruption:
             gen.close()
             turns = client_api.get(f"/api/sessions/{session_id}/turns").json()
             assert turns == []
+
+
+# ---------------------------------------------------------------------------
+# Concurrency guard: the streaming path must use the SAME global interview
+# semaphore as the non-streaming path (core/concurrency.interview_slot).
+# ---------------------------------------------------------------------------
+
+class TestStreamingConcurrencyGuard:
+    def test_streaming_returns_503_when_slot_unavailable(self, engine, streaming_enabled, monkeypatch):
+        from app.core import concurrency
+        from app.core.config import get_settings
+
+        s = get_settings()
+        monkeypatch.setattr(s, "max_concurrent_ai_interviews", 1)
+        monkeypatch.setattr(s, "ai_interview_wait_seconds", 0.05)
+        monkeypatch.setattr(concurrency, "_interview_sem", concurrency.DistributedSemaphore("test_stream_overload"))
+
+        fake = FakeStreamingClient(chunked(TWO_SENTENCES + META_TAIL))
+        client_api = make_streaming_test_client(engine, fake)
+        with client_api:
+            session_id = create_session(client_api)
+            # Hold the only slot exactly like the non-streaming overload test does.
+            held = concurrency.interview_slot().__enter__()
+            try:
+                resp = client_api.post(
+                    f"/api/interviews/{session_id}/messages/stream",
+                    json={"text": "Hi", "caseId": "carly", "clientTurnId": "turn-overload"},
+                )
+                assert resp.status_code == 503
+                assert resp.json()["error"]["code"] == "service_overloaded"
+                # The 503 must be raised BEFORE any provider call - never a raw
+                # mid-stream failure after headers were already sent.
+                assert fake.stream_calls == 0
+            finally:
+                held.__exit__(None, None, None)
+
+    def test_streaming_releases_slot_after_normal_completion(self, engine, streaming_enabled, monkeypatch):
+        from app.core import concurrency
+        from app.core.config import get_settings
+
+        s = get_settings()
+        monkeypatch.setattr(s, "max_concurrent_ai_interviews", 1)
+        monkeypatch.setattr(s, "ai_interview_wait_seconds", 0.2)
+        monkeypatch.setattr(concurrency, "_interview_sem", concurrency.DistributedSemaphore("test_stream_release"))
+
+        fake = FakeStreamingClient(chunked(TWO_SENTENCES + META_TAIL))
+        client_api = make_streaming_test_client(engine, fake)
+        with client_api:
+            session_id = create_session(client_api)
+            resp = client_api.post(
+                f"/api/interviews/{session_id}/messages/stream",
+                json={"text": "Hi", "caseId": "carly", "clientTurnId": "turn-release"},
+            )
+            assert resp.status_code == 200
+            assert fake.stream_calls == 1
+            # The single slot must be free again now that the stream completed.
+            held = concurrency.interview_slot().__enter__()
+            held.__exit__(None, None, None)
+
+    def test_streaming_releases_slot_on_client_disconnect(self, engine, streaming_enabled, monkeypatch):
+        from app.core import concurrency
+        from app.core.config import get_settings
+
+        s = get_settings()
+        monkeypatch.setattr(s, "max_concurrent_ai_interviews", 1)
+        monkeypatch.setattr(s, "ai_interview_wait_seconds", 0.2)
+        monkeypatch.setattr(concurrency, "_interview_sem", concurrency.DistributedSemaphore("test_stream_disconnect"))
+
+        fake = FakeStreamingClient(chunked(TWO_SENTENCES + META_TAIL))
+        client_api = make_streaming_test_client(engine, fake)
+        with client_api:
+            session_id = create_session(client_api)
+            factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+            payload = StudentMessageRequest(
+                text="Tell me about your condition.",
+                case_id="carly",
+                client_turn_id="turn-disc",
+            )
+            gen = interview_stream_service.stream_student_message(
+                factory, session_id, payload, client=fake
+            )
+            next(gen)  # at least one event, so the slot was reserved
+            gen.close()  # simulates the browser aborting the SSE (GeneratorExit)
+
+            # The slot must be released even though the client disconnected
+            # mid-stream, not leaked until the process restarts.
+            held = concurrency.interview_slot().__enter__()
+            held.__exit__(None, None, None)
+
+    def test_replay_never_reserves_a_slot(self, engine, streaming_enabled, monkeypatch):
+        """An idempotent replay (client_turn_id already saved) makes no OpenAI
+        call, so it must not reserve a concurrency slot at all."""
+        from app.core import concurrency
+        from app.core.config import get_settings
+
+        s = get_settings()
+        monkeypatch.setattr(s, "max_concurrent_ai_interviews", 1)
+        monkeypatch.setattr(s, "ai_interview_wait_seconds", 0.05)
+        monkeypatch.setattr(concurrency, "_interview_sem", concurrency.DistributedSemaphore("test_stream_replay"))
+
+        fake = FakeStreamingClient(chunked(TWO_SENTENCES + META_TAIL))
+        client_api = make_streaming_test_client(engine, fake)
+        with client_api:
+            session_id = create_session(client_api)
+            body = {"text": "Hi", "caseId": "carly", "clientTurnId": "turn-replay"}
+            first = client_api.post(f"/api/interviews/{session_id}/messages/stream", json=body)
+            assert first.status_code == 200
+            assert fake.stream_calls == 1
+
+            # Hold the only slot, then replay the SAME client_turn_id: it must
+            # succeed from the saved turn without needing (or blocking on) a slot.
+            held = concurrency.interview_slot().__enter__()
+            try:
+                replay = client_api.post(f"/api/interviews/{session_id}/messages/stream", json=body)
+                assert replay.status_code == 200
+                assert fake.stream_calls == 1  # no second OpenAI call
+            finally:
+                held.__exit__(None, None, None)

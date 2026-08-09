@@ -12,6 +12,7 @@ from app.api import (
     admin_runtime,
     admin_system,
     admin_traffic,
+    admin_usage,
     admin_users,
     assessments,
     auth,
@@ -31,16 +32,19 @@ from app.core.logging import configure_logging
 async def _lifespan(_: FastAPI):
     settings = get_settings()
     workers_on = settings.background_workers_enabled
-    # Startup: begin the live-chart sampler and the assessment queue worker.
+    # Startup: begin the live-chart sampler, the assessment queue worker, and
+    # this process's Redis worker-presence heartbeat (see core/worker_registry).
     if workers_on:
         from app.core.assessment_worker import get_assessment_worker
         from app.core.telemetry import get_telemetry
+        from app.core.worker_registry import get_heartbeat
 
         get_telemetry().start_sampler(
             settings.telemetry_sample_interval_seconds, settings.active_user_window_seconds
         )
         if settings.assessment_queue_enabled:
             get_assessment_worker().start()
+        get_heartbeat().start()  # no-op when Redis is not configured
     yield
     # Shutdown: stop background workers and release the ElevenLabs keep-alive pool.
     from app.voice.elevenlabs_client import close_http_client
@@ -49,9 +53,11 @@ async def _lifespan(_: FastAPI):
         if workers_on:
             from app.core.assessment_worker import get_assessment_worker
             from app.core.telemetry import get_telemetry
+            from app.core.worker_registry import get_heartbeat
 
             get_assessment_worker().stop()
             get_telemetry().stop_sampler()
+            get_heartbeat().stop()  # deletes this worker's Redis record immediately
     finally:
         close_http_client()
 
@@ -109,6 +115,7 @@ def create_app() -> FastAPI:
     _app.include_router(admin_system.router, prefix="/api")
     _app.include_router(admin_runtime.router, prefix="/api")
     _app.include_router(admin_traffic.router, prefix="/api")
+    _app.include_router(admin_usage.router, prefix="/api")
     _app.include_router(admin_load_tests.router, prefix="/api")
     _app.include_router(admin_users.router, prefix="/api")
     _app.include_router(access.public_router, prefix="/api")

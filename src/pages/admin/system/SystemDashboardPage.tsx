@@ -4,15 +4,18 @@ import { useSystemOverview } from "./useSystemOverview";
 import {
   AiConfigurationSection,
   ApiCredentialsSection,
+  GlobalConcurrencySection,
   PatientVoicesSection,
   QuickActionsSection,
+  RealtimeChecksSection,
   RecentActivitySection,
   SystemAlertsSection,
   SystemHealthOverview,
+  WorkerArchitectureSection,
 } from "./sections";
 
 export function SystemDashboardPage() {
-  const { data, loading, error, refresh, refreshing, lastChecked } = useSystemOverview();
+  const { data, loading, error, refresh, refreshing, lastChecked, live } = useSystemOverview();
 
   if (loading && !data) return <LoadingState label="Loading system status…" />;
   if (error && !data) return <ErrorState message={error} onRetry={refresh} />;
@@ -24,12 +27,13 @@ export function SystemDashboardPage() {
         <div>
           <h1 className="pt-h1" style={{ margin: 0 }}>System Dashboard</h1>
           <p className="pt-page-sub">
-            Monitor system health, AI services, patient voices, and platform configuration.
+            Real-time system monitoring, backend operations, and AI service health.
           </p>
         </div>
         <div className="pt-header-actions">
+          <span className={`pt-live-dot ${live ? "pt-live-on" : "pt-live-off"}`} aria-hidden="true" />
           <span className="pt-muted" style={{ fontSize: "0.82rem" }}>
-            Last checked:{" "}
+            {live ? "Live" : "Stale"} · updated{" "}
             {lastChecked ? lastChecked.toLocaleTimeString(undefined, { timeStyle: "medium" }) : "never"}
           </span>
           <button
@@ -44,21 +48,29 @@ export function SystemDashboardPage() {
         </div>
       </div>
 
-      {error && (
+      {!live && (
         <p className="pt-error-text" role="alert" style={{ marginBottom: "var(--space-4)" }}>
-          Some data may be stale: {error}
+          Auto-refresh failed — showing the last known state (not live). {error}
         </p>
       )}
 
       <SystemHealthOverview data={data} />
 
+      <WorkerArchitectureSection
+        fleet={data.workers}
+        concurrency={data.concurrency}
+        database={data.database}
+      />
+
       <div className="pt-sys-grid">
         <div className="pt-sys-col">
+          <GlobalConcurrencySection concurrency={data.concurrency} />
           <PatientVoicesSection voices={data.voices} />
           <ApiCredentialsSection credentials={data.credentials} />
           <RecentActivitySection activity={data.activity} />
         </div>
         <div className="pt-sys-col">
+          <RealtimeChecksSection checks={data.checks} />
           <AiConfigurationSection config={data.aiConfig} />
           <SystemAlertsSection alerts={data.alerts} />
           <QuickActionsSection overview={data} onRefresh={refresh} refreshing={refreshing} />

@@ -11,7 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core import crypto
-from app.core.constants import USER_ROLE_ADMIN, USER_ROLE_SUPER_ADMIN
+from app.core.constants import USER_ROLE_ADMIN
 from app.core.security import hash_password
 from app.database.base import Base
 from app.database.connection import get_db, reset_engine
@@ -63,7 +63,7 @@ def _client_with_fakes(engine, elevenlabs=None):
 @pytest.fixture()
 def admins(engine):
     _make_user(engine, "admin@school.edu", USER_ROLE_ADMIN)
-    _make_user(engine, "super@school.edu", USER_ROLE_SUPER_ADMIN)
+    _make_user(engine, "super@school.edu", USER_ROLE_ADMIN)
 
 
 # --------------------------------------------------------------- encryption
@@ -76,17 +76,13 @@ def test_crypto_roundtrip_and_masking():
 
 
 # --------------------------------------------------------------- credentials RBAC
-def test_replace_key_requires_super_admin(client, engine, admins):
+def test_replace_key_allowed_for_any_admin(client, engine, admins):
+    # Two-role model: every admin may replace credentials (no super-admin tier).
     admin = login_token(client, "admin@school.edu", "adminpass1")
     r = client.post("/api/admin/runtime/credentials/openai",
                     json={"key": "sk-newkey-123456789"}, headers=auth_header(admin))
-    assert r.status_code == 403  # system admin cannot replace keys
-
-    su = login_token(client, "super@school.edu", "adminpass1")
-    r2 = client.post("/api/admin/runtime/credentials/openai",
-                     json={"key": "sk-newkey-123456789"}, headers=auth_header(su))
-    assert r2.status_code == 200
-    assert r2.json()["success"] is True
+    assert r.status_code == 200
+    assert r.json()["success"] is True
 
 
 def test_stored_key_is_encrypted_and_never_returned(client, engine, admins):
@@ -204,7 +200,7 @@ def test_preview_does_not_save(client, engine, admins):
     _make_user(engine, "a2@school.edu", USER_ROLE_ADMIN)
     admin = login_token(c, "a2@school.edu", "adminpass1")
     # Give an elevenlabs key so preview is available.
-    _make_user(engine, "s2@school.edu", USER_ROLE_SUPER_ADMIN)
+    _make_user(engine, "s2@school.edu", USER_ROLE_ADMIN)
     su = login_token(c, "s2@school.edu", "adminpass1")
     c.post("/api/admin/runtime/credentials/elevenlabs", json={"key": "sk-el-123456789"}, headers=auth_header(su))
 

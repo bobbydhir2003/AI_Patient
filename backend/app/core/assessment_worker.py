@@ -11,9 +11,15 @@ restarts (and a run stuck in PROCESSING from a crash is re-reaped after a
 timeout). This is intentionally NOT FastAPI BackgroundTasks (which would lose
 in-flight jobs on restart) and needs no Redis/Celery for a single service.
 
-Concurrency is ASSESSMENT_WORKER_CONCURRENCY threads. Because live interview
-generation has its own (larger) concurrency guard, an assessment spike cannot
-starve interviews of the shared OpenAI budget.
+Concurrency is ASSESSMENT_WORKER_CONCURRENCY threads PER PROCESS, but the
+EFFECTIVE claim rate is capped FLEET-WIDE via a DistributedSemaphore (Redis):
+with N uvicorn workers each running their own worker pool, claiming would
+otherwise multiply to N x ASSESSMENT_WORKER_CONCURRENCY, which could flood
+OpenAI when many students finish around the same time. The DB-backed queue
+itself (atomic claim below) is already safe with multiple processes; only the
+IN-FLIGHT CAP needed to become fleet-wide. Because live interview generation
+has its own (larger, separately-limited) concurrency guard, an assessment
+spike still cannot starve interviews of the shared OpenAI budget.
 """
 from __future__ import annotations
 
@@ -24,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, update
 
 from app.core.config import get_settings
+from app.core.distributed_semaphore import DistributedSemaphore
 from app.core.logging import get_logger
 from app.core.telemetry import get_telemetry
 
@@ -33,6 +40,11 @@ logger = get_logger(__name__)
 # reaped back to PENDING so it can be retried.
 _STUCK_PROCESSING_SECONDS = 600
 
+# Fleet-wide cap on concurrently EXECUTING assessment jobs (separate from the
+# OpenAI interview and TTS semaphores - assessments must never borrow their
+# budget). Falls back to a per-process semaphore in development/test.
+_assessment_sem = DistributedSemaphore("assessment")
+
 
 class AssessmentWorker:
     def __init__(self) -> None:
@@ -41,6 +53,8 @@ class AssessmentWorker:
         self._started = False
         self._lock = threading.Lock()
         self._claim_lock = threading.Lock()  # serializes the throttle-check + claim
+        self._tokens: dict[str, str] = {}    # run.id -> distributed-semaphore release token
+        self._tokens_lock = threading.Lock()
 
     def start(self) -> None:
         with self._lock:
@@ -92,17 +106,30 @@ class AssessmentWorker:
         priority, so assessments back off (fewer effective workers) as OpenAI
         approaches its limits, and stop claiming entirely when CRITICAL+paused.
         Workers never die - they just poll without claiming until capacity returns.
-        The reservation (in_flight++) happens atomically with the claim so the
-        effective-worker cap is respected across all worker threads."""
+
+        The in-flight cap is enforced FLEET-WIDE via a DistributedSemaphore
+        (reserved atomically before the claim, released in `_execute`), so
+        multiple uvicorn workers cannot each independently run up to
+        `effective` assessments (which would multiply the real cap by the
+        worker count - the same bug this whole change fixes for OpenAI/TTS)."""
         from app.core import capacity
 
         with self._claim_lock:
             effective, _mode = capacity.effective_assessment_workers()
+            if effective <= 0:
+                return None
             if get_telemetry().assessment_in_flight.value >= effective:
-                return None  # throttled: at (or above) the effective-worker cap
+                return None  # cheap process-local pre-check before touching Redis
+            token = _assessment_sem.acquire(effective, 0.0)  # non-blocking: the poll loop retries
+            if token is None:
+                return None  # fleet-wide cap reached (or Redis required-and-down)
             claimed = self._claim_one(db)
-            if claimed is not None:
-                get_telemetry().assessment_in_flight.inc()  # reserve the slot now
+            if claimed is None:
+                _assessment_sem.release(token)  # no PENDING row after all; give the slot straight back
+                return None
+            with self._tokens_lock:
+                self._tokens[claimed.id] = token
+            get_telemetry().assessment_in_flight.inc()  # reserve the slot now
             return claimed
 
     def _reap_stuck(self, db) -> None:
@@ -163,6 +190,9 @@ class AssessmentWorker:
             logger.warning("assessment_job_failed run=%s error=%s", run.id, exc)
         finally:
             tele.assessment_in_flight.dec()
+            with self._tokens_lock:
+                token = self._tokens.pop(run.id, None)
+            _assessment_sem.release(token)
             tele.history  # (touch; no-op) keep import graph obvious
             duration_ms = int((time.monotonic() - t0) * 1000)
             tele.openai.window.observe_latency(duration_ms)  # coarse job duration signal

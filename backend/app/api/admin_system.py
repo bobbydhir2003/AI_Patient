@@ -24,6 +24,7 @@ from app.models import User
 from app.repositories.audit_repository import AuditRepository
 from app.schemas.system_schema import (
     MutationResultOut,
+    SystemLiveOut,
     SystemOverviewOut,
     VoiceListOut,
 )
@@ -46,6 +47,15 @@ router = APIRouter(
 def system_overview(db: Session = Depends(get_db)) -> SystemOverviewOut:
     started = time.perf_counter()
     return system_service.build_overview(db, started)
+
+
+@router.get("/live", response_model=SystemLiveOut)
+def system_live(db: Session = Depends(get_db)) -> SystemLiveOut:
+    """Lean live snapshot for fast polling (backend/db/redis health, observed
+    worker fleet, global concurrency, realtime infra checks, alerts). Every
+    value is a real runtime measurement; nothing is fabricated to fill the UI."""
+    started = time.perf_counter()
+    return system_service.build_live(db, started)
 
 
 @router.get("/voices", response_model=VoiceListOut)

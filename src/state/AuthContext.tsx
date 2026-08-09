@@ -25,7 +25,6 @@ interface AuthContextValue {
   loading: boolean;
   isAuthenticated: boolean;
   isAdmin: boolean;
-  isSuperAdmin: boolean;
   isStudent: boolean;
   login: (email: string, password: string) => Promise<AuthUser>;
   register: (input: {
@@ -128,8 +127,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       loading,
       isAuthenticated: !!user,
-      isAdmin: user?.role === "admin" || user?.role === "super_admin",
-      isSuperAdmin: user?.role === "super_admin",
+      isAdmin: user?.role === "admin",
       isStudent: user?.role === "student",
       login,
       register,

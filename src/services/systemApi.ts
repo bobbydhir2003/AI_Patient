@@ -147,10 +147,82 @@ export interface SystemActivity {
   result: string;
   timestamp: string;
 }
+export interface RedisHealth {
+  status: string; // connected | unavailable | not_configured
+  required: boolean;
+  latencyMs: number | null;
+  checkedAt: string;
+}
+export interface WorkerRow {
+  workerId: string;
+  pid: number | null;
+  hostname: string;
+  health: string; // healthy | stale | unavailable
+  uptimeSeconds: number | null;
+  heartbeatAt: string | null;
+  heartbeatAgeSeconds: number | null;
+  requestsTotal: number | null;
+  requestsPerMinute: number | null;
+  httpInFlight: number | null;
+  interviewInFlight: number | null;
+  ttsInFlight: number | null;
+  assessmentInFlight: number | null;
+  memoryMb: number | null;
+  currentTask: string | null;
+}
+export interface WorkerFleet {
+  monitoring: string; // observed | local_only | unavailable
+  status: string; // healthy | degraded | unavailable | local_only
+  mode: string;
+  configured: number;
+  observed: number | null;
+  healthy: number | null;
+  heartbeatIntervalSeconds: number | null;
+  heartbeatTtlSeconds: number | null;
+  note: string;
+  workers: WorkerRow[];
+}
+export interface ConcurrencyLane {
+  name: string;
+  active: number;
+  limit: number;
+  scope: string; // global | process
+  waiting: number | null;
+  queued: number | null;
+}
+export interface Concurrency {
+  scope: string;
+  redis: RedisHealth;
+  openai: ConcurrencyLane;
+  tts: ConcurrencyLane;
+  assessment: ConcurrencyLane;
+}
+export interface InfraCheck {
+  key: string;
+  label: string;
+  status: string; // healthy | degraded | unavailable | misconfigured | not_configured
+  detail: string;
+}
+
+/** Lean, fast-polling live payload (GET /admin/system/live). */
+export interface SystemLive {
+  generatedAt: string;
+  backend: BackendHealth;
+  database: DatabaseHealth;
+  redis: RedisHealth;
+  openai: ServiceHealth;
+  elevenlabs: ServiceHealth;
+  workers: WorkerFleet;
+  concurrency: Concurrency;
+  checks: InfraCheck[];
+  alerts: SystemAlert[];
+}
+
 export interface SystemOverview {
   generatedAt: string;
   backend: BackendHealth;
   database: DatabaseHealth;
+  redis: RedisHealth;
   openai: ServiceHealth;
   elevenlabs: ServiceHealth;
   audioQueue: AudioQueueHealth;
@@ -160,11 +232,19 @@ export interface SystemOverview {
   voices: VoiceRow[];
   alerts: SystemAlert[];
   activity: SystemActivity[];
+  workers: WorkerFleet;
+  concurrency: Concurrency;
+  checks: InfraCheck[];
 }
 
 // -------------------------------- calls --------------------------------
 export function fetchSystemOverview(token: string): Promise<SystemOverview> {
   return systemRequest<SystemOverview>("/admin/system/overview", token);
+}
+
+/** Fast live snapshot for the auto-refresh loop (real runtime values only). */
+export function fetchSystemLive(token: string): Promise<SystemLive> {
+  return systemRequest<SystemLive>("/admin/system/live", token);
 }
 
 export function fetchSystemVoices(token: string): Promise<{ voices: VoiceRow[] }> {

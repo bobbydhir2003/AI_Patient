@@ -1,6 +1,6 @@
 """Priority J tests: Load & Capacity Testing.
 
-Covers RBAC (super-admin only), create/validation, provider labeling + the
+Covers RBAC (admin only), create/validation, provider labeling + the
 real-provider cost confirmation guard, the single-run conflict guard, isolated
 test-account provisioning, the simulated-AI runtime override, stop, persistence
 of completed-run metadata, empty states, and the TRANSPARENT capacity analysis
@@ -71,42 +71,47 @@ def patched(engine, monkeypatch):
     monkeypatch.setattr(lts, "_monitor", lambda job_id: None)  # no background finalize
     monkeypatch.setattr(lts, "get_session_factory", lambda: _factory(engine))
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
-        make_user(engine, email="super@s.edu", role="super_admin")
+        # Two-role model: every admin has full load-testing access. There is no
+        # separate super-admin tier anymore.
         make_user(engine, email="adm@s.edu", role="admin")
         yield c, engine
 
 
 def _super(c):
-    return bearer(login_token(c, "super@s.edu", "pw12345678"))
+    # Backwards-compatible name used by the positive-path tests below; it now
+    # simply returns a normal admin token (admins have all admin powers).
+    return bearer(login_token(c, "adm@s.edu", "pw12345678"))
 
 
 def _admin(c):
     return bearer(login_token(c, "adm@s.edu", "pw12345678"))
 
 
-# ============================ RBAC (super-admin only) ============================
+def _student(c):
+    from tests.test_auth import register
+    register(c, email="stud@s.edu", password="studpass1", number="S1")
+    return bearer(login_token(c, "stud@s.edu", "studpass1"))
+
+
+# ============================ RBAC (admin only) ============================
 def test_config_rbac(patched):
     c, _ = patched
     assert c.get("/api/admin/system/load-tests/config").status_code == 401
-    assert c.get("/api/admin/system/load-tests/config", headers=_admin(c)).status_code == 403
-    assert c.get("/api/admin/system/load-tests/config", headers=_super(c)).status_code == 200
+    assert c.get("/api/admin/system/load-tests/config", headers=_student(c)).status_code == 403
+    assert c.get("/api/admin/system/load-tests/config", headers=_admin(c)).status_code == 200
 
 
-def test_create_forbidden_for_admin_and_student(patched, engine):
+def test_create_forbidden_for_student(patched, engine):
     c, _ = patched
     body = {"testType": "smoke", "providerMode": "SIMULATED_AI", "targetUsers": 5, "durationSeconds": 30}
-    assert c.post("/api/admin/system/load-tests", json=body, headers=_admin(c)).status_code == 403
-    # a student
-    from tests.test_auth import register
-    register(c, email="stud@s.edu", password="studpass1", number="S1")
-    sh = bearer(login_token(c, "stud@s.edu", "studpass1"))
-    assert c.post("/api/admin/system/load-tests", json=body, headers=sh).status_code == 403
+    # A student is forbidden; a normal admin is allowed (covered elsewhere).
+    assert c.post("/api/admin/system/load-tests", json=body, headers=_student(c)).status_code == 403
 
 
 def test_recent_and_metrics_rbac(patched):
     c, _ = patched
-    assert c.get("/api/admin/system/load-tests/recent", headers=_admin(c)).status_code == 403
-    assert c.get("/api/admin/system/load-tests/recent", headers=_super(c)).status_code == 200
+    assert c.get("/api/admin/system/load-tests/recent", headers=_student(c)).status_code == 403
+    assert c.get("/api/admin/system/load-tests/recent", headers=_admin(c)).status_code == 200
 
 
 # ============================ Empty state ============================

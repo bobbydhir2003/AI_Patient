@@ -1,60 +1,67 @@
 .wrapper {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4) 0;
+  gap: 10px;
+  padding: 0 18px 14px;
 }
 
 .row {
   display: flex;
-  gap: var(--space-3);
+  gap: 12px;
   align-items: stretch;
 }
 
 .mainButton {
   flex: 1;
-  min-height: 48px;
-  font-weight: 700;
+  min-height: 62px;
+  border-radius: 12px;
+  border: 1px solid rgba(194, 39, 45, 0.84);
+  background: linear-gradient(180deg, #e11d2d 0%, #b3131d 100%);
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 800;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-3);
+  gap: 12px;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.08),
+    0 12px 28px rgba(166, 19, 27, 0.18);
 }
 
 .mainButton:focus-visible {
-  outline: 2px solid var(--color-accent-hover);
+  outline: 2px solid rgba(255, 110, 115, 0.7);
   outline-offset: 2px;
 }
 
 .stopButton {
-  min-height: 48px;
-  flex-shrink: 0;
+  min-height: 62px;
+  min-width: 112px;
+  border-radius: 12px;
 }
 
 .status {
-  font-size: 0.82rem;
-  color: var(--color-text-secondary);
-  min-height: 1.2em;
   margin: 0;
+  color: rgba(206, 213, 224, 0.74);
+  font-size: 0.84rem;
+  min-height: 1.2em;
 }
 
 .unsupported {
-  font-size: 0.85rem;
-  color: var(--color-text-secondary);
-  background-color: var(--color-bg-elevated);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
-  padding: var(--space-3) var(--space-4);
   margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(10, 16, 24, 0.82);
+  color: rgba(206, 213, 224, 0.8);
+  font-size: 0.88rem;
 }
-
-/* --- subtle state indicators --- */
 
 .pulseDot {
   width: 10px;
   height: 10px;
-  border-radius: 50%;
-  background-color: #ffffff;
+  border-radius: 999px;
+  background: #fff;
   animation: ccPulse 1.3s ease-in-out infinite;
 }
 
@@ -67,7 +74,7 @@
 
 .speakerBars span {
   width: 3px;
-  background-color: #ffffff;
+  background: #fff;
   border-radius: 1px;
   animation: ccBars 1s ease-in-out infinite;
 }
@@ -106,7 +113,7 @@
     transform: scale(1);
   }
   50% {
-    opacity: 0.45;
+    opacity: 0.48;
     transform: scale(0.8);
   }
 }
@@ -124,10 +131,25 @@
 @keyframes ccBlink {
   0%,
   100% {
-    opacity: 0.25;
+    opacity: 0.24;
   }
   50% {
     opacity: 1;
+  }
+}
+
+@media (max-width: 767px) {
+  .wrapper {
+    padding: 0 14px 12px;
+  }
+
+  .mainButton,
+  .stopButton {
+    min-height: 56px;
+  }
+
+  .stopButton {
+    min-width: 92px;
   }
 }
 

@@ -204,7 +204,11 @@ def providers(db: Session) -> dict:
 
 
 def capacity() -> dict:
+    from app.core.redis_client import redis_health
+
     s = get_settings()
+    redis = redis_health()
+    concurrency_scope = "global (redis)" if redis["status"] == "connected" else "per_process"
     return {
         "deployment_mode": s.deployment_mode,
         "app_workers": s.app_workers,
@@ -212,8 +216,17 @@ def capacity() -> dict:
         "max_tts_concurrency": s.max_concurrent_tts_requests,
         "assessment_workers": s.assessment_worker_concurrency,
         "rate_limiter_scope": "per_process",
+        "concurrency_scope": concurrency_scope,
+        "redis": redis,
         "notes": {
             "global_rate_limiting": "Global limits across workers/instances require shared state such as Redis (not configured).",
+            "global_concurrency": (
+                "OpenAI/TTS/assessment concurrency limits are enforced fleet-wide via Redis."
+                if redis["status"] == "connected"
+                else "Redis is not connected - OpenAI/TTS/assessment concurrency limits are "
+                     "per-process (effective limit = configured x worker count) unless "
+                     "redis_required is true, in which case admission fails closed instead."
+            ),
             "autoscaling": "AWS autoscaling is a later deployment phase and is not queried by the app.",
         },
         "protection": protection(),
@@ -221,7 +234,11 @@ def capacity() -> dict:
 
 
 def protection() -> dict:
+    from app.core.redis_client import redis_health
+
     s = get_settings()
+    redis = redis_health()
+    concurrency_scope = "global" if redis["status"] == "connected" else "per_process"
     return {
         "source": "server_environment",
         "editable": False,
@@ -238,6 +255,8 @@ def protection() -> dict:
         },
         "interview_concurrency": interview_capacity(),
         "tts_concurrency": tts_capacity(),
+        "concurrency_scope": concurrency_scope,
+        "redis": redis,
         "assessment_execution": "background_queue" if s.assessment_queue_enabled else "synchronous",
         "retry_backoff": {"enabled": True, "max_retries": s.provider_max_retries},
         "circuit_breaker": "not_configured",

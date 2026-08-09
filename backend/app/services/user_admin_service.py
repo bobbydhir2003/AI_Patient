@@ -2,8 +2,8 @@
 
 All permission rules are enforced HERE (backend), never trusted from the client:
 - an admin can never change their own role (self-lockout protection);
-- only a super_admin may promote to / demote from super_admin;
-- the LAST active super_admin cannot be demoted, disabled or rejected;
+- there are exactly two roles (student/admin); every admin has all admin powers;
+- the LAST active admin cannot be demoted, disabled or rejected;
 - a user cannot disable/reject themselves.
 Every action is audited (target + old->new). Secrets are never involved here.
 
@@ -23,7 +23,6 @@ from app.core.constants import (
     ADMIN_ROLES,
     USER_ROLE_ADMIN,
     USER_ROLE_STUDENT,
-    USER_ROLE_SUPER_ADMIN,
     USER_ROLES,
 )
 from app.core.exceptions import (
@@ -50,9 +49,11 @@ def _sync_active(user: User) -> None:
     user.is_active = user.account_status == ACCOUNT_STATUS_ACTIVE
 
 
-def _active_super_admins(db: Session, exclude_id: str | None = None) -> int:
+def _active_admins(db: Session, exclude_id: str | None = None) -> int:
+    """Count active administrators. Used to guarantee the system can never be
+    left without an administrator (last-admin protection)."""
     stmt = select(func.count(User.id)).where(
-        User.role == USER_ROLE_SUPER_ADMIN, User.account_status == ACCOUNT_STATUS_ACTIVE
+        User.role.in_(list(ADMIN_ROLES)), User.account_status == ACCOUNT_STATUS_ACTIVE
     )
     if exclude_id:
         stmt = stmt.where(User.id != exclude_id)
@@ -89,6 +90,28 @@ def list_users(db: Session, *, status: str | None = None, role: str | None = Non
     return list(db.execute(stmt).scalars().all())
 
 
+def status_summary(db: Session) -> dict:
+    """Real per-status counts for the summary cards - single grouped query plus
+    an admin-role count. Never hardcoded example numbers."""
+    rows = db.execute(
+        select(User.account_status, func.count(User.id)).group_by(User.account_status)
+    ).all()
+    by_status = {status: int(count) for status, count in rows}
+    admins = int(
+        db.execute(
+            select(func.count(User.id)).where(User.role.in_(list(ADMIN_ROLES)))
+        ).scalar_one()
+    )
+    return {
+        "total": sum(by_status.values()),
+        "pending": by_status.get(ACCOUNT_STATUS_PENDING, 0),
+        "active": by_status.get(ACCOUNT_STATUS_ACTIVE, 0),
+        "disabled": by_status.get(ACCOUNT_STATUS_DISABLED, 0),
+        "rejected": by_status.get(ACCOUNT_STATUS_REJECTED, 0),
+        "admins": admins,
+    }
+
+
 # ---------------------------------------------------------------- status ops
 def approve(db: Session, actor: User, user_id: str) -> User:
     target = _get(db, user_id)
@@ -105,7 +128,7 @@ def approve(db: Session, actor: User, user_id: str) -> User:
 
 def reject(db: Session, actor: User, user_id: str, note: str | None = None) -> User:
     target = _get(db, user_id)
-    _guard_not_last_super_admin(db, target, "reject")
+    _guard_not_last_admin(db, target, "reject")
     old = target.account_status
     target.account_status = ACCOUNT_STATUS_REJECTED
     _sync_active(target)
@@ -119,7 +142,7 @@ def disable(db: Session, actor: User, user_id: str, note: str | None = None) -> 
     target = _get(db, user_id)
     if target.id == actor.id:
         raise ForbiddenError("You cannot disable your own account.")
-    _guard_not_last_super_admin(db, target, "disable")
+    _guard_not_last_admin(db, target, "disable")
     old = target.account_status
     target.account_status = ACCOUNT_STATUS_DISABLED
     _sync_active(target)
@@ -140,6 +163,88 @@ def enable(db: Session, actor: User, user_id: str) -> User:
     return target
 
 
+# ---------------------------------------------------------------- bulk ops
+def _pending_ids(db: Session) -> list[str]:
+    return list(
+        db.execute(
+            select(User.id).where(User.account_status == ACCOUNT_STATUS_PENDING)
+        ).scalars().all()
+    )
+
+
+def bulk_approve(db: Session, actor: User, user_ids: list[str]) -> dict:
+    """Approve every PENDING account in `user_ids` in ONE transaction. Accounts
+    that are missing or not pending are skipped (reported), never silently
+    'approved'. Idempotent: re-approving an already-active account is a skip,
+    so a duplicate submission cannot double-apply."""
+    succeeded: list[str] = []
+    skipped: list[dict] = []
+    seen: set[str] = set()
+    for uid in user_ids:
+        if uid in seen:
+            continue
+        seen.add(uid)
+        target = db.get(User, uid)
+        if target is None:
+            skipped.append({"user_id": uid, "reason": "not_found"})
+            continue
+        if target.account_status != ACCOUNT_STATUS_PENDING:
+            skipped.append({"user_id": uid, "reason": f"not_pending ({target.account_status})"})
+            continue
+        old = target.account_status
+        target.account_status = ACCOUNT_STATUS_ACTIVE
+        _sync_active(target)
+        _review(target, actor, None)
+        _audit(db, actor, "ACCOUNT_APPROVED", target, old, ACCOUNT_STATUS_ACTIVE)
+        succeeded.append(uid)
+    db.commit()
+    logger.info("bulk_approve actor=%s approved=%d skipped=%d", actor.email, len(succeeded), len(skipped))
+    return {"succeeded": succeeded, "skipped": skipped, "summary": status_summary(db)}
+
+
+def approve_all_pending(db: Session, actor: User) -> dict:
+    """Approve ALL currently-pending accounts. The confirmation count the admin
+    saw is a live snapshot; this re-reads pending at execution time so the real
+    action is exactly 'approve whatever is pending now'."""
+    return bulk_approve(db, actor, _pending_ids(db))
+
+
+def bulk_reject(db: Session, actor: User, user_ids: list[str], note: str | None = None) -> dict:
+    """Reject every account in `user_ids` in ONE transaction. Skips missing
+    accounts, self, and the last active super-admin (never silently)."""
+    succeeded: list[str] = []
+    skipped: list[dict] = []
+    seen: set[str] = set()
+    for uid in user_ids:
+        if uid in seen:
+            continue
+        seen.add(uid)
+        target = db.get(User, uid)
+        if target is None:
+            skipped.append({"user_id": uid, "reason": "not_found"})
+            continue
+        if target.id == actor.id:
+            skipped.append({"user_id": uid, "reason": "cannot_reject_self"})
+            continue
+        if target.account_status == ACCOUNT_STATUS_REJECTED:
+            skipped.append({"user_id": uid, "reason": "already_rejected"})
+            continue
+        try:
+            _guard_not_last_admin(db, target, "reject")
+        except ForbiddenError as exc:
+            skipped.append({"user_id": uid, "reason": str(exc)})
+            continue
+        old = target.account_status
+        target.account_status = ACCOUNT_STATUS_REJECTED
+        _sync_active(target)
+        _review(target, actor, note)
+        _audit(db, actor, "ACCOUNT_REJECTED", target, old, ACCOUNT_STATUS_REJECTED)
+        succeeded.append(uid)
+    db.commit()
+    logger.info("bulk_reject actor=%s rejected=%d skipped=%d", actor.email, len(succeeded), len(skipped))
+    return {"succeeded": succeeded, "skipped": skipped, "summary": status_summary(db)}
+
+
 # ---------------------------------------------------------------- role ops
 def change_role(db: Session, actor: User, user_id: str, new_role: str) -> User:
     if new_role not in USER_ROLES:
@@ -153,16 +258,14 @@ def change_role(db: Session, actor: User, user_id: str, new_role: str) -> User:
     if target.id == actor.id:
         raise ForbiddenError("You cannot change your own role.")
 
-    involves_super = USER_ROLE_SUPER_ADMIN in (old_role, new_role)
-    # 2) Only a super_admin may promote to / demote from super_admin.
-    if involves_super and actor.role != USER_ROLE_SUPER_ADMIN:
-        raise ForbiddenError("Only a super administrator can grant or remove super administrator.")
-    # 3) A normal admin may only move between student and admin.
-    if actor.role == USER_ROLE_ADMIN and new_role not in (USER_ROLE_STUDENT, USER_ROLE_ADMIN):
+    # 2) Only the two application roles are assignable. Every admin has the same
+    #    (full) powers, so any admin may promote a student to admin or demote an
+    #    admin to student.
+    if new_role not in (USER_ROLE_STUDENT, USER_ROLE_ADMIN):
         raise ForbiddenError("Administrators can only assign the student or admin role.")
-    # 4) Never demote the last active super_admin.
-    if old_role == USER_ROLE_SUPER_ADMIN and new_role != USER_ROLE_SUPER_ADMIN:
-        _guard_not_last_super_admin(db, target, "demote")
+    # 3) Never demote/remove the last active administrator.
+    if old_role in ADMIN_ROLES and new_role not in ADMIN_ROLES:
+        _guard_not_last_admin(db, target, "demote")
 
     target.role = new_role
     _audit(db, actor, "ROLE_CHANGED", target, old_role, new_role)
@@ -170,7 +273,9 @@ def change_role(db: Session, actor: User, user_id: str, new_role: str) -> User:
     return target
 
 
-def _guard_not_last_super_admin(db: Session, target: User, action: str) -> None:
-    if target.role == USER_ROLE_SUPER_ADMIN and target.account_status == ACCOUNT_STATUS_ACTIVE:
-        if _active_super_admins(db, exclude_id=target.id) == 0:
-            raise ForbiddenError(f"Cannot {action} the last active super administrator.")
+def _guard_not_last_admin(db: Session, target: User, action: str) -> None:
+    """Prevent an action that would remove the LAST active administrator, so an
+    admin can never accidentally lock every administrator out of the system."""
+    if target.role in ADMIN_ROLES and target.account_status == ACCOUNT_STATUS_ACTIVE:
+        if _active_admins(db, exclude_id=target.id) == 0:
+            raise ForbiddenError(f"Cannot {action} the last active administrator.")

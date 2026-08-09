@@ -29,7 +29,7 @@
   "voice_profile": {
     "provider": "elevenlabs",
     "voice_id": "PASTE_JORDAN_VOICE_ID_HERE",
-    "model_id": "eleven_turbo_v2_5",
+    "model_id": "eleven_flash_v2_5",
     "speed": 0.99,
     "stability": 0.56,
     "similarity_boost": 0.75,

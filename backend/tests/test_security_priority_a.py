@@ -267,7 +267,13 @@ def test_production_accepts_strong_secret_and_forces_debug_off():
 
     from app.core.config import Settings
 
-    s = Settings(environment="production", jwt_secret_key=secrets.token_urlsafe(48), debug=True)
+    # redis_url set so this test's production instance passes the (separate)
+    # Redis-required-in-production check and isolates what's under test here:
+    # JWT secret strength and forcing debug off.
+    s = Settings(
+        environment="production", jwt_secret_key=secrets.token_urlsafe(48), debug=True,
+        redis_url="redis://localhost:6379/0",
+    )
     assert s.debug is False
 
 

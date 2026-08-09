@@ -1,7 +1,7 @@
 """Concurrency guards for paid AI work.
 
-Sync FastAPI endpoints run in a threadpool, so we use bounded threading
-semaphores (not asyncio). Two independent limits:
+Sync FastAPI endpoints run in a threadpool, so these guards are blocking (not
+asyncio). Two independent, NEVER-shared limits:
 
 - interview generation (OpenAI): a hard cap with a short bounded wait; if still
   full, a controlled ServiceOverloadedError (503) is raised BEFORE any provider
@@ -10,44 +10,24 @@ semaphores (not asyncio). Two independent limits:
   caller DEGRADES to text-only rather than failing the interview.
 
 Limits are read live from settings, so the effective cap tracks configuration.
-They are PER PROCESS (per worker), matching the process-local rate limiter.
+
+GLOBAL across workers: both guards are backed by DistributedSemaphore (Redis),
+so with N uvicorn workers the configured limit is the real fleet-wide cap, not
+N x the limit. See core/distributed_semaphore.py for the Redis design and the
+local (per-process) fallback used in development/test.
 """
 from __future__ import annotations
 
-import threading
-
 from app.core.config import get_settings
+from app.core.distributed_semaphore import DistributedSemaphore
 from app.core.exceptions import ServiceOverloadedError
+from app.core.logging import get_logger
 from app.core.telemetry import get_telemetry
 
+logger = get_logger(__name__)
 
-class _ResizableSemaphore:
-    """A semaphore whose capacity can follow a settings value at acquire time."""
-
-    def __init__(self) -> None:
-        self._sem = threading.Semaphore(0)
-        self._capacity = 0
-        self._lock = threading.Lock()
-
-    def _ensure_capacity(self, target: int) -> None:
-        with self._lock:
-            while self._capacity < target:
-                self._sem.release()
-                self._capacity += 1
-            # We never shrink live (would risk over-releasing); a lowered limit
-            # takes effect as slots are returned and simply not re-added.
-            self._capacity = max(self._capacity, target)
-
-    def acquire(self, capacity: int, timeout: float) -> bool:
-        self._ensure_capacity(capacity)
-        return self._sem.acquire(timeout=max(0.0, timeout))
-
-    def release(self) -> None:
-        self._sem.release()
-
-
-_interview_sem = _ResizableSemaphore()
-_tts_sem = _ResizableSemaphore()
+_interview_sem = DistributedSemaphore("openai_interview")
+_tts_sem = DistributedSemaphore("tts")
 
 
 class interview_slot:
@@ -57,6 +37,9 @@ class interview_slot:
         with interview_slot():
             ... call OpenAI ...
     """
+
+    def __init__(self) -> None:
+        self._token: str | None = None
 
     def __enter__(self):
         s = get_settings()
@@ -68,12 +51,12 @@ class interview_slot:
         tele.interview_waiting.inc()
         t0 = _time.monotonic()
         try:
-            acquired = _interview_sem.acquire(s.max_concurrent_ai_interviews, s.ai_interview_wait_seconds)
+            self._token = _interview_sem.acquire(s.max_concurrent_ai_interviews, s.ai_interview_wait_seconds)
         finally:
             wait_ms = (_time.monotonic() - t0) * 1000.0
             tele.interview_waiting.dec()
             tele.interview_wait.observe_latency(wait_ms)
-        if not acquired:
+        if self._token is None:
             tele.interview_wait.incr("timeout")
             tele.http.incr("interview_overload")
             raise ServiceOverloadedError()
@@ -82,15 +65,18 @@ class interview_slot:
 
     def __exit__(self, *exc):
         get_telemetry().interview_in_flight.dec()
-        _interview_sem.release()
+        _interview_sem.release(self._token)
+        self._token = None
         return False
 
 
 def interview_capacity() -> dict:
     s = get_settings()
     tele = get_telemetry()
+    global_active = _interview_sem.active_count()
     return {
-        "active": tele.interview_in_flight.value,
+        "active": global_active if global_active is not None else tele.interview_in_flight.value,
+        "active_scope": "global" if global_active is not None else "process",
         "limit": s.max_concurrent_ai_interviews,
         "waiting": tele.interview_waiting.value,
         "wait_p50_ms": tele.interview_wait.percentile(300, 50),
@@ -112,14 +98,17 @@ class tts_slot:
 
     def __init__(self):
         self.ok = False
+        self._token: str | None = None
 
     def acquire(self):
         s = get_settings()
-        self.ok = _tts_sem.acquire(s.max_concurrent_tts_requests, s.tts_wait_seconds)
+        self._token = _tts_sem.acquire(s.max_concurrent_tts_requests, s.tts_wait_seconds)
+        self.ok = self._token is not None
         if self.ok:
             get_telemetry().tts_in_flight.inc()
         else:
             get_telemetry().elevenlabs.window.incr("degraded")
+            logger.info("tts_degraded_to_text reason=no_capacity_slot")
         return self
 
     def __enter__(self):
@@ -128,8 +117,9 @@ class tts_slot:
     def release(self):
         if self.ok:
             get_telemetry().tts_in_flight.dec()
-            _tts_sem.release()
+            _tts_sem.release(self._token)
             self.ok = False
+            self._token = None
 
     def __exit__(self, *exc):
         self.release()
@@ -138,4 +128,10 @@ class tts_slot:
 
 def tts_capacity() -> dict:
     s = get_settings()
-    return {"active": get_telemetry().tts_in_flight.value, "limit": s.max_concurrent_tts_requests}
+    tele = get_telemetry()
+    global_active = _tts_sem.active_count()
+    return {
+        "active": global_active if global_active is not None else tele.tts_in_flight.value,
+        "active_scope": "global" if global_active is not None else "process",
+        "limit": s.max_concurrent_tts_requests,
+    }

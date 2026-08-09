@@ -8,6 +8,8 @@ html,
 body {
   margin: 0;
   padding: 0;
+  width: 100%;
+  max-width: 100%;
   background-color: var(--color-bg);
   color: var(--color-text-primary);
   font-family: var(--font-family);
@@ -20,6 +22,9 @@ body {
 
 #root {
   min-height: 100vh;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
 }

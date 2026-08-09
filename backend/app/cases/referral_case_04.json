@@ -31,7 +31,7 @@
   "voice_profile": {
     "provider": "elevenlabs",
     "voice_id": "PASTE_PRIYA_VOICE_ID_HERE",
-    "model_id": "eleven_turbo_v2_5",
+    "model_id": "eleven_flash_v2_5",
     "speed": 0.86,
     "stability": 0.62,
     "similarity_boost": 0.76,

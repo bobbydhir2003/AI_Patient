@@ -178,3 +178,49 @@ def test_academic_dashboard_still_works(client, engine):
     tok = admin_token(client, engine)
     r = client.get("/api/admin/dashboard", headers=auth_header(tok))
     assert r.status_code == 200
+
+
+# --------------------------------------- live worker/concurrency/checks (Part 2)
+def test_overview_includes_honest_worker_fleet(client, engine):
+    """With no Redis (test default) the overview must report the fleet as
+    local_only - never a fabricated 4/4 observed."""
+    tok = admin_token(client, engine)
+    d = client.get("/api/admin/system/overview", headers=auth_header(tok)).json()
+    assert "workers" in d
+    w = d["workers"]
+    assert w["monitoring"] == "local_only"      # honest: no shared store
+    assert w["observed"] is None                # not measurable without Redis
+    assert isinstance(w["configured"], int)     # real config value (app_workers)
+    # current_task is never fabricated
+    assert all(x["currentTask"] is None for x in w["workers"])
+
+
+def test_overview_concurrency_uses_real_limits(client, engine):
+    tok = admin_token(client, engine)
+    d = client.get("/api/admin/system/overview", headers=auth_header(tok)).json()
+    conc = d["concurrency"]
+    # Denominators come from live settings (20 / 10 by default), not from the
+    # screenshot's example 300 numbers.
+    assert conc["openai"]["limit"] == get_settings().max_concurrent_ai_interviews
+    assert conc["tts"]["limit"] == get_settings().max_concurrent_tts_requests
+    assert conc["openai"]["active"] >= 0
+
+
+def test_realtime_checks_reflect_real_state(client, engine):
+    tok = admin_token(client, engine)
+    d = client.get("/api/admin/system/overview", headers=auth_header(tok)).json()
+    checks = {c["key"]: c for c in d["checks"]}
+    # DB is reachable in tests -> healthy; Redis is not configured -> honest.
+    assert checks["postgres"]["status"] == "healthy"
+    assert checks["redis"]["status"] == "not_configured"
+    assert checks["heartbeat"]["status"] == "not_configured"
+
+
+def test_live_endpoint_is_lean_and_admin_only(client, engine):
+    assert client.get("/api/admin/system/live").status_code == 401
+    tok = admin_token(client, engine)
+    d = client.get("/api/admin/system/live", headers=auth_header(tok)).json()
+    for key in ("backend", "database", "redis", "workers", "concurrency", "checks", "alerts"):
+        assert key in d
+    # lean: the heavy config sections are NOT in the live payload
+    assert "voices" not in d and "credentials" not in d

@@ -223,6 +223,15 @@ def _commit_turn(
         session_repo.add_disclosed_fact_ids(session, result.newly_disclosed_fact_ids)
         session_repo.set_active_topic(session, result.active_topic)
         db.commit()
+
+        # Record real per-session OpenAI usage for this committed turn (once).
+        # Replays return early above, so a turn is never counted twice; an
+        # interrupted stream carries result.usage=None and is skipped (no fake).
+        from app.services import usage_recorder
+
+        usage_recorder.record_openai_usage(
+            db, session_id, session.student_id, ctx.case_id, result.usage
+        )
         logger.info(
             "turn_completed session_id=%s client_turn_id=%s case_id=%s turn=%d "
             "openai_called=True model=%s response_type=%s response_validated=%s "
@@ -276,7 +285,16 @@ def stream_student_message(
 ) -> Iterator[bytes]:
     """Validate + snapshot context EAGERLY (so 404/409 errors surface as
     normal JSON errors before any bytes stream), then return the SSE
-    generator for the actual exchange."""
+    generator for the actual exchange.
+
+    The interview concurrency slot (same global, Redis-backed guard the
+    non-streaming path uses - core/concurrency.interview_slot) is also
+    reserved HERE, synchronously, before any StreamingResponse is
+    constructed: a ServiceOverloadedError raised here propagates as a normal
+    503 JSON error, exactly like the non-streaming path, instead of surfacing
+    mid-stream after headers were already sent. The slot is released inside
+    _stream_events once generation ends (success, error, or client
+    disconnect)."""
     from app.core.config import get_settings
 
     debug = bool(get_settings().debug)
@@ -292,8 +310,16 @@ def stream_student_message(
             "stream_timing mark=context_loaded ms=%.0f turn=%s session=%s",
             (time.monotonic() - t0) * 1000, correlation_id, session_id,
         )
+
+    slot = None
+    if ctx.replay is None:  # an idempotent replay never calls OpenAI - no slot needed
+        from app.core.concurrency import interview_slot
+
+        slot = interview_slot()
+        slot.__enter__()  # raises ServiceOverloadedError (503) before any streaming begins
+
     return _stream_events(
-        session_factory, session_id, payload, ctx, client, t0, debug, correlation_id
+        session_factory, session_id, payload, ctx, client, t0, debug, correlation_id, slot
     )
 
 
@@ -306,6 +332,7 @@ def _stream_events(
     t0: float,
     debug: bool,
     correlation_id: str,
+    slot=None,
 ) -> Iterator[bytes]:
     if ctx.replay is not None:
         yield _sse("final", ctx.replay)
@@ -423,3 +450,9 @@ def _stream_events(
                 "code": "PATIENT_RESPONSE_UNAVAILABLE",
                 "message": "The patient response could not be generated. Please try again.",
             })
+    finally:
+        # Symmetric with the acquire in stream_student_message: released on
+        # every exit path (normal completion, a caught error above, an
+        # uncaught exception, or GeneratorExit from a client disconnect).
+        if slot is not None:
+            slot.__exit__(None, None, None)

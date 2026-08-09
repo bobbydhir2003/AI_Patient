@@ -21,16 +21,20 @@ import {
   speakPatientResponse,
 } from "../services/patientVoiceService";
 import type { AudioSetup, InterruptionSensitivity } from "../services/voiceActivityDetector";
+import { unlockAudioPlayback } from "../services/audioUnlock";
+import { audioSetupOptions, autoInterruptNote } from "../services/mobileAudio";
 import { useVoiceConversation } from "../hooks/useVoiceConversation";
+import { useIsMobile } from "../hooks/useIsMobile";
+import { AppImage } from "../components/common/AppImage";
 import { isUsableTranscript, type VoiceConversationState } from "../hooks/voiceStateMachine";
 import { usePatientCase } from "../services/cases";
 import { caseHubPath } from "../services/authRouting";
 import { useAppContext } from "../state/AppContext";
 import { useAuth } from "../state/AuthContext";
 import { ProgressSteps } from "../components/layout/ProgressSteps";
-import { PatientProfile } from "../components/cases/PatientProfile";
 import { ConversationPanel } from "../components/interview/ConversationPanel";
 import { ConversationControl } from "../components/interview/ConversationControl";
+import { InterviewWelcomeCard } from "../components/interview/InterviewWelcomeCard";
 import { InterviewTimer } from "../components/interview/InterviewTimer";
 import { ConfirmationModal } from "../components/interview/ConfirmationModal";
 import type {
@@ -48,6 +52,24 @@ const CONNECTION_LABELS: Record<ConnectionState, string> = {
   offline: "Offline",
   error: "Error",
 };
+
+function StatusIcon({ type }: { type: "connection" | "session" | "time" }) {
+  if (type === "connection") {
+    return (
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M12 19a7 7 0 1 0-7-7" />
+        <path d="M12 5a7 7 0 0 1 7 7" />
+        <path d="M8 17l-3 3-2-2" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8v4l2.5 2.5" />
+    </svg>
+  );
+}
 
 /** Map voice states to the sidebar badge (text + existing badge styles). */
 function badgeFor(state: VoiceConversationState, typedBusy: boolean): { label: string; css: string } {
@@ -88,6 +110,7 @@ export function InterviewPage() {
   const { caseId } = useParams<{ caseId: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const isMobile = useIsMobile();
   const { patientCase, loading: caseLoading, error: caseError, retry: retryCase } =
     usePatientCase(caseId);
   const studentHome = caseHubPath(user?.role);
@@ -434,6 +457,9 @@ export function InterviewPage() {
   async function handleTypedSend() {
     const text = draft.trim();
     if (!text || typedBusy) return;
+    // Typed Send is a user gesture: unlock audio so the patient's spoken reply
+    // is allowed to play on iOS Safari even when voice mode was never started.
+    unlockAudioPlayback();
 
     if (voice.active) {
       // Voice mode owns the loop: typed question = interruption + normal flow.
@@ -570,7 +596,7 @@ export function InterviewPage() {
   const sendUsable = isUsableTranscript(draft);
 
   return (
-    <div className="page">
+    <div className={`${styles.page} page`}>
       <ProgressSteps steps={PROGRESS_STEPS} currentStepIndex={1} />
 
       {connection === "offline" && (
@@ -631,92 +657,145 @@ export function InterviewPage() {
         </div>
       )}
 
-      <div className={styles.layout}>
-        <aside className={`card ${styles.sidebar}`}>
-          <PatientProfile patientCase={patientCase} size="large" />
+      {/* Compact patient header — mobile only (CSS hides it on desktop). Keeps
+          the patient card from taking half the phone screen. */}
+      <div className={`card ${styles.mobilePatientHeader}`}>
+        <AppImage
+          src={patientCase.image}
+          alt={`${patientCase.name} patient portrait`}
+          className={styles.mobilePatientImg}
+        />
+        <div className={styles.mobilePatientMeta}>
+          <span className={styles.mobilePatientName}>{patientCase.name}</span>
+          <span className={styles.mobilePatientAge}>Age {patientCase.age}</span>
+          <span className={styles.mobilePatientStatus}>
+            <InterviewTimer startTime={sessionReady ? activeInterview.startedAt : null} />
+            {" · "}
+            <span className={`${styles.statusBadge} ${badgeClass}`}>
+              <span className={styles.statusDot} />
+              {badge.label}
+            </span>
+          </span>
+        </div>
+      </div>
 
-          <div className={styles.statusRow}>
-            <div className={styles.statusItem}>
-              <span className={styles.statusLabel}>Time Elapsed</span>
-              <span className={styles.statusValue}>
-                <InterviewTimer startTime={sessionReady ? activeInterview.startedAt : null} />
-              </span>
+      <div className={styles.layout}>
+        <aside className={styles.sidebar}>
+          <div className={styles.patientPanel}>
+            <div className={styles.patientHero}>
+              <AppImage
+                src={patientCase.image}
+                alt={`${patientCase.name} patient portrait`}
+                className={styles.patientImage}
+              />
+              <div className={styles.patientIdentity}>
+                <h2 className={styles.patientName}>{patientCase.name}</h2>
+                <p className={styles.patientAge}>Age: {patientCase.age}</p>
+              </div>
             </div>
-            <div className={styles.statusItem}>
-              <span className={styles.statusLabel}>Backend</span>
-              <span className={`${styles.statusBadge} ${connectionBadgeClass}`}>
-                <span className={styles.statusDot} />
-                {CONNECTION_LABELS[connection]}
-              </span>
+
+            <div className={styles.statusCard}>
+              <div className={styles.statusPanelRow}>
+                <span className={styles.statusInfoLabel}>
+                  <StatusIcon type="connection" />
+                  Connection
+                </span>
+                <span className={`${styles.statusBadge} ${connectionBadgeClass}`}>
+                  <span className={styles.statusDot} />
+                  {CONNECTION_LABELS[connection]}
+                </span>
+              </div>
+              <div className={styles.statusPanelRow}>
+                <span className={styles.statusInfoLabel}>
+                  <StatusIcon type="session" />
+                  Session Status
+                </span>
+                <span className={`${styles.statusBadge} ${badgeClass}`}>
+                  <span className={styles.statusDot} />
+                  {badge.label}
+                </span>
+              </div>
+              <div className={styles.statusPanelRow}>
+                <span className={styles.statusInfoLabel}>
+                  <StatusIcon type="time" />
+                  Time Elapsed
+                </span>
+                <span className={styles.statusValue}>
+                  <InterviewTimer startTime={sessionReady ? activeInterview.startedAt : null} />
+                </span>
+              </div>
             </div>
-            <div className={styles.statusItem}>
-              <span className={styles.statusLabel}>Status</span>
-              <span className={`${styles.statusBadge} ${badgeClass}`}>
-                <span className={styles.statusDot} />
-                {badge.label}
-              </span>
-            </div>
-            {ttsAvailable && (
-              <label className={styles.voiceToggle}>
-                <input
-                  type="checkbox"
-                  checked={voiceEnabled}
-                  onChange={(e) => {
-                    if (!e.target.checked) cancelPatientSpeech();
-                    setVoiceEnabled(e.target.checked);
-                  }}
-                />
-                Speak patient replies
-              </label>
-            )}
-            {voice.supported && (
-              <>
-                <label className={styles.voiceToggle}>
-                  <input
-                    type="checkbox"
-                    checked={autoInterrupt}
-                    onChange={(e) => setAutoInterrupt(e.target.checked)}
-                  />
-                  Automatic interruption
-                </label>
-                {autoInterrupt && (
-                  <p className={styles.settingNote}>
-                    Works best with headphones. Laptop speakers may cause false interruptions.
-                  </p>
-                )}
-                <label className={styles.sensitivityRow}>
-                  <span>Audio setup</span>
-                  <select
-                    className={styles.sensitivitySelect}
-                    value={audioSetup}
-                    onChange={(e) => setAudioSetup(e.target.value as AudioSetup)}
-                  >
-                    <option value="speakers">Laptop speakers</option>
-                    <option value="headphones">Headphones / headset</option>
-                  </select>
-                </label>
-                <label
-                  className={`${styles.sensitivityRow} ${!autoInterrupt ? styles.settingDisabled : ""}`}
-                >
-                  <span>Interruption sensitivity</span>
-                  <select
-                    className={styles.sensitivitySelect}
-                    value={sensitivity}
-                    disabled={!autoInterrupt}
-                    onChange={(e) => setSensitivity(e.target.value as InterruptionSensitivity)}
-                  >
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
-                  </select>
-                </label>
-              </>
-            )}
           </div>
+
+          {(ttsAvailable || voice.supported) && (
+            <details className={styles.audioSettings} open={!isMobile}>
+              <summary className={styles.audioSettingsSummary}>Audio Settings</summary>
+              <div className={styles.audioSettingsBody}>
+                {ttsAvailable && (
+                  <label className={styles.voiceToggle}>
+                    <input
+                      type="checkbox"
+                      checked={voiceEnabled}
+                      onChange={(e) => {
+                        if (!e.target.checked) cancelPatientSpeech();
+                        setVoiceEnabled(e.target.checked);
+                      }}
+                    />
+                    Speak patient replies
+                  </label>
+                )}
+                {voice.supported && (
+                  <>
+                    <label className={styles.sensitivityRow}>
+                      <span>{isMobile ? "Device audio" : "Audio Output"}</span>
+                      <select
+                        className={styles.sensitivitySelect}
+                        value={audioSetup}
+                        onChange={(e) => setAudioSetup(e.target.value as AudioSetup)}
+                      >
+                        {audioSetupOptions(isMobile).map((o) => (
+                          <option key={o.value} value={o.value}>{o.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className={styles.voiceToggle}>
+                      <input
+                        type="checkbox"
+                        checked={autoInterrupt}
+                        onChange={(e) => setAutoInterrupt(e.target.checked)}
+                      />
+                      <span className={styles.toggleText}>
+                        Automatic interruption
+                        <span className={styles.settingSubtitle}>Pause patient when you speak</span>
+                      </span>
+                    </label>
+                    {autoInterrupt && (
+                      <p className={styles.settingNote}>{autoInterruptNote(isMobile)}</p>
+                    )}
+                    <label
+                      className={`${styles.sensitivityRow} ${!autoInterrupt ? styles.settingDisabled : ""}`}
+                    >
+                      <span>Interruption sensitivity</span>
+                      <select
+                        className={styles.sensitivitySelect}
+                        value={sensitivity}
+                        disabled={!autoInterrupt}
+                        onChange={(e) => setSensitivity(e.target.value as InterruptionSensitivity)}
+                      >
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                      </select>
+                    </label>
+                  </>
+                )}
+              </div>
+            </details>
+          )}
 
           <button
             type="button"
-            className="btn btn-secondary"
+            className={`btn btn-secondary ${styles.endButton}`}
             onClick={() => setShowEndModal(true)}
             disabled={endPhase !== null}
           >
@@ -732,12 +811,25 @@ export function InterviewPage() {
 
         <section className={styles.mainPanel}>
           <div className={styles.mainHeader}>
-            <h1 className={styles.mainTitle}>
-              Interview with {patientCase.name}
-              {patientCase.caseCategory === "referral" && (
-                <span className={styles.advancedChip}>Advanced Case</span>
-              )}
-            </h1>
+            <div className={styles.mainHeaderText}>
+              <h1 className={styles.mainTitle}>
+                Interview with {patientCase.name}
+                {patientCase.caseCategory === "referral" && (
+                  <span className={styles.advancedChip}>Advanced Case</span>
+                )}
+              </h1>
+              <p className={styles.mainSubtitle}>
+                Ask questions to gather information about {patientCase.name}'s condition.
+              </p>
+            </div>
+            <span
+              className={`${styles.headerPill} ${badgeClass}`}
+              role="status"
+              aria-live="polite"
+            >
+              <span className={styles.statusDot} />
+              {badge.label}
+            </span>
           </div>
 
           <ConversationPanel
@@ -756,8 +848,25 @@ export function InterviewPage() {
               voice.state === "INTERRUPTING" ||
               voice.state === "REQUESTING_PERMISSION"
             }
-            patientImage={patientCase.image}
             patientName={patientCase.name}
+            welcome={<InterviewWelcomeCard patientName={patientCase.name} />}
+            mic={{
+              supported: voice.supported,
+              active: voice.active,
+              // Same voice hook as the big button: toggle start/stop. Disabled
+              // only while the backend isn't ready, the interview is ending, or
+              // a request/permission is mid-flight (avoids double triggers).
+              disabled:
+                !sessionReady ||
+                endPhase !== null ||
+                voice.state === "PROCESSING" ||
+                voice.state === "REQUESTING_PERMISSION" ||
+                voice.state === "INTERRUPTING",
+              label: voice.active
+                ? "Stop voice conversation"
+                : `Start voice conversation with ${patientCase.name}`,
+              onToggle: () => (voice.active ? voice.stopConversation() : voice.startConversation()),
+            }}
             voiceControl={
               <ConversationControl
                 patientName={patientCase.name}
@@ -773,9 +882,16 @@ export function InterviewPage() {
               />
             }
           />
-          {import.meta.env.DEV && sessionReady && (
-            <p className={styles.devSourceLabel}>Response source: OpenAI backend (dev only)</p>
-          )}
+          <div className={styles.statusFooter}>
+            <span className={styles.footerItem}>
+              <span className={`${styles.statusDot} ${connectionBadgeClass}`} />
+              Backend: {CONNECTION_LABELS[connection]}
+            </span>
+            {import.meta.env.DEV && sessionReady && (
+              <span className={styles.footerItem}>Response source: OpenAI backend (dev only)</span>
+            )}
+            <span className={styles.footerItem}>Your session is secure and private</span>
+          </div>
         </section>
       </div>
 

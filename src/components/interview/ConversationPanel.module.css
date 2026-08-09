@@ -1,14 +1,44 @@
+/* The interview card: a fixed-size, column flex container. Only .messages
+   scrolls; the welcome card and the controls stay put. `min-height:0` +
+   `overflow:hidden` are what stop the transcript from stretching the card. */
 .panel {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  min-height: 420px;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
+/* Fixed instructional card above the transcript. */
+.welcomeSlot {
+  flex-shrink: 0;
+  padding: var(--space-4) var(--space-4) 0;
+}
+
+/* THE ONLY SCROLLABLE REGION. */
 .messages {
-  flex: 1;
+  flex: 1 1 0;
+  min-height: 0;
   overflow-y: auto;
-  padding: var(--space-4);
+  overflow-x: hidden;
+  padding: 16px 18px 20px;
+  /* Polished, subtle scrollbar (Firefox + WebKit). */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+  overscroll-behavior: contain;
+}
+.messages::-webkit-scrollbar {
+  width: 7px;
+}
+.messages::-webkit-scrollbar-track {
+  background: transparent;
+}
+.messages::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.45);
+  border-radius: 999px;
+}
+.messages::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.7);
 }
 
 .emptyState {
@@ -22,10 +52,16 @@
   color: var(--color-text-muted);
   font-size: 0.85rem;
   font-style: italic;
-  padding: 0 var(--space-4) var(--space-2);
+  padding: 0 var(--space-2) var(--space-2);
+}
+
+/* Fixed voice control slot (does not scroll). */
+.voiceSlot {
+  flex-shrink: 0;
 }
 
 .inputBar {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -37,13 +73,95 @@
   flex: 1;
 }
 
+/* Circular mic button in the composer (matches the reference screenshot). It
+   toggles the SAME voice hook as the big Start button. */
+.micButton {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+.micButton:hover:not(:disabled) {
+  background: var(--color-bg-card-hover);
+  color: var(--color-text-primary);
+}
+.micButton:focus-visible {
+  outline: 2px solid var(--color-accent-hover);
+  outline-offset: 2px;
+}
+.micButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.micActive {
+  background: var(--color-accent);
+  border-color: transparent;
+  color: #fff;
+  animation: micPulse 1.4s ease-in-out infinite;
+}
+@keyframes micPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(192, 57, 43, 0.5); }
+  50% { box-shadow: 0 0 0 6px rgba(192, 57, 43, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .micActive { animation: none; }
+}
+
 @media (max-width: 640px) {
   .inputBar {
     flex-wrap: wrap;
   }
-
   .textInput {
     order: 1;
     flex-basis: 100%;
   }
+}
+
+/* ---- Phones: the transcript keeps its own bounded, internally-scrolling
+   region so the composer + voice control stay visible above the keyboard. ---- */
+@media (max-width: 767px) {
+  .panel {
+    /* On phones the page itself may scroll; keep the transcript bounded. */
+    flex: 0 1 auto;
+  }
+  .messages {
+    max-height: 48dvh;
+    -webkit-overflow-scrolling: touch;
+  }
+  .inputBar {
+    padding: var(--space-3);
+    padding-bottom: max(var(--space-3), env(safe-area-inset-bottom));
+  }
+  .textInput {
+    min-height: 46px;
+    font-size: 16px; /* prevents iOS Safari auto-zoom on focus */
+  }
+  .inputBar .btn {
+    min-height: 46px;
+    order: 2;
+    flex: 1;
+  }
+  /* Keep the mic on the same row as Send (both after the full-width input). */
+  .micButton {
+    order: 2;
+    width: 46px;
+    height: 46px;
+  }
+}
+
+/* Very small phones: a touch more breathing room. */
+@media (max-width: 430px) {
+  .messages { max-height: 44dvh; }
 }

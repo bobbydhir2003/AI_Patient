@@ -90,22 +90,30 @@ def test_admin_can_promote_student_to_admin_and_audit(engine):
         assert any(l["actionType"] == "ROLE_CHANGED" for l in logs)
 
 
-def test_normal_admin_cannot_grant_super_admin(engine):
+def test_invalid_role_is_rejected(engine):
+    """Only student/admin are assignable. super_admin (or any other value) is
+    rejected by request validation before it can reach the database."""
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
         stud = _account(engine, "s2@school.edu", role="student", status="ACTIVE")
         ah = _admin_headers(c, engine)  # normal admin
         r = c.post(f"/api/admin/users/{stud}/role", json={"role": "super_admin"}, headers=ah)
-        assert r.status_code == 403 and r.json()["error"]["code"] == "forbidden"
+        assert r.status_code == 422  # schema pattern ^(student|admin)$ rejects it
+        # and the student's role is unchanged
+        assert c.get("/api/admin/users", headers=ah).json()
+        assert next(u for u in c.get("/api/admin/users", headers=ah).json()
+                    if u["email"] == "s2@school.edu")["role"] == "student"
 
 
-def test_super_admin_can_promote_and_demote_admin(engine):
+def test_any_admin_can_promote_and_demote(engine):
+    """Every admin has full powers: promote a student to admin and demote an
+    admin back to student."""
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
-        sah = _admin_headers(c, engine, email="super@school.edu", role="super_admin")
-        admin_id = _account(engine, "a3@school.edu", role="admin", status="ACTIVE")
-        r = c.post(f"/api/admin/users/{admin_id}/role", json={"role": "super_admin"}, headers=sah)
-        assert r.json()["role"] == "super_admin"
-        r2 = c.post(f"/api/admin/users/{admin_id}/role", json={"role": "admin"}, headers=sah)
-        assert r2.json()["role"] == "admin"
+        ah = _admin_headers(c, engine, email="actor@school.edu")
+        target = _account(engine, "a3@school.edu", role="student", status="ACTIVE")
+        r = c.post(f"/api/admin/users/{target}/role", json={"role": "admin"}, headers=ah)
+        assert r.status_code == 200 and r.json()["role"] == "admin"
+        r2 = c.post(f"/api/admin/users/{target}/role", json={"role": "student"}, headers=ah)
+        assert r2.status_code == 200 and r2.json()["role"] == "student"
 
 
 def test_cannot_change_own_role(engine):
@@ -117,18 +125,42 @@ def test_cannot_change_own_role(engine):
         assert r.status_code == 403  # self role change blocked (self-lockout protection)
 
 
-def test_last_super_admin_protected(engine):
-    """The final active super admin cannot be disabled, rejected or demoted away."""
-    with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
-        ah = _admin_headers(c, engine, email="adminx@school.edu")  # a normal admin actor
-        only_super = _account(engine, "only@school.edu", role="super_admin", status="ACTIVE")
-        # disable the ONLY active super admin -> blocked
-        assert c.post(f"/api/admin/users/{only_super}/disable", json={}, headers=ah).status_code == 403
-        # a SECOND active super admin makes disabling the first allowed again
-        second = _account(engine, "second_super@school.edu", role="super_admin", status="ACTIVE")
-        assert c.post(f"/api/admin/users/{only_super}/disable", json={}, headers=ah).status_code == 200
-        # now 'second' is the only active super admin -> protected again
-        assert c.post(f"/api/admin/users/{second}/disable", json={}, headers=ah).status_code == 403
+def test_last_admin_protected(engine):
+    """The final ACTIVE administrator cannot be disabled or demoted away, so the
+    system can never be left without an administrator. Verified at the service
+    layer because the endpoint actor must themselves be an active admin (which
+    would otherwise always count as a remaining admin)."""
+    from app.core.exceptions import ForbiddenError
+    from app.services import user_admin_service as uas
+
+    db = sessionmaker(bind=engine)()
+    try:
+        # Only ONE active admin ('sole'); the actor is an admin whose account is
+        # DISABLED, so it does not count toward the active-admin total.
+        sole_id = _account(engine, "sole@school.edu", role="admin", status="ACTIVE")
+        actor_id = _account(engine, "actor@school.edu", role="admin", status="DISABLED")
+        sole = db.get(User, sole_id)
+        actor = db.get(User, actor_id)
+
+        # Disabling the last active admin is blocked.
+        try:
+            uas.disable(db, actor, sole.id)
+            assert False, "expected ForbiddenError"
+        except ForbiddenError:
+            pass
+        # Demoting the last active admin to student is blocked.
+        try:
+            uas.change_role(db, actor, sole.id, "student")
+            assert False, "expected ForbiddenError"
+        except ForbiddenError:
+            pass
+
+        # A SECOND active admin removes the protection.
+        _account(engine, "second@school.edu", role="admin", status="ACTIVE")
+        uas.disable(db, actor, sole.id)  # now allowed
+        assert db.get(User, sole.id).account_status == "DISABLED"
+    finally:
+        db.close()
 
 
 # ============================ SECURITY ============================

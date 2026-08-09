@@ -1,8 +1,9 @@
 """Editable runtime configuration endpoints.
 
-Access tiers (enforced here, not just in the UI):
-  - admin        : view/edit AI settings and patient voices, run connection tests
-  - super_admin  : replace/remove API keys, restore configuration versions
+Access (enforced here, not just in the UI): every route requires a normal admin
+(`require_admin`). There is no separate super/system-admin tier — all admins may
+view/edit AI settings and patient voices, run connection tests, and
+replace/remove API keys and restore configuration versions.
 """
 from collections.abc import Iterator
 
@@ -21,7 +22,7 @@ from app.core.constants import (
 from app.core.exceptions import ValidationFailedError, VoiceNotAvailableError
 from app.core.logging import get_logger
 from app.database.connection import get_db
-from app.dependencies.auth import require_admin, require_super_admin
+from app.dependencies.auth import require_admin
 from app.models import User
 from app.repositories.audit_repository import AuditRepository
 from app.schemas.runtime_schema import (
@@ -55,7 +56,7 @@ def _audit(db, admin, action, record_type, record_id, description):
     )
 
 
-# ------------------------------ credentials (super_admin to write) ------------
+# ------------------------------ credentials (admin) ---------------------------
 @router.get("/credentials", response_model=CredentialListOut, dependencies=[Depends(require_admin)])
 def get_credentials(db: Session = Depends(get_db)) -> CredentialListOut:
     return CredentialListOut(
@@ -73,19 +74,19 @@ def _replace_credential(service, payload, admin, db) -> ApplyResult:
 
 
 @router.post("/credentials/openai", response_model=ApplyResult)
-def replace_openai_key(payload: CredentialReplaceIn, admin: User = Depends(require_super_admin),
+def replace_openai_key(payload: CredentialReplaceIn, admin: User = Depends(require_admin),
                        db: Session = Depends(get_db)) -> ApplyResult:
     return _replace_credential("openai", payload, admin, db)
 
 
 @router.post("/credentials/elevenlabs", response_model=ApplyResult)
-def replace_elevenlabs_key(payload: CredentialReplaceIn, admin: User = Depends(require_super_admin),
+def replace_elevenlabs_key(payload: CredentialReplaceIn, admin: User = Depends(require_admin),
                            db: Session = Depends(get_db)) -> ApplyResult:
     return _replace_credential("elevenlabs", payload, admin, db)
 
 
 @router.delete("/credentials/{service}", response_model=ApplyResult)
-def remove_key(service: str, admin: User = Depends(require_super_admin),
+def remove_key(service: str, admin: User = Depends(require_admin),
                db: Session = Depends(get_db)) -> ApplyResult:
     rc.remove_credential(db, service=service, admin_email=admin.email)
     _audit(db, admin, AUDIT_CREDENTIAL_REMOVED, "credential", service, f"Removed {service} API key")

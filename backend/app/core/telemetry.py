@@ -365,11 +365,22 @@ class Telemetry:
         self.tts_in_flight = Gauge()
         self.assessment_in_flight = Gauge()
         self.started_at = time.time()
+        # Lifetime (since process start) count of HTTP requests handled by THIS
+        # worker - a real cumulative number the rolling window cannot provide
+        # (it only retains ~1h). Used for the per-worker "Requests handled".
+        self._http_requests_total = 0
+        self._http_total_lock = threading.Lock()
         self._sampler_stop: threading.Event | None = None
         self._sampler_thread: threading.Thread | None = None
 
+    def http_requests_total(self) -> int:
+        with self._http_total_lock:
+            return self._http_requests_total
+
     # --- HTTP recording (from middleware) ---
     def record_http(self, status_code: int, latency_ms: float) -> None:
+        with self._http_total_lock:
+            self._http_requests_total += 1
         self.http.incr("requests")
         self.http.observe_latency(latency_ms)
         if status_code >= 500:

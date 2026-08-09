@@ -6,7 +6,7 @@ Covers the final role design:
                         (sessions flagged practice, excluded from analytics) AND
                         reach the admin dashboard.
   - System admin     -> role=admin, is_system_admin=True.
-  - Super admin      -> role=super_admin; admin access preserved.
+  - Legacy super_admin -> consolidated to role=admin by migration 0016.
 Backend RBAC (require_admin / require_simulator_access) is the real protection;
 these tests exercise it directly.
 """
@@ -122,15 +122,34 @@ def test_system_admin_flag_and_admin_access(engine):
         assert c.get("/api/admin/dashboard", headers=bearer(tok)).status_code == 200
 
 
-# ---------------------------------------------------------- TEST 4: SUPER ADMIN
-def test_super_admin_access_preserved(engine):
+# --------------------------------------- TEST 4: LEGACY SUPER ADMIN CONSOLIDATES
+def test_legacy_super_admin_consolidates_to_admin(engine):
+    """A pre-existing 'super_admin' row is folded into the normal admin role by
+    migration 0016. After consolidation it is an ordinary admin with FULL admin
+    powers and simulator access. No administrator loses access."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import sessionmaker
+
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
         _make_user(engine, "root@school.edu", role="super_admin")
+        # Apply the same data migration the Alembic revision performs.
+        db = sessionmaker(bind=engine)()
+        try:
+            db.execute(text(
+                "UPDATE users SET role='admin' WHERE role IN ('super_admin','system_admin')"
+            ))
+            db.commit()
+        finally:
+            db.close()
+
         tok = login_token(c, "root@school.edu", "pw123456")
         me = c.get("/api/auth/me", headers=bearer(tok)).json()
-        assert me["role"] == "super_admin"
+        assert me["role"] == "admin"
         assert c.get("/api/admin/dashboard", headers=bearer(tok)).status_code == 200
-        # super_admin also has simulator access.
+        # Full admin powers: system dashboard, load tests, credentials, voices.
+        assert c.get("/api/admin/system/load-tests/config", headers=bearer(tok)).status_code == 200
+        assert c.get("/api/admin/runtime/credentials", headers=bearer(tok)).status_code == 200
+        # ...and simulator access preserved.
         assert c.post("/api/sessions", json={"studentName": "Tester", "caseId": "camden"}, headers=bearer(tok)).status_code == 201
 
 

@@ -68,7 +68,7 @@ function ReplaceKeyModal({ service, onClose, onDone }: {
 }
 
 export function ApiCredentialsPage() {
-  const { token, isSuperAdmin } = useAuth();
+  const { token } = useAuth();
   const toast = useToast();
   const [creds, setCreds] = useState<RuntimeCredential[] | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
@@ -123,12 +123,6 @@ export function ApiCredentialsPage() {
         </div>
       </div>
 
-      {!isSuperAdmin && (
-        <p className="pt-muted" style={{ marginBottom: "var(--space-4)" }}>
-          You can view status and run connection tests. Replacing or removing keys requires a Super Admin.
-        </p>
-      )}
-
       <div className="pt-cards" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}>
         {creds.map((c) => (
           <div key={c.service} className="pt-panel">
@@ -144,27 +138,23 @@ export function ApiCredentialsPage() {
               <dt>Last test</dt><dd>{c.lastTestStatus}{c.lastTestMessage ? ` — ${c.lastTestMessage}` : ""}</dd>
               <dt>Updated by</dt><dd>{c.updatedBy ?? "Unknown"}</dd>
             </dl>
-            {isSuperAdmin && !c.secureStorageAvailable && (
+            {!c.secureStorageAvailable && (
               <p className="pt-muted" style={{ fontSize: "0.82rem", marginTop: "var(--space-2)" }} role="note">
                 Runtime credential storage requires CONFIG_ENCRYPTION_KEY to be configured on the server.
               </p>
             )}
             <div className="pt-row" style={{ marginTop: "var(--space-3)" }}>
               <button className="pt-btn pt-btn-secondary pt-btn-sm" onClick={() => test(c.service)}>Test Connection</button>
-              {isSuperAdmin && (
-                <>
-                  <button
-                    className="pt-btn pt-btn-sm"
-                    onClick={() => setReplacing(c.service)}
-                    disabled={!c.secureStorageAvailable}
-                    title={c.secureStorageAvailable ? "" : "CONFIG_ENCRYPTION_KEY is not set on the server"}
-                  >
-                    Replace Key
-                  </button>
-                  {c.configured && c.source === "database" && (
-                    <button className="pt-btn pt-btn-danger pt-btn-sm" onClick={() => setRemoving(c.service)}>Remove Override</button>
-                  )}
-                </>
+              <button
+                className="pt-btn pt-btn-sm"
+                onClick={() => setReplacing(c.service)}
+                disabled={!c.secureStorageAvailable}
+                title={c.secureStorageAvailable ? "" : "CONFIG_ENCRYPTION_KEY is not set on the server"}
+              >
+                Replace Key
+              </button>
+              {c.configured && c.source === "database" && (
+                <button className="pt-btn pt-btn-danger pt-btn-sm" onClick={() => setRemoving(c.service)}>Remove Override</button>
               )}
             </div>
           </div>

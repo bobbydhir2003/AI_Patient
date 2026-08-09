@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session
 from app.core.constants import (
     ADMIN_ROLES,
     USER_ROLE_STUDENT,
-    USER_ROLE_SUPER_ADMIN,
     USER_ROLES,
 )
 from app.core.exceptions import (
@@ -75,17 +74,17 @@ def get_current_user(
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    # super_admin is a strict superset of admin, so it passes admin checks too.
+    """The single administrative gate. Every admin holds ALL admin powers."""
     if current_user.role not in ADMIN_ROLES:
         raise ForbiddenError("Administrator access is required.")
     return current_user
 
 
-def require_super_admin(current_user: User = Depends(get_current_user)) -> User:
-    """Highest tier: API-key replacement/removal and configuration rollback."""
-    if current_user.role != USER_ROLE_SUPER_ADMIN:
-        raise ForbiddenError("Super administrator access is required.")
-    return current_user
+# Backward-compatibility alias. The former super/system-admin tier has been
+# consolidated into the normal admin role, so any endpoint that historically
+# required a "super admin" now simply requires a normal admin. Kept as an alias
+# so existing imports keep working without granting extra privileges.
+require_super_admin = require_admin
 
 
 def require_student(current_user: User = Depends(get_current_user)) -> User:

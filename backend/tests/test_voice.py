@@ -455,8 +455,8 @@ def test_interview_response_includes_normalized_speech(engine):
 
     original_generate = ok.generate
 
-    def generate_with_speech(messages):
-        reply: PatientReply = original_generate(messages)
+    def generate_with_speech(messages, usage_out=None):
+        reply: PatientReply = original_generate(messages, usage_out=usage_out)
         reply.speech = PatientSpeech(
             emotion="warm", pace="slow", energy="normal", hesitation="mild", pause_before_ms=9999
         )

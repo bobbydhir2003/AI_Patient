@@ -44,6 +44,10 @@ class EngineResult:
     speech: dict | None = None
     # Which participant produced this response (multi-participant cases).
     speaker_id: str | None = None
+    # Provider-reported OpenAI usage for THIS request (input_tokens/output_tokens
+    # /model), used for per-session cost recording. None when unavailable (e.g.
+    # an interrupted stream) — never fabricated.
+    usage: dict | None = None
 
 
 def _resolve_topics(question: str, previous_active_topic: str | None) -> tuple[list[str], str | None]:
@@ -80,8 +84,10 @@ def generate_patient_response(
     client = client or get_openai_client()
     messages = prompt_builder.build_messages(case, eligible, context, question, speaker_id)
 
+    usage_holder: dict = {}
+
     def attempt() -> PatientReply:
-        reply = client.generate(messages)
+        reply = client.generate(messages, usage_out=usage_holder)
         valid, cleaned = response_validator.validate_response(case, reply.patient_text)
         if not valid:
             raise PatientEngineError("Generated response failed validation (character break or leakage).")
@@ -125,4 +131,5 @@ def generate_patient_response(
         validation_status=child_validation,
         speech=speech,
         speaker_id=speaker_id,
+        usage=dict(usage_holder) if usage_holder else None,
     )

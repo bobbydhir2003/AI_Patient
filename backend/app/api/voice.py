@@ -222,6 +222,25 @@ def synthesize(
             payload.correlation_id or "-",
         )
 
+    # A real ElevenLabs synthesis request is now confirmed (cache MISS + the
+    # provider produced audio past auth/connect). Record character usage ONCE,
+    # best-effort — a cache hit returned earlier and is never billed here.
+    try:
+        from app.services import usage_recorder
+
+        _sess = db.get(InterviewSession, payload.session_id) if payload.session_id else None
+        usage_recorder.record_elevenlabs_usage(
+            db,
+            session_id=payload.session_id or None,
+            student_id=_sess.student_id if _sess else None,
+            case_id=payload.case_id,
+            characters=len(text),
+            voice_id=resolved.profile.voice_id,
+            model_id=resolved.model_id,
+        )
+    except Exception:  # telemetry must never affect playback
+        pass
+
     def audio_stream() -> Iterator[bytes]:
         # Stream chunks to the browser as they arrive; buffer a copy so a
         # completed clip can be cached. A disconnected client stops the

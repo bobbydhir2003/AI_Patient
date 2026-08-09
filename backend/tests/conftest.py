@@ -73,10 +73,16 @@ class FakeOpenAIClient:
         self.configured = configured
         self.calls: list[list[dict]] = []
 
-    def generate(self, messages: list[dict]) -> PatientReply:
+    def generate(self, messages: list[dict], usage_out: dict | None = None) -> PatientReply:
         self.calls.append(messages)
         if self.fail or not self.configured:
             raise PatientEngineError("simulated OpenAI failure")
+        # Provide deterministic provider-reported usage so per-session usage/cost
+        # recording is exercised in tests (clearly test values, not real).
+        if usage_out is not None:
+            usage_out["input_tokens"] = 100
+            usage_out["output_tokens"] = 40
+            usage_out["model"] = "gpt-4o-mini"
         return PatientReply(
             patient_text=self.text,
             used_fact_ids=list(self.used_fact_ids),
