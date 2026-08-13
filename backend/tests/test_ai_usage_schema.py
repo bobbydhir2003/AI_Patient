@@ -14,6 +14,11 @@ from tests.test_auth import login_token, make_admin
 _MIGRATION = pathlib.Path(__file__).resolve().parents[1] / (
     "app/database/migrations/versions/0017_ai_usage_events.py"
 )
+# Columns are added incrementally by later additive migrations; the anti-drift
+# guard below compares the model against the UNION of all ai_usage_events DDL.
+_PURPOSE_MIGRATION = pathlib.Path(__file__).resolve().parents[1] / (
+    "app/database/migrations/versions/0018_ai_usage_purpose.py"
+)
 
 
 # TEST 1 — the table exists in the built schema (create_all mirrors the migration).
@@ -57,9 +62,10 @@ def test_migration_0017_chain_and_ops():
 # TEST 5-guard — the migration creates EXACTLY the model's columns (no drift).
 def test_migration_columns_match_model():
     model_cols = set(AiUsageEvent.__table__.columns.keys())
-    src = _MIGRATION.read_text()
     import re
 
+    # create_table columns (0017) + additive add_column migrations (0018+).
+    src = _MIGRATION.read_text() + _PURPOSE_MIGRATION.read_text()
     migration_cols = set(re.findall(r'sa\.Column\(\s*"([^"]+)"', src))
     assert migration_cols == model_cols, (
         f"migration/model column drift: only in model={model_cols - migration_cols}, "

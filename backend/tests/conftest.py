@@ -29,7 +29,7 @@ from sqlalchemy.pool import StaticPool
 import app.models  # noqa: F401
 from app.core.exceptions import PatientEngineError
 from app.database.base import Base
-from app.database.connection import get_db
+from app.database.connection import get_db, get_db_factory
 from app.main import create_app
 from app.patient_engine.openai_client import get_openai_client
 from app.schemas.interview_schema import PatientReply
@@ -72,6 +72,7 @@ class FakeOpenAIClient:
         self.fail = fail
         self.configured = configured
         self.calls: list[list[dict]] = []
+        self.structured_calls: list[str] = []  # schema_name per structured call
 
     def generate(self, messages: list[dict], usage_out: dict | None = None) -> PatientReply:
         self.calls.append(messages)
@@ -100,10 +101,20 @@ class FakeOpenAIClient:
 
     def generate_structured(self, messages, schema, schema_name, max_output_tokens=None, **kwargs) -> dict:
         self.calls.append(messages)
+        # Record which schema/stage each structured call used, so tests can assert
+        # on the call sequence (e.g. exactly generate + verify).
+        self.structured_calls.append(schema_name)
         if self.fail or not self.configured:
             raise PatientEngineError("simulated OpenAI failure")
         if not self.structured_queue:
             raise PatientEngineError("no queued structured response for " + schema_name)
+        # Provide deterministic provider-reported usage so per-assessment usage/
+        # cost recording (usage_out) is exercised in tests (clearly test values).
+        usage_out = kwargs.get("usage_out")
+        if usage_out is not None:
+            usage_out["input_tokens"] = 500
+            usage_out["output_tokens"] = 200
+            usage_out["model"] = "gpt-4o-mini"
         return self.structured_queue.pop(0)
 
 
@@ -163,6 +174,11 @@ def make_client(engine, openai_client=None, *, authenticate=True):
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
+    # Streaming endpoints (SSE interview replies, voice synthesis) must not
+    # hold a request-scoped DB session open for their whole response, so they
+    # depend on a SESSION FACTORY instead of Depends(get_db) - point it at the
+    # same per-test engine used above.
+    app.dependency_overrides[get_db_factory] = lambda: factory
     if openai_client is not None:
         app.dependency_overrides[get_openai_client] = lambda: openai_client
 

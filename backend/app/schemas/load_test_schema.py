@@ -15,6 +15,11 @@ from app.schemas.base import CamelModel
 
 TEST_TYPES = (
     "smoke", "concurrent", "ramp", "spike", "stress", "soak", "ai_traffic", "tts_traffic",
+    # Realistic voice-capacity test: drives the SSE streaming interview
+    # endpoint and issues ONE sequential TTS request per emitted sentence -
+    # not a single bulk /messages call - so a passing run actually reflects
+    # real students using voice, not just a bulk-message smoke test.
+    "streaming_voice",
 )
 PROVIDER_MODES = (PROVIDER_SIMULATED, PROVIDER_REAL_OPENAI, PROVIDER_REAL_OPENAI_TTS)
 

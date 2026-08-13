@@ -102,6 +102,15 @@ class Settings(BaseSettings):
     # headroom but blocks arbitrary long-text synthesis through the endpoint.
     elevenlabs_max_text_chars: int = 1200
     elevenlabs_cache_max_entries: int = 24
+    # HTTPX connection-pool sizing for the shared ElevenLabs client. The pool
+    # must never be smaller than the configured TTS concurrency (a request
+    # that already won a TTS semaphore slot must not then queue again inside
+    # httpx for a connection) - see elevenlabs_client.get_http_client(). This
+    # is a floor; the effective pool is max(max_concurrent_tts_requests, this).
+    elevenlabs_pool_min_connections: int = 8
+    # A request that passed the TTS semaphore should fail fast, not hang,
+    # if the internal connection pool is somehow still exhausted.
+    elevenlabs_pool_timeout_seconds: float = 10.0
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
@@ -162,9 +171,15 @@ class Settings(BaseSettings):
     ai_interview_wait_seconds: float = 2.0       # bounded wait before a 503 overload
     # Default sized for the planned eleven_flash_v2_5 TTS setup. This is a
     # tuning knob, not a guaranteed provider limit - adjust to match real
-    # ElevenLabs concurrency headroom.
-    max_concurrent_tts_requests: int = 10
-    tts_wait_seconds: float = 0.5                # brief wait; then degrade to text-only
+    # ElevenLabs concurrency headroom. Raised from 10: at ~10 concurrent
+    # students the old value left zero headroom for any overlap at all, so a
+    # normal burst immediately exhausted every slot.
+    max_concurrent_tts_requests: int = 15
+    # Bounded queueing window before a caller degrades to browser TTS. Raised
+    # from 0.5s (which gave almost no time to queue through a brief burst) to
+    # a window long enough to absorb normal overlap while still being a small
+    # fraction of a typical request timeout - never an unbounded wait.
+    tts_wait_seconds: float = 5.0
 
     # --- Redis (fleet-wide concurrency control across multiple uvicorn workers) ---
     # Empty by default (single-worker/local-dev safe). REQUIRED in production/
@@ -178,6 +193,14 @@ class Settings(BaseSettings):
     redis_required_for_concurrency: bool | None = None
     redis_connect_timeout_seconds: float = 0.5
     redis_socket_timeout_seconds: float = 0.5
+    # Short cache TTL for the reachability pre-check the concurrency guard
+    # (DistributedSemaphore) runs before every acquire. Without this, EVERY
+    # TTS/interview slot acquisition costs an extra PING round trip on top of
+    # the Lua acquire script. Caching this fast-path check for a brief window
+    # is safe: the Lua acquire/release call - which is what actually
+    # determines correctness - still hits Redis on every single call; this
+    # only decides whether to attempt it or fail fast when Redis is known-down.
+    redis_health_cache_seconds: float = 1.0
     # How long a held concurrency slot survives without being released before
     # it self-expires (protects against a crashed worker leaking a slot
     # forever). Must comfortably exceed the slowest real call this guards
@@ -215,6 +238,18 @@ class Settings(BaseSettings):
     assessment_pause_on_critical: bool = True
     assessment_poll_interval_seconds: float = 1.0
 
+    # HARD ceiling on LOGICAL OpenAI generation calls per single standard
+    # assessment execution. The redesigned pipeline uses 2 normally (combined
+    # generate + independent verify) and at most 3 (one combined correction).
+    # This is a fail-closed safety net: if logic ever tried to exceed it, the
+    # assessment is marked NEEDS_REVIEW rather than making another provider call,
+    # so a bug or bad response can never recreate the old 6-11 call runaway.
+    assessment_max_openai_calls: int = 3
+    # Referral assessments legitimately fan out over seven domains; they share
+    # the usage-recording + call-counting infrastructure but get their own,
+    # higher safety ceiling (never the 3-call standard cap).
+    referral_assessment_max_openai_calls: int = 20
+
     # Provider retry/backoff (transient errors only).
     provider_max_retries: int = 3                # attempts AFTER the first try
     provider_retry_base_ms: int = 200
@@ -239,6 +274,10 @@ class Settings(BaseSettings):
     # --- Load & Capacity Testing (J) ---
     load_test_enabled: bool = True
     load_test_max_users: int = 170              # hard safety cap on target users (scalability target)
+    # Real-provider (paid) load tests spend real OpenAI/ElevenLabs credits, so
+    # they get a MUCH smaller user cap than simulated runs. A real-provider
+    # request above this cap is rejected before any provider traffic starts.
+    load_test_real_provider_max_users: int = 10
     load_test_max_duration_seconds: int = 3600  # 60 min ceiling (soak)
     load_test_target_base_url: str = "http://127.0.0.1:8000"
 

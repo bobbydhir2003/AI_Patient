@@ -102,13 +102,31 @@ class tts_slot:
 
     def acquire(self):
         s = get_settings()
-        self._token = _tts_sem.acquire(s.max_concurrent_tts_requests, s.tts_wait_seconds)
+        tele = get_telemetry()
+        import time as _time
+
+        tele.tts_waiting.inc()
+        t0 = _time.monotonic()
+        try:
+            self._token = _tts_sem.acquire(s.max_concurrent_tts_requests, s.tts_wait_seconds)
+        finally:
+            wait_ms = (_time.monotonic() - t0) * 1000.0
+            tele.tts_waiting.dec()
+            tele.tts_wait.observe_latency(wait_ms)
         self.ok = self._token is not None
         if self.ok:
+            tele.tts_wait.incr("acquired")
+            if wait_ms >= 50.0:  # negligible waits are not worth a counter bump
+                tele.tts_wait.incr("waited")
+                logger.info("tts_slot_waited wait_ms=%.0f", wait_ms)
             get_telemetry().tts_in_flight.inc()
         else:
+            tele.tts_wait.incr("timeout")
             get_telemetry().elevenlabs.window.incr("degraded")
-            logger.info("tts_degraded_to_text reason=no_capacity_slot")
+            logger.info(
+                "tts_slot_timeout wait_ms=%.0f max_wait_s=%.1f reason=no_capacity_slot",
+                wait_ms, s.tts_wait_seconds,
+            )
         return self
 
     def __enter__(self):
@@ -134,4 +152,10 @@ def tts_capacity() -> dict:
         "active": global_active if global_active is not None else tele.tts_in_flight.value,
         "active_scope": "global" if global_active is not None else "process",
         "limit": s.max_concurrent_tts_requests,
+        "waiting": tele.tts_waiting.value,
+        "wait_p50_ms": tele.tts_wait.percentile(300, 50),
+        "wait_p95_ms": tele.tts_wait.percentile(300, 95),
+        "acquired_5m": tele.tts_wait.sum("acquired", 300),
+        "waited_5m": tele.tts_wait.sum("waited", 300),
+        "timeouts_5m": tele.tts_wait.sum("timeout", 300),
     }

@@ -134,11 +134,20 @@ def active_job(db: Session) -> LoadTestJob | None:
 
 # -------------------------------------------------------------- worker params
 def _derive_worker_params(test_type: str, provider_mode: str) -> dict:
-    enable_tts = provider_mode == "REAL_OPENAI_TTS" or test_type == "tts_traffic"
+    streaming_voice = test_type == "streaming_voice"
+    # streaming_voice always exercises TTS (that is the point of the mode);
+    # otherwise TTS is on for a REAL TTS provider run or the classic bulk
+    # tts_traffic type.
+    enable_tts = provider_mode == "REAL_OPENAI_TTS" or test_type in ("tts_traffic", "streaming_voice")
+    # Assessment generation is deliberately NOT triggered by streaming_voice:
+    # this mode measures interview+TTS capacity, not assessment-generation load.
     assessment = test_type in ("concurrent", "soak", "stress")
-    turns = {"smoke": 3, "spike": 3, "ai_traffic": 6, "stress": 6}.get(test_type, 4)
+    turns = {"smoke": 3, "spike": 3, "ai_traffic": 6, "stress": 6, "streaming_voice": 4}.get(test_type, 4)
     think = {"spike": 200, "soak": 1500}.get(test_type, 800)
-    return {"enable_tts": enable_tts, "assessment": assessment, "turns": turns, "think_ms": think}
+    return {
+        "enable_tts": enable_tts, "assessment": assessment, "turns": turns,
+        "think_ms": think, "streaming_voice": streaming_voice,
+    }
 
 
 def _launch_worker(job: LoadTestJob, creds_file: str) -> subprocess.Popen:
@@ -163,6 +172,18 @@ def _launch_worker(job: LoadTestJob, creds_file: str) -> subprocess.Popen:
         argv.append("--enable-tts")
     if params["assessment"]:
         argv.append("--assessment")
+    if params["streaming_voice"]:
+        argv.append("--streaming-voice")
+        if not settings.openai_patient_streaming_enabled:
+            # Not fatal (the target server's own runtime config might enable
+            # it), but a very likely misconfiguration for this specific mode -
+            # surface it loudly rather than let the run silently 503 every turn.
+            logger.warning(
+                "load_test_streaming_voice_flag_disabled job=%s: "
+                "openai_patient_streaming_enabled is False on this server; "
+                "the SSE interview endpoint will reject every turn.",
+                job.id,
+            )
     argv.append("--complete")
     return subprocess.Popen(argv, cwd=BACKEND_DIR)
 
@@ -180,6 +201,16 @@ def create_job(db: Session, *, req, created_by: str) -> LoadTestJob:
     if req.target_users > settings.load_test_max_users:
         raise ValidationFailedError(
             f"Target users {req.target_users} exceeds the safety cap of {settings.load_test_max_users}.")
+    # Real-provider (paid) tests get a MUCH smaller cap: they spend real OpenAI/
+    # ElevenLabs credits, so a stray large number must never launch.
+    if req.provider_mode in REAL_PROVIDER_MODES and (
+        req.target_users > settings.load_test_real_provider_max_users
+    ):
+        raise ValidationFailedError(
+            f"Target users {req.target_users} exceeds the real-provider safety cap of "
+            f"{settings.load_test_real_provider_max_users}. Real-provider load tests are "
+            "capped far below simulated runs because they spend real API credits."
+        )
     if req.duration_seconds > settings.load_test_max_duration_seconds:
         raise ValidationFailedError(
             f"Duration {req.duration_seconds}s exceeds the ceiling of "
@@ -216,6 +247,18 @@ def create_job(db: Session, *, req, created_by: str) -> LoadTestJob:
             runtime_config_service.clear_mock_ai(db)
 
         db.commit()
+
+        # Visible warning: a REAL-provider test that also drives assessment
+        # execution spends real OpenAI credits on assessment generation. Never
+        # silent - the operator (and logs) must see it before it runs.
+        if job.provider_mode in REAL_PROVIDER_MODES and _derive_worker_params(
+            job.test_type, job.provider_mode
+        )["assessment"]:
+            logger.warning(
+                "load_test_real_provider_assessment job=%s provider=%s type=%s users=%s: "
+                "REAL OpenAI assessment generation will be billed for this run.",
+                job.id, job.provider_mode, job.test_type, job.target_users,
+            )
 
         creds_file = os.path.join(METRICS_DIR, f"{job.id}.creds.json")
         os.makedirs(METRICS_DIR, exist_ok=True)

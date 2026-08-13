@@ -89,12 +89,23 @@ def load_voice_profile(case_id: str, speaker_id: str = "patient") -> ResolvedVoi
     Raises CaseNotFoundError for unknown case IDs (same behavior as the rest of
     the app). Never raises for missing/disabled voice config - it reports
     `available=False` so callers can fall back gracefully.
+
+    Credential/enabled checks use runtime_config_service.elevenlabs_runtime() -
+    the SAME resolution ElevenLabsClient itself uses (DB override -> env ->
+    default) - never the raw Settings object directly. Before this fix, a key
+    stored only via the admin dashboard (DB) but not in the environment made
+    this loader report "unavailable" (env-only check) even though the real
+    client would have successfully used the DB key, so the frontend silently
+    fell back to the robotic browser voice for no real reason.
     """
-    settings = get_settings()
     case = case_loader.load_case(case_id)  # raises CaseNotFoundError if invalid
 
+    from app.services import runtime_config_service
+
+    rt = runtime_config_service.elevenlabs_runtime()
+
     override = _runtime_override_profile(case_id, speaker_id)
-    if override is not None and settings.elevenlabs_enabled and settings.elevenlabs_api_key:
+    if override is not None and rt.enabled and rt.api_key:
         prof, model_id = override
         return ResolvedVoice(available=True, reason="", profile=prof, model_id=model_id)
 
@@ -110,15 +121,15 @@ def load_voice_profile(case_id: str, speaker_id: str = "patient") -> ResolvedVoi
             available=False,
             reason="no_runtime_voice_for_speaker",
             profile=VoiceProfile(),
-            model_id=settings.elevenlabs_default_model,
+            model_id=rt.model,
         )
 
     profile = case.voice_profile or VoiceProfile()
 
     reason = ""
-    if not settings.elevenlabs_enabled:
+    if not rt.enabled:
         reason = "elevenlabs_disabled"
-    elif not settings.elevenlabs_api_key:
+    elif not rt.api_key:
         reason = "missing_api_key"
     elif profile.provider != "elevenlabs":
         reason = "unsupported_provider"
@@ -128,7 +139,7 @@ def load_voice_profile(case_id: str, speaker_id: str = "patient") -> ResolvedVoi
         # Placeholder IDs (PASTE_..._VOICE_ID_HERE) count as "not configured".
         reason = "missing_voice_id"
 
-    model_id = profile.model_id.strip() or settings.elevenlabs_default_model
+    model_id = profile.model_id.strip() or rt.model
     return ResolvedVoice(
         available=reason == "",
         reason=reason,

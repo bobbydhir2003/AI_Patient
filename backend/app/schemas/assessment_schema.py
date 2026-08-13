@@ -64,6 +64,59 @@ class ReviewResult(BaseModel):
     focus_areas: list[FocusArea] = Field(default_factory=list)
 
 
+# ---- Combined single-call generation (evidence + evaluation + overall) -------
+# The redesigned standard pipeline produces ALL four domains (evidence AND
+# qualitative evaluation) plus the overall impression in ONE OpenAI request,
+# replacing the old 1 (extraction) + 4 (per-domain) fan-out. The combined result
+# is decomposed back into the existing ExtractionResult / DomainEvaluation shapes
+# so the deterministic validator and persistence code are reused unchanged.
+
+
+class CombinedDomainAssessment(BaseModel):
+    rubric_domain: str
+    performance_level: str
+    summary: str
+    narrative: str = ""
+    strengths: list[str] = Field(default_factory=list)
+    areas_for_growth: list[str] = Field(default_factory=list)
+    evidence_items: list[EvidenceItem] = Field(default_factory=list)
+
+
+class CombinedAssessmentResult(BaseModel):
+    domains: list[CombinedDomainAssessment]
+    overall_level: str
+    overall_summary: str
+    focus_areas: list[FocusArea] = Field(default_factory=list)
+
+    def to_extraction(self) -> "ExtractionResult":
+        """Evidence-only view (per domain) for the deterministic validator."""
+        return ExtractionResult(
+            domains=[
+                DomainEvidence(
+                    rubric_domain=d.rubric_domain,
+                    evidence_items=list(d.evidence_items),
+                )
+                for d in self.domains
+            ]
+        )
+
+    def to_evaluations(self) -> list["DomainEvaluation"]:
+        """Qualitative-evaluation view (per domain), citing that domain's
+        evidence ids, for the deterministic validator + persistence."""
+        return [
+            DomainEvaluation(
+                rubric_domain=d.rubric_domain,
+                performance_level=d.performance_level,
+                summary=d.summary,
+                narrative=d.narrative,
+                strengths=list(d.strengths),
+                areas_for_growth=list(d.areas_for_growth),
+                evidence_ids=[item.evidence_id for item in d.evidence_items],
+            )
+            for d in self.domains
+        ]
+
+
 class AssessmentStatusOut(BaseModel):
     session_id: str
     assessment_id: str | None = None
@@ -171,6 +224,52 @@ REVIEW_JSON_SCHEMA = {
         },
     },
     "required": ["verdicts", "overall_level", "overall_summary", "focus_areas"],
+    "additionalProperties": False,
+}
+
+_FOCUS_AREA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "why_it_matters": {"type": "string"},
+        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        "suggested_practice": {"type": "string"},
+    },
+    "required": ["title", "why_it_matters", "evidence_ids", "suggested_practice"],
+    "additionalProperties": False,
+}
+
+# CALL 1: one strict-JSON request that yields evidence + qualitative evaluation
+# for ALL four domains plus the overall impression (replaces extraction + the
+# four per-domain evaluation calls).
+COMBINED_ASSESSMENT_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "domains": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "rubric_domain": {"type": "string"},
+                    "performance_level": {"type": "string", "enum": list(PERFORMANCE_LEVELS)},
+                    "summary": {"type": "string"},
+                    "narrative": {"type": "string"},
+                    "strengths": {"type": "array", "items": {"type": "string"}},
+                    "areas_for_growth": {"type": "array", "items": {"type": "string"}},
+                    "evidence_items": {"type": "array", "items": _EVIDENCE_ITEM_SCHEMA},
+                },
+                "required": [
+                    "rubric_domain", "performance_level", "summary", "narrative",
+                    "strengths", "areas_for_growth", "evidence_items",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "overall_level": {"type": "string", "enum": list(PERFORMANCE_LEVELS)},
+        "overall_summary": {"type": "string"},
+        "focus_areas": {"type": "array", "items": _FOCUS_AREA_SCHEMA},
+    },
+    "required": ["domains", "overall_level", "overall_summary", "focus_areas"],
     "additionalProperties": False,
 }
 

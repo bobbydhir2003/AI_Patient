@@ -336,3 +336,43 @@ def test_analysis_warns_on_rate_limiting():
     out = lca.analyze(target_users=20, duration_seconds=120, ramp_seconds=10, overall=ov, series=series)
     assert out["overallStatus"] == "PASS_WITH_WARNING"
     assert out["observedBottleneck"]["kind"] == "rate_limiting"
+
+
+# ==================== streaming_voice realistic voice-capacity mode ====================
+def test_streaming_voice_is_a_known_test_type():
+    from app.schemas.load_test_schema import TEST_TYPES
+
+    assert "streaming_voice" in TEST_TYPES
+
+
+def test_streaming_voice_worker_params_enable_tts_and_disable_assessment():
+    params = lts._derive_worker_params("streaming_voice", "SIMULATED_AI")
+    assert params["streaming_voice"] is True
+    assert params["enable_tts"] is True  # the whole point of this mode
+    assert params["assessment"] is False  # measures interview+TTS, not assessment load
+
+
+def test_other_test_types_are_not_streaming_voice():
+    for t in ("smoke", "concurrent", "ai_traffic", "tts_traffic", "stress"):
+        assert lts._derive_worker_params(t, "SIMULATED_AI")["streaming_voice"] is False
+
+
+def test_streaming_voice_launch_passes_streaming_voice_flag(monkeypatch):
+    """_launch_worker's argv for a streaming_voice job must include
+    --streaming-voice and --enable-tts, and must NOT include --assessment."""
+    from app.models.load_test_job import LoadTestJob
+
+    job = LoadTestJob(
+        id="job1", created_by="a@x", environment="local", test_type="streaming_voice",
+        provider_mode="SIMULATED_AI", target_users=2, ramp_seconds=0, duration_seconds=10,
+        status="STARTING",
+    )
+    captured = {}
+    monkeypatch.setattr(
+        lts.subprocess, "Popen",
+        lambda argv, **kw: (captured.__setitem__("argv", argv), FakePopen())[1],
+    )
+    lts._launch_worker(job, "/tmp/does-not-need-to-exist.json")
+    assert "--streaming-voice" in captured["argv"]
+    assert "--enable-tts" in captured["argv"]
+    assert "--assessment" not in captured["argv"]

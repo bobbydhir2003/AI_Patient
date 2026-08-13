@@ -40,6 +40,11 @@ class AiUsageEvent(Base):
     provider: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # openai|elevenlabs
     model: Mapped[str] = mapped_column(String(60), nullable=False, default="")
 
+    # What produced this call, for distinguishing spend on the dashboard, e.g.
+    # "interview", "assessment_generate", "assessment_verify",
+    # "assessment_correction". Nullable/additive; legacy rows stay null.
+    purpose: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+
     # OpenAI usage units (provider-reported). Zero for ElevenLabs rows.
     input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

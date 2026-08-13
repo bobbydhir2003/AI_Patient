@@ -1,4 +1,10 @@
-"""Assessment pipeline tests using a fake OpenAI boundary (staged outputs)."""
+"""Assessment pipeline tests using a fake OpenAI boundary (staged outputs).
+
+The redesigned standard pipeline makes 2 OpenAI calls normally (combined
+generation + independent verification) and at most 3 (one combined correction).
+These tests queue the combined/review payloads and assert on both the produced
+assessment AND the number of provider calls.
+"""
 import pytest
 
 from app.core.constants import RUBRIC_DOMAINS
@@ -16,61 +22,74 @@ def _run_interview(client, case_id="camden", questions=("Hi Camden, how are you?
     return session_id
 
 
-def _extraction(turn_label="turn_00", student_text="Hi Camden, how are you?"):
-    def domain(d, items):
-        return {"rubric_domain": d, "evidence_items": items}
-
-    item = {
-        "evidence_id": "ev_oars_01",
-        "turn_label": turn_label,
-        "evidence_type": "strength",
-        "label": "Warm, age-appropriate greeting",
-        "severity": "",
-        "student_excerpt": student_text,
-        "patient_excerpt": "",
+def _ev_item(evidence_id, turn_label, student_text, evidence_type="strength", **over):
+    base = {
+        "evidence_id": evidence_id, "turn_label": turn_label, "evidence_type": evidence_type,
+        "label": "Warm, age-appropriate greeting", "severity": "",
+        "student_excerpt": student_text, "patient_excerpt": "",
         "explanation": "The student opened with a friendly, child-appropriate greeting.",
-        "why_it_matters": "",
-        "suggested_alternative": "",
-        "confidence_level": "strong",
+        "why_it_matters": "", "suggested_alternative": "", "confidence_level": "strong",
     }
-    missed = dict(item)
-    missed.update(
-        evidence_id="ev_hist_01",
-        evidence_type="missed_opportunity",
-        label="Functional impact not explored",
-        severity="moderate",
+    base.update(over)
+    return base
+
+
+def _domain(name, level="Developing", items=None):
+    return {
+        "rubric_domain": name,
+        "performance_level": level,
+        "summary": f"{name} summary.",
+        "narrative": "Narrative reasoning.",
+        "strengths": ["Did something well."],
+        "areas_for_growth": ["Could deepen follow-up."],
+        "evidence_items": items or [],
+    }
+
+
+def _combined(student_text="Hi Camden, how are you?", turn_label="turn_00",
+              overall="Developing", levels=None, extra_oars_items=None):
+    """A full combined CALL-1 payload: all 4 domains + overall."""
+    levels = levels or {}
+    oars_items = [_ev_item("ev_oars_01", turn_label, student_text)]
+    if extra_oars_items:
+        oars_items.extend(extra_oars_items)
+    hist_item = _ev_item(
+        "ev_hist_01", turn_label, student_text, evidence_type="missed_opportunity",
+        label="Functional impact not explored", severity="moderate",
         why_it_matters="Function is central to this case.",
         suggested_alternative="What games are hard for you to play now?",
         confidence_level="moderate",
     )
     return {
         "domains": [
-            domain("OARS Communication", [item]),
-            domain("History Checklist", [missed]),
-            domain("Red Flags / Safety Screening", []),
-            domain("Empathy & Patient-Centeredness", []),
-        ]
-    }
-
-
-def _evaluation(domain, level="Developing", evidence_ids=None):
-    return {
-        "rubric_domain": domain,
-        "performance_level": level,
-        "summary": f"{domain} summary.",
-        "narrative": "Narrative reasoning.",
-        "strengths": ["Did something well."],
-        "areas_for_growth": ["Could deepen follow-up."],
-        "evidence_ids": evidence_ids or [],
-    }
-
-
-def _review(approved=True):
-    return {
-        "verdicts": [
-            {"rubric_domain": d, "approved": approved, "issues": [] if approved else ["level unsupported"], "rejected_evidence_ids": []}
-            for d in RUBRIC_DOMAINS
+            _domain("OARS Communication", levels.get("OARS Communication", "Developing"), oars_items),
+            _domain("History Checklist", levels.get("History Checklist", "Developing"), [hist_item]),
+            _domain("Red Flags / Safety Screening",
+                    levels.get("Red Flags / Safety Screening", "Insufficient Evidence"), []),
+            _domain("Empathy & Patient-Centeredness",
+                    levels.get("Empathy & Patient-Centeredness", "Proficient"), []),
         ],
+        "overall_level": overall,
+        "overall_summary": "A respectful interview with room to deepen exploration.",
+        "focus_areas": [
+            {"title": "Deepen functional exploration", "why_it_matters": "Function drives this case.",
+             "evidence_ids": ["ev_hist_01"], "suggested_practice": "Ask what daily activities changed."}
+        ],
+    }
+
+
+def _review(approved=True, reject_domain=None):
+    verdicts = []
+    for d in RUBRIC_DOMAINS:
+        is_approved = approved and (reject_domain != d)
+        verdicts.append({
+            "rubric_domain": d,
+            "approved": is_approved,
+            "issues": [] if is_approved else ["Level not supported by the cited evidence"],
+            "rejected_evidence_ids": [],
+        })
+    return {
+        "verdicts": verdicts,
         "overall_level": "Developing",
         "overall_summary": "A respectful interview with room to deepen exploration.",
         "focus_areas": [
@@ -80,15 +99,9 @@ def _review(approved=True):
     }
 
 
-def _queue_happy_path(fake):
-    fake.queue_structured(
-        _extraction(),
-        _evaluation("OARS Communication", evidence_ids=["ev_oars_01"]),
-        _evaluation("History Checklist", evidence_ids=["ev_hist_01"]),
-        _evaluation("Red Flags / Safety Screening", "Insufficient Evidence"),
-        _evaluation("Empathy & Patient-Centeredness", "Proficient"),
-        _review(),
-    )
+def _queue_happy_path(fake, student_text="Hi Camden, how are you?"):
+    # Normal: exactly 2 calls (combined generate + verify).
+    fake.queue_structured(_combined(student_text=student_text), _review())
 
 
 @pytest.fixture()
@@ -98,7 +111,7 @@ def assess_env(engine):
         yield api, fake
 
 
-def test_full_assessment_flow(assess_env):
+def test_full_assessment_flow_uses_two_calls(assess_env):
     api, fake = assess_env
     session_id = _run_interview(api)
     _queue_happy_path(fake)
@@ -108,6 +121,8 @@ def test_full_assessment_flow(assess_env):
     assert body["status"] == "COMPLETE"
     assert body["overallLevel"] == "Developing"
     assert {d["rubricDomain"] for d in body["domains"]} == set(RUBRIC_DOMAINS)
+    # NORMAL assessment = exactly two OpenAI calls.
+    assert fake.structured_calls == ["combined_assessment", "assessment_review"]
     # no numeric scores anywhere in the payload
     import json as _json
     text = _json.dumps(body).lower()
@@ -153,48 +168,38 @@ def test_ai_failure_produces_no_fake_feedback(assess_env):
 def test_fabricated_turns_and_cross_case_evidence_are_dropped(assess_env):
     api, fake = assess_env
     session_id = _run_interview(api, case_id="camden")
-    extraction = _extraction()
-    # fabricated turn label + cross-case reference get dropped by the validator
-    extraction["domains"][0]["evidence_items"].append({
-        "evidence_id": "ev_bad_01", "turn_label": "turn_99", "evidence_type": "strength",
-        "label": "Fabricated", "severity": "", "student_excerpt": "never said",
-        "patient_excerpt": "", "explanation": "x", "why_it_matters": "",
-        "suggested_alternative": "", "confidence_level": "strong",
-    })
-    extraction["domains"][0]["evidence_items"].append({
-        "evidence_id": "ev_bad_02", "turn_label": "turn_00", "evidence_type": "strength",
-        "label": "Mentions Carly wrongly", "severity": "", "student_excerpt": "Hi Camden, how are you?",
-        "patient_excerpt": "", "explanation": "Like Carly said before.", "why_it_matters": "",
-        "suggested_alternative": "", "confidence_level": "strong",
-    })
-    fake.queue_structured(
-        extraction,
-        _evaluation("OARS Communication", evidence_ids=["ev_oars_01", "ev_bad_01", "ev_bad_02"]),
-        _evaluation("History Checklist"),
-        _evaluation("Red Flags / Safety Screening", "Insufficient Evidence"),
-        _evaluation("Empathy & Patient-Centeredness"),
-        _review(),
+    bad_fabricated = _ev_item(
+        "ev_bad_01", "turn_99", "never said", label="Fabricated", explanation="x",
     )
+    bad_cross_case = _ev_item(
+        "ev_bad_02", "turn_00", "Hi Camden, how are you?", label="Mentions Carly wrongly",
+        explanation="Like Carly said before.",
+    )
+    combined = _combined(extra_oars_items=[bad_fabricated, bad_cross_case])
+    fake.queue_structured(combined, _review())
     r = api.post(f"/api/sessions/{session_id}/assessment")
     assert r.status_code == 201
     body = r.json()
     labels = [e["label"] for d in body["domains"] for e in d["evidence"]]
     assert "Fabricated" not in labels
     assert "Mentions Carly wrongly" not in labels
+    # the legitimate evidence survived
+    assert any(e["label"] == "Warm, age-appropriate greeting" for d in body["domains"] for e in d["evidence"])
 
 
 def test_short_interview_can_return_insufficient_evidence(assess_env):
     api, fake = assess_env
     session_id = _run_interview(api, case_id="sofia", questions=("Hi",))
-    extraction = {"domains": [{"rubric_domain": d, "evidence_items": []} for d in RUBRIC_DOMAINS]}
-    fake.queue_structured(
-        extraction,
-        _evaluation("OARS Communication", "Insufficient Evidence"),
-        _evaluation("History Checklist", "Insufficient Evidence"),
-        _evaluation("Red Flags / Safety Screening", "Insufficient Evidence"),
-        _evaluation("Empathy & Patient-Centeredness", "Insufficient Evidence"),
-        {**_review(), "overall_level": "Insufficient Evidence"},
-    )
+    levels = {d: "Insufficient Evidence" for d in RUBRIC_DOMAINS}
+    combined = {
+        "domains": [_domain(d, "Insufficient Evidence", []) for d in RUBRIC_DOMAINS],
+        "overall_level": "Insufficient Evidence",
+        "overall_summary": "Too little conversation to assess.",
+        "focus_areas": [],
+    }
+    review = _review()
+    review["overall_level"] = "Insufficient Evidence"
+    fake.queue_structured(combined, review)
     r = api.post(f"/api/sessions/{session_id}/assessment")
     assert r.status_code == 201
     body = r.json()
@@ -202,28 +207,27 @@ def test_short_interview_can_return_insufficient_evidence(assess_env):
     assert all(d["performanceLevel"] == "Insufficient Evidence" for d in body["domains"])
 
 
-def test_rejected_domain_is_regenerated(assess_env):
+def test_correction_path_stays_within_three_calls(assess_env):
     api, fake = assess_env
     session_id = _run_interview(api, case_id="carly", questions=("How are your wrists feeling?",))
-    review_reject = _review(approved=True)
-    review_reject["verdicts"][0]["approved"] = False
-    review_reject["verdicts"][0]["issues"] = ["Level not supported by evidence"]
+    st = "How are your wrists feeling?"
     fake.queue_structured(
-        _extraction(student_text="How are your wrists feeling?"),
-        _evaluation("OARS Communication", "Advanced"),
-        _evaluation("History Checklist"),
-        _evaluation("Red Flags / Safety Screening", "Insufficient Evidence"),
-        _evaluation("Empathy & Patient-Centeredness"),
-        review_reject,                                   # first review: rejects OARS
-        _evaluation("OARS Communication", "Developing"),  # regeneration
-        _review(),                                        # recheck approves
+        _combined(student_text=st, levels={"OARS Communication": "Advanced"}),   # CALL 1
+        _review(reject_domain="OARS Communication"),                              # CALL 2: rejects OARS
+        _combined(student_text=st, overall="Developing",
+                  levels={"OARS Communication": "Developing"}),                   # CALL 3: correction
     )
     r = api.post(f"/api/sessions/{session_id}/assessment")
     assert r.status_code == 201
     body = r.json()
+    # ABSOLUTE MAX = 3 calls: combined + verify + one combined correction.
+    assert fake.structured_calls == ["combined_assessment", "assessment_review", "combined_assessment"]
+    assert len(fake.structured_calls) <= 3
     oars = next(d for d in body["domains"] if d["rubricDomain"] == "OARS Communication")
     assert oars["performanceLevel"] == "Developing"
-    assert body["status"] == "COMPLETE"
+    # A corrected (not independently re-verified) assessment is flagged for review.
+    assert body["status"] == "NEEDS_REVIEW"
+    assert body["verificationStatus"] == "NEEDS_REVIEW"
 
 
 def test_rubrics_endpoint_is_student_safe(assess_env):

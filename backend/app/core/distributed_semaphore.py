@@ -176,10 +176,10 @@ class DistributedSemaphore:
         return bool(result)
 
     def _acquire_redis(self, capacity: int, timeout: float) -> str | None:
-        from app.core.redis_client import ping
+        from app.core.redis_client import ping_cached
 
         client = self._client()
-        if client is None or not ping():
+        if client is None or not ping_cached():
             if self._redis_required():
                 logger.warning(
                     "redis_concurrency_blocked semaphore=%s reason=redis_unavailable action=deny",

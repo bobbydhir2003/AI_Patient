@@ -35,10 +35,15 @@ def record_openai_usage(
     student_id: str | None,
     case_id: str | None,
     usage: dict | None,
+    purpose: str | None = None,
 ) -> None:
     """Record ONE completed OpenAI request. `usage` carries provider-reported
     token counts (input_tokens/output_tokens[/cached_input_tokens]/model). A
-    missing/empty usage (e.g. an interrupted stream) is skipped — never faked."""
+    missing/empty usage (e.g. an interrupted stream) is skipped — never faked.
+
+    `purpose` (optional) tags what produced the call (e.g. "assessment_generate",
+    "assessment_verify") so assessment spend is distinguishable on the dashboard.
+    """
     if not usage:
         return
     input_tokens = int(usage.get("input_tokens") or 0)
@@ -65,6 +70,7 @@ def record_openai_usage(
                 case_id=case_id,
                 provider="openai",
                 model=model,
+                purpose=purpose,
                 input_tokens=input_tokens,
                 cached_input_tokens=cached,
                 output_tokens=output_tokens,

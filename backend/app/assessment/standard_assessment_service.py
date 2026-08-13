@@ -5,16 +5,20 @@ calls, validates structure/grounding, and persists results. If generation
 fails, the run is marked FAILED and NO feedback is fabricated.
 """
 import json
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
 from app.assessment import (
     assessment_reviewer,
-    evidence_extractor,
-    rubric_evaluator,
+    combined_assessment,
     rubric_loader,
     transcript_preparer,
+)
+from app.assessment.assessment_call_budget import (
+    AssessmentCallBudget,
+    AssessmentCallBudgetExceeded,
 )
 from app.assessment.assessment_repository import AssessmentRepository
 from app.assessment.assessment_validator import (
@@ -124,75 +128,159 @@ def execute_existing(db: Session, run, client: OpenAIPatientClient) -> Assessmen
     return execute_pipeline(db, run, session, client)
 
 
+def _aggregate_issues(review) -> list[str]:
+    """Concrete, domain-tagged issues from unapproved verdicts, for ONE combined
+    correction request. Never a per-domain regeneration loop."""
+    issues: list[str] = []
+    for v in review.verdicts:
+        if not v.approved:
+            for issue in v.issues:
+                issues.append(f"[{v.rubric_domain}] {issue}")
+    return issues or ["A domain evaluation was not adequately supported by its evidence."]
+
+
+def _evidence_count(extraction) -> int:
+    return sum(len(d.evidence_items) for d in extraction.domains)
+
+
 def execute_pipeline(db: Session, run, session, client: OpenAIPatientClient) -> AssessmentOut:
+    """Redesigned standard pipeline: 2 OpenAI calls normally, 3 at the absolute
+    maximum (one bounded combined correction). All four rubric domains, grounded
+    evidence, performance levels, narratives, strengths, growth, and the overall
+    impression are preserved - only the CALL COUNT changed.
+
+        CALL 1  combined generation  (evidence + evaluation + overall, all domains)
+          ->    deterministic Python validation (grounding / cross-case / levels)
+        CALL 2  independent verification (qualitative judgment only)
+          ->    deterministic cleanup of rejected evidence
+        CALL 3  (only if a domain is still unapproved) ONE combined correction
+    """
     session_id = session.id
     prepared, case_reference, rubrics = _prepare(db, session)
     settings = get_settings()
     repo = AssessmentRepository(db)
+
+    # Model accounting (Part 8): record the RUNTIME-resolved model actually used
+    # (DB override -> env fallback), not settings.openai_model.
+    from app.services import runtime_config_service
+    runtime = runtime_config_service.openai_runtime(db)
+
     # Ensure derived metadata is set (a queued run is created with minimal fields).
     run.case_version = case_reference.get("version", "")
     run.rubric_version = rubric_loader.rubric_version()
-    run.model_name = settings.openai_model
+    run.model_name = runtime.model
     run.prompt_version = ASSESSMENT_PROMPT_VERSION
     db.commit()
 
+    started = time.monotonic()
+    logger.info(
+        "assessment_started session_id=%s assessment_id=%s case=%s model=%s",
+        session_id, run.id, session.case_id, runtime.model,
+    )
+
+    budget = AssessmentCallBudget(
+        client, db,
+        session_id=session_id, student_id=session.student_id, case_id=session.case_id,
+        model=runtime.model, max_calls=settings.assessment_max_openai_calls,
+        assessment_id=run.id,
+    )
+
     try:
-        # ---- Stage 1: evidence extraction --------------------------------
-        extraction = evidence_extractor.extract_evidence(
-            client, prepared.text, rubrics, case_reference
+        # ---- CALL 1: combined structured generation ----------------------
+        combined = combined_assessment.generate_combined(
+            budget, prepared.text, rubrics, case_reference, stage="assessment_generate",
         )
-        extraction = validate_extraction(extraction, prepared, session.case_id)
-        evidence_by_domain = {d.rubric_domain: d for d in extraction.domains}
+        raw_evidence = _evidence_count(combined.to_extraction())
 
-        # ---- Stage 2: rubric evaluation (one call per domain) ------------
-        evaluations: list[DomainEvaluation] = []
-        for rubric in rubrics:
-            evaluations.append(
-                rubric_evaluator.evaluate_domain(
-                    client, prepared.text, rubric, case_reference,
-                    evidence_by_domain.get(rubric["domain"]),
-                )
-            )
+        # ---- Deterministic validation (NO OpenAI call) -------------------
+        extraction = validate_extraction(combined.to_extraction(), prepared, session.case_id)
+        evaluations = combined.to_evaluations()
         validate_evaluations(evaluations, extraction, session.case_id)
+        logger.info(
+            "assessment_validation_completed session_id=%s assessment_id=%s "
+            "invalid_evidence_removed=%d",
+            session_id, run.id, raw_evidence - _evidence_count(extraction),
+        )
 
-        # ---- Stage 3: AI verification -------------------------------------
+        # ---- CALL 2: independent verification ----------------------------
         run.status = "VERIFYING"
         db.commit()
-        review = assessment_reviewer.review_assessment(
-            client, prepared.text, case_reference, extraction, evaluations
-        )
-
-        # Regenerate ONLY rejected domains, once.
-        rejected_ids = {rid for v in review.verdicts for rid in v.rejected_evidence_ids}
-        needs_review = False
-        verdicts_by_domain = {v.rubric_domain: v for v in review.verdicts}
-        regenerated = False
-        for i, evaluation in enumerate(evaluations):
-            verdict = verdicts_by_domain.get(evaluation.rubric_domain)
-            if verdict is not None and not verdict.approved:
-                rubric = next(r for r in rubrics if r["domain"] == evaluation.rubric_domain)
-                evaluations[i] = rubric_evaluator.evaluate_domain(
-                    client, prepared.text, rubric, case_reference,
-                    evidence_by_domain.get(rubric["domain"]),
-                    reviewer_feedback=verdict.issues,
-                )
-                regenerated = True
-        if regenerated:
-            validate_evaluations(evaluations, extraction, session.case_id)
-            recheck = assessment_reviewer.review_assessment(
-                client, prepared.text, case_reference, extraction, evaluations
+        review = None
+        try:
+            review = assessment_reviewer.review_assessment(
+                budget, prepared.text, case_reference, extraction, evaluations
             )
-            rejected_ids |= {rid for v in recheck.verdicts for rid in v.rejected_evidence_ids}
-            needs_review = any(not v.approved for v in recheck.verdicts)
-            review = recheck
+        except AssessmentCallBudgetExceeded:
+            # Fail-closed: never make another provider call; flag for human review.
+            logger.warning(
+                "assessment_call_budget_exceeded session_id=%s assessment_id=%s calls=%d "
+                "stage=verify", session_id, run.id, budget.calls,
+            )
 
-        # ---- Persist -------------------------------------------------------
+        rejected_ids: set[str] = set()
+        needs_review = False
+        corrected = False
+
+        if review is not None:
+            unapproved = [v.rubric_domain for v in review.verdicts if not v.approved]
+            # Deterministic cleanup first: drop the evidence the reviewer rejected.
+            rejected_ids = {rid for v in review.verdicts for rid in v.rejected_evidence_ids}
+            if unapproved:
+                if budget.can_call():
+                    # ---- CALL 3: ONE bounded combined correction ---------
+                    logger.info(
+                        "assessment_correction_requested session_id=%s assessment_id=%s domains=%s",
+                        session_id, run.id, sorted(unapproved),
+                    )
+                    try:
+                        combined = combined_assessment.generate_combined(
+                            budget, prepared.text, rubrics, case_reference,
+                            stage="assessment_correction",
+                            correction_feedback=_aggregate_issues(review),
+                        )
+                        extraction = validate_extraction(
+                            combined.to_extraction(), prepared, session.case_id
+                        )
+                        evaluations = combined.to_evaluations()
+                        validate_evaluations(evaluations, extraction, session.case_id)
+                        # We do NOT re-verify (would exceed the call budget). A
+                        # corrected assessment is deterministically validated and
+                        # flagged NEEDS_REVIEW for a human glance.
+                        rejected_ids = set()
+                        corrected = True
+                        needs_review = True
+                    except AssessmentCallBudgetExceeded:
+                        logger.warning(
+                            "assessment_call_budget_exceeded session_id=%s assessment_id=%s "
+                            "calls=%d stage=correction", session_id, run.id, budget.calls,
+                        )
+                        needs_review = True
+                # else: unapproved but no budget for a correction -> flag below.
+                else:
+                    needs_review = True
+        else:
+            # Verification could not run within the call budget.
+            needs_review = True
+
+        # The overall impression comes from the verifier on the normal path, and
+        # from the corrected combined output when a correction was made (or when
+        # verification never ran).
+        use_combined_overall = corrected or review is None
+        overall_level = combined.overall_level if use_combined_overall else review.overall_level
+        overall_summary = (
+            combined.overall_summary if use_combined_overall else review.overall_summary
+        )
+        focus_areas = combined.focus_areas if use_combined_overall else review.focus_areas
+
+        # ---- Persist -----------------------------------------------------
         confirmed_ids: set[str] = set()
+        evidence_by_domain = {}
         for domain in extraction.domains:
             domain.evidence_items = [
                 item for item in domain.evidence_items if item.evidence_id not in rejected_ids
             ]
             confirmed_ids |= {item.evidence_id for item in domain.evidence_items}
+            evidence_by_domain[domain.rubric_domain] = domain
 
         for evaluation in evaluations:
             evaluation.evidence_ids = [
@@ -225,21 +313,25 @@ def execute_pipeline(db: Session, run, session, client: OpenAIPatientClient) -> 
                     why_it_matters=item.why_it_matters,
                     suggested_alternative=item.suggested_alternative,
                     confidence_level=item.confidence_level,
-                    reviewer_confirmed=True,
+                    # Reviewer-confirmed only on the normal (independently verified)
+                    # path; corrected/unverified evidence is not claimed as confirmed.
+                    reviewer_confirmed=not use_combined_overall,
                 )
 
-        run.overall_level = review.overall_level
-        run.overall_summary = review.overall_summary
-        run.focus_areas = json.dumps([f.model_dump() for f in review.focus_areas])
+        run.overall_level = overall_level
+        run.overall_summary = overall_summary
+        run.focus_areas = json.dumps([f.model_dump() for f in focus_areas])
         run.verification_status = "NEEDS_REVIEW" if needs_review else "VERIFIED"
         run.status = "NEEDS_REVIEW" if needs_review else "COMPLETE"
         run.completed_at = datetime.now(timezone.utc)
         db.commit()
         logger.info(
             "assessment_completed session_id=%s assessment_id=%s case=%s status=%s "
-            "verification=%s domains=%d persistence=saved",
-            session_id, run.id, session.case_id, run.status,
-            run.verification_status, len(evaluations),
+            "verification=%s domains=%d openai_calls=%d input_tokens=%d output_tokens=%d "
+            "estimated_cost_usd=%.6f duration_ms=%d persistence=saved",
+            session_id, run.id, session.case_id, run.status, run.verification_status,
+            len(evaluations), budget.calls, budget.input_tokens, budget.output_tokens,
+            budget.estimated_cost_usd, int((time.monotonic() - started) * 1000),
         )
         return get_assessment(db, run.id)
 
@@ -251,7 +343,10 @@ def execute_pipeline(db: Session, run, session, client: OpenAIPatientClient) -> 
             run.error_code = "ASSESSMENT_UNAVAILABLE"
             run.completed_at = datetime.now(timezone.utc)
             db.commit()
-        logger.error("assessment_failed session=%s error=%s", session_id, exc)
+        logger.error(
+            "assessment_failed session=%s error=%s openai_calls=%d",
+            session_id, exc, budget.calls,
+        )
         raise AssessmentUnavailableError() from exc
 
 

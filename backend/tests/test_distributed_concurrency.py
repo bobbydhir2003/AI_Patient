@@ -264,6 +264,117 @@ def test_redis_backed_separate_names_never_share_capacity(fake_redis):
 # ==========================================================================
 #  SETTINGS: redis_required resolution + production fail-closed startup
 # ==========================================================================
+# ==========================================================================
+#  HEALTH CACHE (ping_cached) - avoids an extra Redis round trip on every
+#  single semaphore acquire, without weakening the Lua acquire correctness.
+# ==========================================================================
+def test_ping_cached_reuses_result_within_ttl(fake_redis, monkeypatch):
+    from app.core import redis_client
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "redis_health_cache_seconds", 5.0)
+    redis_client.reset_redis_client()
+    calls = {"n": 0}
+    real_ping = redis_client.ping
+
+    def counting_ping():
+        calls["n"] += 1
+        return real_ping()
+
+    monkeypatch.setattr(redis_client, "ping", counting_ping)
+    assert redis_client.ping_cached() is True
+    assert redis_client.ping_cached() is True
+    assert redis_client.ping_cached() is True
+    assert calls["n"] == 1  # only the FIRST call hit the real ping; rest served from cache
+
+
+def test_ping_cached_refreshes_after_ttl_expires(fake_redis, monkeypatch):
+    from app.core import redis_client
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "redis_health_cache_seconds", 0.05)
+    redis_client.reset_redis_client()
+    calls = {"n": 0}
+    real_ping = redis_client.ping
+
+    def counting_ping():
+        calls["n"] += 1
+        return real_ping()
+
+    monkeypatch.setattr(redis_client, "ping", counting_ping)
+    assert redis_client.ping_cached() is True
+    time.sleep(0.1)
+    assert redis_client.ping_cached() is True
+    assert calls["n"] == 2  # cache expired -> a second real ping happened
+
+
+def test_semaphore_acquire_does_not_hammer_redis_ping(fake_redis, monkeypatch):
+    """The actual regression this fixes: without caching, EVERY acquire() call
+    issued a fresh PING on top of the Lua script eval. With caching, a burst
+    of acquires within the TTL issues at most one real ping."""
+    from app.core import redis_client
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "redis_health_cache_seconds", 5.0)
+    redis_client.reset_redis_client()
+    ping_calls = {"n": 0}
+    real_ping = redis_client.ping
+
+    def counting_ping():
+        ping_calls["n"] += 1
+        return real_ping()
+
+    monkeypatch.setattr(redis_client, "ping", counting_ping)
+    sem = DistributedSemaphore("test_ping_hammer")
+    for _ in range(10):
+        tok = sem.acquire(10, 0.1)
+        assert tok is not None
+        sem.release(tok)
+    assert ping_calls["n"] == 1  # 10 acquires, only 1 real PING
+
+
+def test_ping_logs_connected_then_recovered_on_transition(monkeypatch, caplog):
+    """Uses a real (unpatched) ping() against a minimal fake client so the
+    connected/unavailable/recovered LOG TRANSITIONS themselves are exercised
+    (the `fake_redis` fixture used elsewhere stubs out ping() entirely, which
+    would hide this behavior)."""
+    import logging
+
+    from app.core import redis_client
+    from app.core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "redis_url", "redis://fake/0")
+
+    class _Ok:
+        def ping(self):
+            return True
+
+    class _Down:
+        def ping(self):
+            raise ConnectionError("simulated outage")
+
+    state = {"client": _Ok()}
+    monkeypatch.setattr(redis_client, "get_redis_client", lambda: state["client"])
+    redis_client.reset_redis_client()
+
+    with caplog.at_level(logging.INFO, logger="app.core.redis_client"):
+        assert redis_client.ping() is True
+    assert any("redis_connected" in r.message for r in caplog.records)
+
+    caplog.clear()
+    state["client"] = _Down()
+    with caplog.at_level(logging.WARNING, logger="app.core.redis_client"):
+        assert redis_client.ping() is False
+    assert any("redis_unavailable" in r.message for r in caplog.records)
+
+    caplog.clear()
+    state["client"] = _Ok()
+    with caplog.at_level(logging.INFO, logger="app.core.redis_client"):
+        assert redis_client.ping() is True
+    assert any("redis_recovered" in r.message for r in caplog.records)
+    redis_client.reset_redis_client()
+
+
 def test_redis_required_defaults_by_environment():
     dev = Settings(environment="development", jwt_secret_key="dev-insecure-change-me",
                     database_url="sqlite://", redis_url="")

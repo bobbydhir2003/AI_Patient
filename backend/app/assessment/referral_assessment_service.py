@@ -39,7 +39,7 @@ def _messages(system: str, payload: dict) -> list[dict]:
     ]
 
 
-def _extract(client, transcript, rubric, context) -> ReferralExtraction:
+def _extract(caller, transcript, rubric, context) -> ReferralExtraction:
     prompt = """You are the evidence-extraction stage of a PT referral assessment.
 Your goal is to separate the intended clinical situation (from protected case context) from what the student actually did (from the transcript).
 
@@ -63,16 +63,17 @@ Extract excerpts accurately. Determine `assessability` for each domain:
 - `not_assessed`: The situation needed to evaluate the domain never occurred or was never reached in the conversation.
 """
     settings = get_settings()
-    data = client.generate_structured(
+    data = caller.generate_structured(
         _messages(prompt, {"transcript": transcript, "rubric": rubric, "protected_context": context}),
         REFERRAL_EXTRACTION_JSON_SCHEMA, "referral_evidence_extraction",
+        stage="assessment_generate",
         max_output_tokens=settings.openai_referral_extraction_max_output_tokens,
         allow_truncation_retry=True,
     )
     return ReferralExtraction.model_validate(data)
 
 
-def _evaluate(client, transcript, domain, context, student_evidence, patient_evidence, missed_evidence, assessability, reviewer_feedback=None):
+def _evaluate(caller, transcript, domain, context, student_evidence, patient_evidence, missed_evidence, assessability, reviewer_feedback=None):
     prompt = """You are the domain-evaluation stage of an advanced referral assessment.
 
 PROTECTED CASE CONTEXT
@@ -97,16 +98,18 @@ INSTRUCTIONS:
         "reviewer_feedback": reviewer_feedback or [],
     }
     settings = get_settings()
-    data = client.generate_structured(
+    stage = "assessment_correction" if reviewer_feedback else "assessment_generate"
+    data = caller.generate_structured(
         _messages(prompt, payload), REFERRAL_EVALUATION_JSON_SCHEMA,
         f"referral_domain_{domain['id']}",
+        stage=stage,
         max_output_tokens=settings.openai_referral_domain_max_output_tokens,
         allow_truncation_retry=True,
     )
     return ReferralDomainEvaluation.model_validate(data)
 
 
-def _review(client, transcript, rubric, context, extraction, evaluations):
+def _review(caller, transcript, rubric, context, extraction, evaluations):
     prompt = """You are the independent verification stage.
 
 INSTRUCTIONS:
@@ -118,13 +121,14 @@ INSTRUCTIONS:
 6. Determine `overall_assessability` (sufficient | limited | insufficient). If insufficient, force `overall_level` to 'Insufficient Evidence'.
 """
     settings = get_settings()
-    data = client.generate_structured(
+    data = caller.generate_structured(
         _messages(prompt, {
             "transcript": transcript, "rubric": rubric, "protected_context": context,
             "extraction": extraction.model_dump(),
             "evaluations": [e.model_dump() for e in evaluations],
         }),
         REFERRAL_REVIEW_JSON_SCHEMA, "referral_assessment_review",
+        stage="assessment_verify",
         max_output_tokens=settings.openai_referral_review_max_output_tokens,
         allow_truncation_retry=True,
     )
@@ -205,11 +209,14 @@ def generate(db: Session, session_id: str, client: OpenAIPatientClient,
         raise AssessmentNotPossibleError("Protected referral assessment context is missing for this case.")
 
     settings = get_settings()
+    # Model accounting: record the runtime-resolved model actually used.
+    from app.services import runtime_config_service
+    runtime = runtime_config_service.openai_runtime(db)
     if run is None:
         run = repo.create_run(
             session_id=session_id, case_id=session.case_id,
             assessment_mode="advanced_referral", case_version=case_reference.get("version", ""),
-            rubric_version=rubric.get("version", "1.0"), model_name=settings.openai_model,
+            rubric_version=rubric.get("version", "1.0"), model_name=runtime.model,
             prompt_version=PROMPT_VERSION, status="PROCESSING",
         )
         db.commit()
@@ -217,15 +224,27 @@ def generate(db: Session, session_id: str, client: OpenAIPatientClient,
         run.status = "PROCESSING"
         run.case_version = case_reference.get("version", "")
         run.rubric_version = rubric.get("version", "1.0")
-        run.model_name = settings.openai_model
+        run.model_name = runtime.model
         run.prompt_version = PROMPT_VERSION
         db.commit()
+
+    # Referral shares the usage-accounting + call-counting infrastructure so its
+    # OpenAI spend is recorded on the dashboard too. It legitimately fans out over
+    # seven domains, so it gets its own (higher) safety ceiling - never the 3-call
+    # standard cap.
+    from app.assessment.assessment_call_budget import AssessmentCallBudget
+    budget = AssessmentCallBudget(
+        client, db,
+        session_id=session_id, student_id=session.student_id, case_id=session.case_id,
+        model=runtime.model, max_calls=settings.referral_assessment_max_openai_calls,
+        assessment_id=run.id,
+    )
 
     try:
         domain_defs = rubric["domains"]
         domain_ids = [d["id"] for d in domain_defs]
         extraction = _validate_extraction(
-            _extract(client, prepared.text, rubric, context), prepared, domain_ids
+            _extract(budget, prepared.text, rubric, context), prepared, domain_ids
         )
         domain_evidence_map = {d.domain_id: d for d in extraction.domain_evidence}
         evaluations = []
@@ -233,15 +252,15 @@ def generate(db: Session, session_id: str, client: OpenAIPatientClient,
             de = domain_evidence_map.get(d["id"])
             if de:
                 evaluations.append(_evaluate(
-                    client, prepared.text, d, context, de.student_evidence,
+                    budget, prepared.text, d, context, de.student_evidence,
                     de.patient_context_evidence, de.missed_opportunity_evidence, de.assessability
                 ))
             else:
-                evaluations.append(_evaluate(client, prepared.text, d, context, [], [], [], "not_assessed"))
+                evaluations.append(_evaluate(budget, prepared.text, d, context, [], [], [], "not_assessed"))
 
         run.status = "VERIFYING"
         db.commit()
-        review = _review(client, prepared.text, rubric, context, extraction, evaluations)
+        review = _review(budget, prepared.text, rubric, context, extraction, evaluations)
 
         review_map = {r.domain_id: r for r in review.domain_reviews}
         regenerated = False
@@ -251,7 +270,7 @@ def generate(db: Session, session_id: str, client: OpenAIPatientClient,
                 domain = next(d for d in domain_defs if d["id"] == evaluation.domain_id)
                 de = domain_evidence_map.get(evaluation.domain_id)
                 evaluations[i] = _evaluate(
-                    client, prepared.text, domain, context,
+                    budget, prepared.text, domain, context,
                     de.student_evidence if de else [],
                     de.patient_context_evidence if de else [],
                     de.missed_opportunity_evidence if de else [],
@@ -260,7 +279,7 @@ def generate(db: Session, session_id: str, client: OpenAIPatientClient,
                 )
                 regenerated = True
         if regenerated:
-            review = _review(client, prepared.text, rubric, context, extraction, evaluations)
+            review = _review(budget, prepared.text, rubric, context, extraction, evaluations)
 
         # Cross-result consistency checks
         for ev in evaluations:

@@ -363,6 +363,8 @@ class Telemetry:
         self.interview_waiting = Gauge()          # requests currently waiting for a slot
         self.interview_wait = RollingWindow()      # wait-time samples + "timeout" counter
         self.tts_in_flight = Gauge()
+        self.tts_waiting = Gauge()                 # requests currently waiting for a TTS slot
+        self.tts_wait = RollingWindow()             # wait-time samples + acquired/waited/timeout counters
         self.assessment_in_flight = Gauge()
         self.started_at = time.time()
         # Lifetime (since process start) count of HTTP requests handled by THIS

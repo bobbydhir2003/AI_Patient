@@ -69,9 +69,20 @@ class FakeElevenLabsClient:
 
 
 def make_voice_client(engine, elevenlabs=None, monkeypatch=None, api_key="test-key", enabled=True):
-    """TestClient with the ElevenLabs boundary faked and settings controlled."""
+    """TestClient with the ElevenLabs boundary faked and settings controlled.
+
+    /synthesize authenticates via a REAL bearer token (it must not hold a
+    request-scoped DB session open across the TTS stream - see Issue 4 in the
+    scalability audit), so this logs in as the seeded default student and
+    attaches a real token as a default header - matching how test_streaming.py
+    exercises the analogous SSE interview-streaming endpoint.
+    """
     test_client = make_client(engine)
     app = test_client.app
+    token = test_client.post(
+        "/api/auth/login", json={"email": "default@school.edu", "password": "defaultpass1"}
+    ).json()["accessToken"]
+    test_client.headers.update({"Authorization": f"Bearer {token}"})
     if elevenlabs is not None:
         app.dependency_overrides[get_elevenlabs_client] = lambda: elevenlabs
     if monkeypatch is not None:
@@ -576,6 +587,22 @@ class LazyFakeElevenLabs:
             self.closed = True
 
 
+def _fake_request(token: str):
+    """Minimal stand-in for FastAPI's Request: /synthesize's manual auth path
+    only calls request.headers.get(...)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(headers={"Authorization": f"Bearer {token}"})
+
+
+def _direct_call_session_factory(engine):
+    """A session factory bound to the SAME engine as the `db_session`/`engine`
+    fixtures, mirroring what Depends(get_db_factory) provides in production."""
+    from sqlalchemy.orm import sessionmaker
+
+    return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+
+
 def test_endpoint_streams_without_full_buffering_and_never_caches_partials(
     engine, db_session, monkeypatch
 ):
@@ -586,6 +613,7 @@ def test_endpoint_streams_without_full_buffering_and_never_caches_partials(
     import anyio
 
     from app.api.voice import synthesize
+    from app.core.security import create_access_token
     from app.schemas.voice_schema import VoiceSynthesizeRequest
     from app.voice.audio_cache import get_audio_cache
 
@@ -596,9 +624,10 @@ def test_endpoint_streams_without_full_buffering_and_never_caches_partials(
 
     fake = LazyFakeElevenLabs()
     user, sid = seed_owned_session(db_session)
+    token = create_access_token(subject=user.id, role=user.role)
     response = synthesize(
         VoiceSynthesizeRequest(case_id="carly", text="hello there", session_id=sid),
-        current_user=user, db=db_session, client=fake,
+        _fake_request(token), session_factory=_direct_call_session_factory(engine), client=fake,
     )
     # Exactly one chunk was read eagerly (upstream error detection) - the
     # response did NOT buffer the full stream before starting.
@@ -626,6 +655,7 @@ def test_endpoint_caches_only_complete_streams(engine, db_session, monkeypatch):
     import anyio
 
     from app.api.voice import synthesize
+    from app.core.security import create_access_token
     from app.schemas.voice_schema import VoiceSynthesizeRequest
     from app.voice.audio_cache import get_audio_cache
 
@@ -636,9 +666,10 @@ def test_endpoint_caches_only_complete_streams(engine, db_session, monkeypatch):
 
     fake = LazyFakeElevenLabs()
     user, sid = seed_owned_session(db_session)
+    token = create_access_token(subject=user.id, role=user.role)
     response = synthesize(
         VoiceSynthesizeRequest(case_id="carly", text="hello there", session_id=sid),
-        current_user=user, db=db_session, client=fake,
+        _fake_request(token), session_factory=_direct_call_session_factory(engine), client=fake,
     )
 
     async def consume_all():
@@ -647,3 +678,50 @@ def test_endpoint_caches_only_complete_streams(engine, db_session, monkeypatch):
     received = anyio.run(consume_all)
     assert b"".join(received) == b"c1c2c3"
     assert len(get_audio_cache()) == 1  # complete stream → cached (bounded LRU)
+
+
+def test_no_db_session_held_open_during_audio_stream(engine, db_session, monkeypatch):
+    """Issue 4 regression (scalability audit): the synthesize endpoint must NOT
+    hold a DB session open while ElevenLabs audio is streamed. A session-factory
+    wrapper counts currently-open sessions; by the time synthesize() returns the
+    StreamingResponse - BEFORE any audio byte is read - every session opened for
+    auth/context/usage recording must already be closed. None may remain open
+    while the (still-unread) audio body streams, or a burst of concurrent voice
+    requests would exhaust the DB connection pool."""
+    from app.api.voice import synthesize
+    from app.core.security import create_access_token
+    from app.schemas.voice_schema import VoiceSynthesizeRequest
+
+    give_carly_a_voice_id(monkeypatch)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "elevenlabs_api_key", "test-key")
+    monkeypatch.setattr(settings, "elevenlabs_enabled", True)
+
+    fake = LazyFakeElevenLabs()
+    user, sid = seed_owned_session(db_session)
+    token = create_access_token(subject=user.id, role=user.role)
+
+    raw_factory = _direct_call_session_factory(engine)
+    open_count = {"n": 0}
+
+    def tracking_factory():
+        session = raw_factory()
+        open_count["n"] += 1
+        real_close = session.close
+
+        def tracked_close():
+            open_count["n"] -= 1
+            real_close()
+
+        session.close = tracked_close
+        return session
+
+    response = synthesize(
+        VoiceSynthesizeRequest(case_id="carly", text="hello there", session_id=sid),
+        _fake_request(token), session_factory=tracking_factory, client=fake,
+    )
+    # At least the context session (and, on this cache-miss path, the usage
+    # session too) were opened - but by the time the StreamingResponse comes
+    # back, BEFORE any chunk of audio has been consumed, they are all closed.
+    assert open_count["n"] == 0
+    assert response.headers["content-type"].startswith("audio/mpeg")

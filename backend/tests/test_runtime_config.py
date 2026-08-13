@@ -253,6 +253,156 @@ def test_saved_voice_affects_interview_tts(tmp_path, monkeypatch):
         reset_engine()
 
 
+# --------------------------------------------- credential resolution consistency
+# Confirmed bug: load_voice_profile used to check settings.elevenlabs_api_key
+# (env only), while the real ElevenLabsClient resolves credentials through
+# runtime_config_service.elevenlabs_runtime() (DB override -> env -> default).
+# A key stored ONLY via the admin dashboard therefore made the loader report
+# "unavailable" even though the real client would have used it successfully.
+# These tests prove both paths now use the SAME resolution.
+def _isolated_db(tmp_path, monkeypatch, name: str, *, encryption: bool = False):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/name}")
+    if encryption:
+        monkeypatch.setenv("CONFIG_ENCRYPTION_KEY", "unit-test-encryption-key")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    reset_engine()
+    from app.database.connection import get_engine
+
+    Base.metadata.create_all(get_engine())
+    return get_settings()
+
+
+def test_elevenlabs_credential_env_only_is_available(tmp_path, monkeypatch):
+    settings = _isolated_db(tmp_path, monkeypatch, "cred_env.db")
+    try:
+        from tests.test_voice import give_carly_a_voice_id
+
+        give_carly_a_voice_id(monkeypatch)
+        monkeypatch.setattr(settings, "elevenlabs_api_key", "env-key-123456")
+        monkeypatch.setattr(settings, "elevenlabs_enabled", True)
+
+        from app.voice.voice_profile_loader import load_voice_profile
+
+        resolved = load_voice_profile("carly", "patient")
+        assert resolved.available is True
+        assert resolved.reason == ""
+    finally:
+        from app.core.config import get_settings
+
+        get_settings.cache_clear()
+        reset_engine()
+
+
+def test_elevenlabs_credential_db_only_is_available(tmp_path, monkeypatch):
+    """The confirmed bug, fixed: NO env key, but a DB-stored key -> available."""
+    settings = _isolated_db(tmp_path, monkeypatch, "cred_db.db", encryption=True)
+    try:
+        from tests.test_voice import give_carly_a_voice_id
+
+        give_carly_a_voice_id(monkeypatch)
+        monkeypatch.setattr(settings, "elevenlabs_api_key", "")  # env EMPTY
+        monkeypatch.setattr(settings, "elevenlabs_enabled", True)
+
+        from app.database.connection import get_session_factory
+        from app.services import runtime_config_service as rc
+
+        db = get_session_factory()()
+        rc.set_credential(db, service="elevenlabs", new_key="sk_db_only_key_123456", admin_email="a@x")
+        db.commit(); db.close()
+
+        from app.voice.voice_profile_loader import load_voice_profile
+
+        resolved = load_voice_profile("carly", "patient")
+        assert resolved.available is True
+        assert resolved.reason == ""
+    finally:
+        from app.core.config import get_settings
+
+        get_settings.cache_clear()
+        reset_engine()
+
+
+def test_elevenlabs_credential_db_takes_precedence_over_env(tmp_path, monkeypatch):
+    settings = _isolated_db(tmp_path, monkeypatch, "cred_both.db", encryption=True)
+    try:
+        from tests.test_voice import give_carly_a_voice_id
+
+        give_carly_a_voice_id(monkeypatch)
+        monkeypatch.setattr(settings, "elevenlabs_api_key", "env-key-should-be-overridden")
+        monkeypatch.setattr(settings, "elevenlabs_enabled", True)
+
+        from app.database.connection import get_session_factory
+        from app.services import runtime_config_service as rc
+
+        db = get_session_factory()()
+        rc.set_credential(db, service="elevenlabs", new_key="sk_db_wins_123456", admin_email="a@x")
+        db.commit(); db.close()
+
+        assert rc.elevenlabs_runtime().api_key == "sk_db_wins_123456"
+
+        from app.voice.voice_profile_loader import load_voice_profile
+
+        resolved = load_voice_profile("carly", "patient")
+        assert resolved.available is True
+    finally:
+        from app.core.config import get_settings
+
+        get_settings.cache_clear()
+        reset_engine()
+
+
+def test_elevenlabs_credential_neither_configured_is_unavailable(tmp_path, monkeypatch):
+    settings = _isolated_db(tmp_path, monkeypatch, "cred_none.db")
+    try:
+        from tests.test_voice import give_carly_a_voice_id
+
+        give_carly_a_voice_id(monkeypatch)
+        monkeypatch.setattr(settings, "elevenlabs_api_key", "")
+        monkeypatch.setattr(settings, "elevenlabs_enabled", True)
+
+        from app.voice.voice_profile_loader import load_voice_profile
+
+        resolved = load_voice_profile("carly", "patient")
+        assert resolved.available is False
+        assert resolved.reason == "missing_api_key"
+    finally:
+        from app.core.config import get_settings
+
+        get_settings.cache_clear()
+        reset_engine()
+
+
+def test_elevenlabs_credential_db_key_with_placeholder_voice_id_still_unavailable(tmp_path, monkeypatch):
+    """A DB-stored key does not bypass the voice-id validity check."""
+    settings = _isolated_db(tmp_path, monkeypatch, "cred_db_placeholder.db", encryption=True)
+    try:
+        from tests.test_voice import give_carly_a_placeholder
+
+        give_carly_a_placeholder(monkeypatch)
+        monkeypatch.setattr(settings, "elevenlabs_api_key", "")
+        monkeypatch.setattr(settings, "elevenlabs_enabled", True)
+
+        from app.database.connection import get_session_factory
+        from app.services import runtime_config_service as rc
+
+        db = get_session_factory()()
+        rc.set_credential(db, service="elevenlabs", new_key="sk_db_only_key_654321", admin_email="a@x")
+        db.commit(); db.close()
+
+        from app.voice.voice_profile_loader import load_voice_profile
+
+        resolved = load_voice_profile("carly", "patient")
+        assert resolved.available is False
+        assert resolved.reason == "missing_voice_id"
+    finally:
+        from app.core.config import get_settings
+
+        get_settings.cache_clear()
+        reset_engine()
+
+
 # --------------------------------------------------------------- session snapshot
 def test_new_session_snapshots_config_and_existing_is_frozen(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'snap.db'}")

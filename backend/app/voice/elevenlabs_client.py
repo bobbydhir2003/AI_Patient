@@ -55,16 +55,34 @@ def get_http_client() -> httpx.Client:
 
     Connection reuse: keep-alive connections persist between turns, so only
     the first request of a session pays the TCP+TLS handshake.
+
+    Pool sizing: max_connections is derived from the configured TTS
+    concurrency (never hard-coded smaller than the semaphore that gates
+    entry) so a request that already won a TTS slot can never then queue
+    again inside httpx for a free connection. keepalive_connections is a
+    bounded portion of that so idle connections don't pin an unreasonable
+    number of sockets open.
     """
     global _http_client
     with _http_client_lock:
         if _http_client is None or _http_client.is_closed:
             settings = get_settings()
+            max_connections = max(
+                settings.max_concurrent_tts_requests, settings.elevenlabs_pool_min_connections
+            )
+            max_keepalive = max(4, max_connections // 2)
             _http_client = httpx.Client(
-                timeout=httpx.Timeout(settings.elevenlabs_timeout_seconds, connect=10.0),
+                timeout=httpx.Timeout(
+                    connect=10.0,
+                    read=settings.elevenlabs_timeout_seconds,
+                    write=10.0,
+                    # A request that passed the TTS semaphore must fail fast,
+                    # not hang, if the pool is somehow still exhausted.
+                    pool=settings.elevenlabs_pool_timeout_seconds,
+                ),
                 limits=httpx.Limits(
-                    max_keepalive_connections=4,
-                    max_connections=8,
+                    max_keepalive_connections=max_keepalive,
+                    max_connections=max_connections,
                     keepalive_expiry=120.0,
                 ),
             )
@@ -180,6 +198,11 @@ class ElevenLabsClient:
                         continue
                     break
             tele.elevenlabs.record(latency_ms=(time.monotonic() - t_start) * 1000, ok=False)
+            logger.warning(
+                "tts_provider_failure voice_id=%s attempts=%d category=%s",
+                voice_id, attempts + 1,
+                "rate_limit" if isinstance(last_exc, _TransientTTSError) and last_exc.rate_limited else "provider",
+            )
             raise VoiceSynthesisError() from last_exc
         finally:
             tele.elevenlabs.active.dec()

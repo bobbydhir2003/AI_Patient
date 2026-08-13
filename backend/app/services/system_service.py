@@ -519,6 +519,7 @@ def concurrency_snapshot(db: Session | None = None) -> ConcurrencyOut:
             active=tts["active"],
             limit=tts["limit"],
             scope=tts["active_scope"],
+            waiting=tts.get("waiting"),
         ),
         assessment=ConcurrencyLaneOut(
             name="Assessment jobs",
