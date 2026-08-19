@@ -10,9 +10,9 @@ import {
 } from "../../services/authApi";
 import type { Assessment } from "../../types/assessment";
 import { ApiError } from "../../services/api";
-import { EmptyState, ErrorState, Spinner, StatusBadge } from "../../portal/ui";
+import { ErrorState, Spinner, StatusBadge } from "../../portal/ui";
 import { TranscriptView } from "../../portal/TranscriptView";
-import { AssessmentDisplay } from "../../portal/AssessmentDisplay";
+import { AssessmentPanel } from "../../portal/AssessmentPanel";
 import { caseLabel, fmtDateTime, fmtDuration } from "../../portal/format";
 
 export function StudentSessionPage({ initialTab = "transcript" }: { initialTab?: "transcript" | "assessment" }) {
@@ -78,15 +78,14 @@ export function StudentSessionPage({ initialTab = "transcript" }: { initialTab?:
           <TranscriptView messages={transcript} />
         </div>
       )}
-      {tab === "assessment" &&
-        (assessment ? (
-          <AssessmentDisplay assessment={assessment} />
-        ) : (
-          <EmptyState
-            title="No assessment available"
-            hint="An AI assessment has not been generated for this session yet."
-          />
-        ))}
+      {tab === "assessment" && (
+        <AssessmentPanel
+          sessionId={sessionId}
+          sessionStatus={session.status}
+          assessment={assessment ?? null}
+          variant="student"
+        />
+      )}
     </div>
   );
 }

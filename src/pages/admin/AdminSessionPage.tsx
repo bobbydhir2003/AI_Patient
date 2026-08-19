@@ -23,7 +23,7 @@ import {
   useToast,
 } from "../../portal/ui";
 import { TranscriptView } from "../../portal/TranscriptView";
-import { AssessmentDisplay } from "../../portal/AssessmentDisplay";
+import { AssessmentPanel } from "../../portal/AssessmentPanel";
 import { caseLabel, fmtDateTime, fmtDuration } from "../../portal/format";
 
 type Modal =
@@ -147,7 +147,14 @@ export function AdminSessionPage() {
           />
         </div>
       )}
-      {tab === "assessment" && <AssessmentDisplay assessment={assessment} />}
+      {tab === "assessment" && (
+        <AssessmentPanel
+          sessionId={sessionId}
+          sessionStatus={session.status}
+          assessment={assessment}
+          variant="admin"
+        />
+      )}
 
       {modal?.kind === "archiveSession" && (
         <ConfirmModal
