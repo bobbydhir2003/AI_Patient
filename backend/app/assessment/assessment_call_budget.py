@@ -20,6 +20,7 @@ into many invisible billed requests.
 from __future__ import annotations
 
 from app.core import pricing
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services import usage_recorder
 
@@ -58,6 +59,12 @@ class AssessmentCallBudget:
         self.model = model
         self.max_calls = max(1, int(max_calls))
         self.assessment_id = assessment_id
+        # P1: assessment generation is much heavier than patient chat, so every
+        # assessment provider call (standard combined/verify/correction AND
+        # referral extract/evaluate/review/re-eval - all funnel through this
+        # single choke point) uses the assessment-specific timeout. Patient chat
+        # never constructs a budget, so its timeout is untouched.
+        self.timeout_seconds = get_settings().openai_assessment_timeout_seconds
         # Running totals across the assessment (for the completion cost line).
         self.calls = 0
         self.input_tokens = 0
@@ -104,6 +111,7 @@ class AssessmentCallBudget:
             max_output_tokens=max_output_tokens,
             allow_truncation_retry=allow_truncation_retry,
             usage_out=usage_out,
+            timeout_seconds=self.timeout_seconds,
         )
         self._account(stage, usage_out)
         return data

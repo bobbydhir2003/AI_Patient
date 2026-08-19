@@ -25,6 +25,7 @@ class ConfigError(RuntimeError):
 # list - a bad value there should still fail loudly.
 _LENIENT_NUMERIC_FIELDS = (
     "openai_timeout_seconds",
+    "openai_assessment_timeout_seconds",
     "openai_max_output_tokens",
     "openai_max_retries",
     "patient_streaming_first_audio_target_ms",
@@ -64,7 +65,13 @@ class Settings(BaseSettings):
 
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    # Patient-chat / default per-request OpenAI timeout (low latency).
     openai_timeout_seconds: float = 30.0
+    # Assessment generation is far heavier than patient chat (large combined
+    # structured output), so it gets its own, longer per-request timeout applied
+    # ONLY on the assessment code path (see assessment_call_budget). Patient chat
+    # keeps openai_timeout_seconds. Override with OPENAI_ASSESSMENT_TIMEOUT_SECONDS.
+    openai_assessment_timeout_seconds: float = 90.0
     openai_max_output_tokens: int = 400
     openai_patient_max_output_tokens: int | None = None
     openai_standard_assessment_max_output_tokens: int | None = None
@@ -72,7 +79,12 @@ class Settings(BaseSettings):
     openai_referral_domain_max_output_tokens: int | None = None
     openai_referral_review_max_output_tokens: int | None = None
 
-    openai_max_retries: int = 1  # retries after the first failed attempt
+    # NOTE (P0 fix): this field is NOT wired to the OpenAI SDK client and never
+    # has been - the client is built with an explicit max_retries=0 so that
+    # provider_retry (below) is the SINGLE retry layer. Kept only for backward
+    # compatibility with any existing .env that sets OPENAI_MAX_RETRIES; changing
+    # it has no runtime effect. Retry behavior is governed by provider_max_retries.
+    openai_max_retries: int = 1  # DEAD CONFIG - see note above (unused)
 
     # --- Low-latency streaming patient responses (feature-flagged) ---
     # Master switch for the streamed OpenAI text + sentence pipeline. When

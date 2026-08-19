@@ -67,11 +67,19 @@ class OpenAIPatientClient:
         if self._client is None or self._client_fingerprint != fingerprint:
             from openai import OpenAI  # imported lazily so tests never need a key
 
-            self._client = OpenAI(api_key=rt.api_key, timeout=rt.timeout_seconds)
+            # max_retries=0 (P0 fix): the OpenAI SDK's built-in retries (default 2)
+            # are DISABLED so provider_retry is the SINGLE retry layer. Without
+            # this, one logical call fanned out to provider_retry(4) x SDK(3) = 12
+            # outbound attempts; now it is exactly one HTTP attempt per provider
+            # attempt. `timeout` here is the client-level default (patient chat);
+            # assessment calls override it per-request via `timeout_seconds` below.
+            self._client = OpenAI(
+                api_key=rt.api_key, timeout=rt.timeout_seconds, max_retries=0
+            )
             self._client_fingerprint = fingerprint
         return self._client
 
-    def _do_generate(self, messages: list[dict], schema: dict, schema_name: str, resolved_tokens: int, usage_out: dict | None = None) -> dict:
+    def _do_generate(self, messages: list[dict], schema: dict, schema_name: str, resolved_tokens: int, usage_out: dict | None = None, timeout_seconds: float | None = None) -> dict:
         settings = get_settings()
         if _mock_ai():
             if usage_out is not None:
@@ -84,6 +92,13 @@ class OpenAIPatientClient:
 
         from app.core import provider_retry
         from app.core.telemetry import get_telemetry
+
+        # Per-request timeout override (P1): when a caller (assessment path) passes
+        # timeout_seconds, it applies to THIS request only via the SDK's per-call
+        # `timeout` kwarg - no shared mutable client state, so concurrent patient
+        # and assessment requests never contaminate each other's timeout. When
+        # None (patient chat), the client-level default timeout is used unchanged.
+        request_opts = {"timeout": timeout_seconds} if timeout_seconds is not None else {}
 
         def _call():
             return client.responses.create(
@@ -98,6 +113,7 @@ class OpenAIPatientClient:
                         "strict": True,
                     }
                 },
+                **request_opts,
             )
 
         response = provider_retry.call_with_retry(
@@ -154,18 +170,22 @@ class OpenAIPatientClient:
         max_output_tokens: int | None = None,
         allow_truncation_retry: bool = False,
         usage_out: dict | None = None,
+        timeout_seconds: float | None = None,
     ) -> dict:
         """Generic structured-output call (Responses API, strict JSON schema).
 
         `usage_out` (optional) is filled with provider-reported input/output
-        tokens + model on success, for per-session usage/cost recording."""
+        tokens + model on success, for per-session usage/cost recording.
+        `timeout_seconds` (optional) overrides the per-request OpenAI timeout for
+        THIS call only - the assessment path passes its own longer timeout while
+        patient chat leaves it None and keeps the client-level default."""
         rt = self._runtime()
         if not rt.api_key and not _mock_ai():
             raise PatientEngineError("OPENAI_API_KEY is not configured.")
 
         resolved_tokens = max_output_tokens or rt.max_output_tokens
         try:
-            return self._do_generate(messages, schema, schema_name, resolved_tokens, usage_out=usage_out)
+            return self._do_generate(messages, schema, schema_name, resolved_tokens, usage_out=usage_out, timeout_seconds=timeout_seconds)
         except StructuredOutputTruncatedError:
             if allow_truncation_retry:
                 retry_tokens = resolved_tokens + 1000
@@ -173,7 +193,7 @@ class OpenAIPatientClient:
                     "truncation_retry_triggered task=%s initial_tokens=%s new_tokens=%s",
                     schema_name, resolved_tokens, retry_tokens
                 )
-                return self._do_generate(messages, schema, schema_name, retry_tokens, usage_out=usage_out)
+                return self._do_generate(messages, schema, schema_name, retry_tokens, usage_out=usage_out, timeout_seconds=timeout_seconds)
             raise
         except PatientEngineError:
             raise
