@@ -40,17 +40,68 @@ import {
 import {
   canAppendChunk,
   canStartPlayback,
-  chooseProvider,
   clampPauseMs,
   createPlaybackGuard,
   initialProgressiveState,
   isTerminal,
   reduceProgressive,
   remainingPauseMs,
+  shouldAttemptElevenLabs,
   type ProgressiveEvent,
   type ProgressiveState,
+  type VoiceStatusResult,
 } from "./voicePlaybackState";
+import { describeError, logVoiceEvent, type VoiceFailureCategory } from "./voiceDiagnostics";
 import type { PatientSpeechStyle } from "../types/interview";
+
+/**
+ * Stage-tagged error for the atomic voice path. Distinguishes WHERE a failure
+ * happened so a single generic catch can no longer conflate "ElevenLabs
+ * generation failed" with "the browser failed to play ElevenLabs' audio":
+ *
+ *   tts_http    - the /synthesize request itself failed (bad status, or a
+ *                 200 with an empty body). Re-fetching the identical request
+ *                 would just fail again the same way, so there is no point
+ *                 retrying via Blob - drop straight to browser TTS.
+ *   audio_decode - MediaSource/SourceBuffer append or decode failed. The
+ *                 ElevenLabs audio bytes may still be perfectly valid; a full
+ *                 Blob download is worth trying before the robotic voice.
+ *   audio_play  - audio.play() itself was rejected (autoplay policy, aborted,
+ *                 or an unknown DOM rejection). Also worth one Blob retry,
+ *                 since a fresh <audio> element sometimes succeeds where a
+ *                 MediaSource-backed one was blocked.
+ */
+class VoiceStageError extends Error {
+  stage: "tts_http" | "audio_decode" | "audio_play";
+  category: VoiceFailureCategory;
+  constructor(stage: VoiceStageError["stage"], category: VoiceFailureCategory, message: string) {
+    super(message);
+    this.name = "VoiceStageError";
+    this.stage = stage;
+    this.category = category;
+  }
+}
+
+/** A "fetch-level" ElevenLabs error means the /synthesize request itself failed
+ * (bad status or empty body) — re-fetching would just fail again, so we drop to
+ * browser TTS. Any OTHER error is a client-side progressive/playback failure
+ * (MediaSource append/decode, sourcebuffer error, start timeout, audio.play()
+ * rejection); the ElevenLabs audio may still be perfectly playable via a full
+ * Blob download, so that is tried once before the robotic voice. */
+function isFetchLevelVoiceError(err: unknown): boolean {
+  return err instanceof VoiceStageError && err.stage === "tts_http";
+}
+
+/** Classifies an audio.play() promise rejection into a specific, reportable
+ * category. NotAllowedError is a mobile/desktop autoplay-policy block;
+ * AbortError is an interruption (new turn, cancel, page navigation) — not a
+ * real failure; anything else is an unclassified DOM/media rejection. */
+function classifyPlayRejection(err: unknown): VoiceFailureCategory {
+  const name = err instanceof Error ? err.name : "";
+  if (name === "NotAllowedError") return "AUDIO_PLAY_NOT_ALLOWED";
+  if (name === "AbortError") return "AUDIO_PLAY_ABORTED";
+  return "AUDIO_PLAY_UNKNOWN";
+}
 
 export interface SpeakOptions {
   caseId: string;
@@ -85,8 +136,10 @@ let delayResolve: (() => void) | null = null;
 let pauseTimer: number | null = null;
 let speaking = false;
 
-/** Per-case availability + fallback rate, cached for the page's lifetime. */
-const voiceStatusCache = new Map<string, { available: boolean; fallbackRate: number }>();
+/** Per-case availability + fallback rate, cached for the page's lifetime.
+ * Only a CONFIRMED result is ever cached (see getVoiceStatus) - a transient
+ * probe failure is never cached, so the very next turn probes fresh. */
+const voiceStatusCache = new Map<string, VoiceStatusResult & { fallbackRate: number }>();
 
 function devLog(event: string, detail?: unknown): void {
   if (import.meta.env.DEV) console.debug(`[patient-voice] ${event}`, detail ?? "");
@@ -99,7 +152,18 @@ function devTiming(label: string, sinceMs: number): void {
   }
 }
 
-async function getVoiceStatus(caseId: string): Promise<{ available: boolean; fallbackRate: number }> {
+/**
+ * Stage A - status probe. Distinguishes a DEFINITIVE backend answer
+ * (confirmed: true) from a probe that failed to get an answer at all
+ * (confirmed: false). GET /voice/status never contacts ElevenLabs - it is a
+ * local case-config lookup behind auth - so a failure here is a statement
+ * about OUR backend/network at that instant, never about ElevenLabs. It must
+ * not be treated as "ElevenLabs is unavailable" (see shouldAttemptElevenLabs
+ * in voicePlaybackState.ts, which is what actually makes that decision).
+ */
+async function getVoiceStatus(
+  caseId: string,
+): Promise<VoiceStatusResult & { fallbackRate: number }> {
   const cached = voiceStatusCache.get(caseId);
   if (cached) return cached;
   try {
@@ -107,13 +171,23 @@ async function getVoiceStatus(caseId: string): Promise<{ available: boolean; fal
     const entry = {
       available: status.available === true,
       fallbackRate: typeof status.fallbackRate === "number" ? status.fallbackRate : 0.97,
+      confirmed: true as const,
     };
     voiceStatusCache.set(caseId, entry);
+    logVoiceEvent(
+      entry.available ? "voice_status_ok" : "voice_status_confirmed_unavailable",
+      { caseId, category: entry.available ? undefined : "STATUS_CONFIRMED_UNAVAILABLE" },
+    );
     devLog("voice status", { caseId, provider: status.provider });
     return entry;
   } catch (err) {
-    devLog("voice status check failed; using browser TTS", err);
-    return { available: false, fallbackRate: 0.97 }; // not cached: backend may recover
+    logVoiceEvent("voice_status_failed", { caseId, category: "STATUS_PROBE_TRANSIENT", ...describeError(err) });
+    devLog("voice status probe failed (transient); ElevenLabs will still be attempted", err);
+    // NOT cached: this is not a real answer, so the next call must probe
+    // again rather than remembering a false "unavailable". `available` is a
+    // meaningless placeholder here - callers MUST check `confirmed` (via
+    // shouldAttemptElevenLabs) rather than reading `available` directly.
+    return { available: false, fallbackRate: 0.97, confirmed: false };
   }
 }
 
@@ -199,6 +273,7 @@ async function playElevenLabs(options: SpeakOptions, generation: number, t0: num
   const requestStartedAt = performance.now(); // pause overlap starts HERE
   devLog("tts request start", { caseId: options.caseId, provider: "elevenlabs" });
   devTiming("patient response → TTS request start", t0);
+  logVoiceEvent("tts_request_started", { caseId: options.caseId, path: "progressive" });
 
   const response = await fetch(`${API_BASE_URL}/api/voice/synthesize`, {
     method: "POST",
@@ -213,8 +288,10 @@ async function playElevenLabs(options: SpeakOptions, generation: number, t0: num
     }),
   });
   if (!response.ok) {
-    throw new Error(`voice_synthesis_http_${response.status}`);
+    logVoiceEvent("tts_http_failed", { caseId: options.caseId, status: response.status, category: "TTS_HTTP_ERROR" });
+    throw new VoiceStageError("tts_http", "TTS_HTTP_ERROR", `voice_synthesis_http_${response.status}`);
   }
+  logVoiceEvent("tts_http_success", { caseId: options.caseId, status: response.status });
   devTiming("patient response → response headers", t0);
   const pauseBeforeMs = clampPauseMs(
     response.headers.get("X-Pause-Before-Ms") ?? options.speechStyle?.pauseBeforeMs ?? 150,
@@ -227,6 +304,43 @@ async function playElevenLabs(options: SpeakOptions, generation: number, t0: num
   // MediaSource unsupported in this browser: keep the ElevenLabs voice via
   // Blob playback (full buffering), still with the overlapped pause.
   devLog("MediaSource unsupported; using Blob playback", { caseId: options.caseId });
+  await playBuffered(response, options, generation, pauseBeforeMs, requestStartedAt, t0);
+}
+
+/**
+ * Re-request the same approved synthesis and play it as a fully-downloaded Blob.
+ * Used ONLY as a recovery step when progressive (MediaSource) playback failed
+ * but the ElevenLabs audio itself is fine — this keeps the realistic voice
+ * instead of dropping straight to the robotic browser voice. A completed clip is
+ * usually served from the backend audio cache, so this is typically cheap.
+ */
+async function playElevenLabsBuffered(options: SpeakOptions, generation: number, t0: number): Promise<void> {
+  const abort = new AbortController();
+  activeAbortController = abort;
+  const requestStartedAt = performance.now();
+  logVoiceEvent("tts_request_started", { caseId: options.caseId, path: "blob_recovery" });
+  const response = await fetch(`${API_BASE_URL}/api/voice/synthesize`, {
+    method: "POST",
+    headers: withAuthHeaders({ "Content-Type": "application/json" }),
+    signal: abort.signal,
+    body: JSON.stringify({
+      caseId: options.caseId,
+      text: options.text,
+      sessionId: options.sessionId ?? "",
+      turnId: options.turnId ?? "",
+      speechStyle: options.speechStyle ?? null,
+    }),
+  });
+  if (!response.ok) {
+    logVoiceEvent("tts_http_failed", {
+      caseId: options.caseId, status: response.status, path: "blob_recovery", category: "TTS_HTTP_ERROR",
+    });
+    throw new VoiceStageError("tts_http", "TTS_HTTP_ERROR", `voice_synthesis_http_${response.status}`);
+  }
+  logVoiceEvent("tts_http_success", { caseId: options.caseId, status: response.status, path: "blob_recovery" });
+  const pauseBeforeMs = clampPauseMs(
+    response.headers.get("X-Pause-Before-Ms") ?? options.speechStyle?.pauseBeforeMs ?? 150,
+  );
   await playBuffered(response, options, generation, pauseBeforeMs, requestStartedAt, t0);
 }
 
@@ -271,7 +385,13 @@ function playProgressive(
       devLog("progressive playback did not start in time; failing over", {
         timeoutMs: PROGRESSIVE_PLAYBACK_START_TIMEOUT_MS,
       });
-      fail(new Error("voice_progressive_start_timeout"));
+      logVoiceEvent("tts_progressive_start_timeout", {
+        caseId: options.caseId, path: "progressive", category: "TTS_TIMEOUT",
+      });
+      // Treated as a playback-stage failure (not a generation failure): the
+      // request succeeded and chunks were arriving, they just never turned
+      // into 'playing' - worth a Blob retry before the robotic voice.
+      fail(new VoiceStageError("audio_play", "TTS_TIMEOUT", "voice_progressive_start_timeout"));
     }, PROGRESSIVE_PLAYBACK_START_TIMEOUT_MS);
     const clearWatchdog = () => {
       if (watchdogTimer !== null) {
@@ -330,7 +450,11 @@ function playProgressive(
       try {
         sourceBuffer.appendBuffer(chunk as BufferSource);
       } catch (err) {
-        fail(err); // decode/append failure → browser TTS fallback upstream
+        logVoiceEvent("audio_decode_failed", {
+          caseId: options.caseId, path: "progressive", reason: "append", category: "AUDIO_DECODE_ERROR",
+          ...describeError(err),
+        });
+        fail(new VoiceStageError("audio_decode", "AUDIO_DECODE_ERROR", "voice_decode_failed"));
       }
     };
 
@@ -345,7 +469,13 @@ function playProgressive(
         if (settled || !guard.isCurrent(generation) || isTerminal(state)) return;
         dispatch({ type: "PLAYBACK_STARTED" });
         devTiming("patient response → playback start", t0);
-        audio.play().catch((err: unknown) => fail(err));
+        audio.play().catch((err: unknown) => {
+          const category = classifyPlayRejection(err);
+          logVoiceEvent("audio_play_failed", {
+            caseId: options.caseId, path: "progressive", category, ...describeError(err),
+          });
+          fail(new VoiceStageError("audio_play", category, "voice_play_rejected"));
+        });
       });
     };
 
@@ -353,16 +483,26 @@ function playProgressive(
       clearWatchdog(); // playback actually began
       speaking = true;
       devLog("playback start", { caseId: options.caseId, progressive: true });
+      logVoiceEvent("audio_play_started", { caseId: options.caseId, path: "progressive" });
       options.onStart?.();
     };
     audio.onended = () => {
       if (dispatch({ type: "PLAYBACK_ENDED" }).phase !== "ended") return; // stale event
       devLog("playback end", { caseId: options.caseId });
       devTiming("patient response → playback ended", t0);
+      logVoiceEvent("audio_play_success", { caseId: options.caseId, path: "progressive" });
       releaseAudio();
       finish(resolve);
     };
-    audio.onerror = () => fail(new Error("voice_playback_failed"));
+    audio.onerror = () => {
+      // The <audio> element itself reported an error (distinct from a
+      // play()-promise rejection): a decode failure on already-appended data.
+      logVoiceEvent("audio_decode_failed", {
+        caseId: options.caseId, path: "progressive", reason: "media_error", category: "AUDIO_DECODE_ERROR",
+        ...describeError(audio.error),
+      });
+      fail(new VoiceStageError("audio_decode", "AUDIO_DECODE_ERROR", "voice_playback_failed"));
+    };
 
     mediaSource.addEventListener(
       "sourceopen",
@@ -371,7 +511,11 @@ function playProgressive(
         try {
           sourceBuffer = mediaSource.addSourceBuffer("audio/mpeg");
         } catch (err) {
-          fail(err);
+          logVoiceEvent("audio_decode_failed", {
+            caseId: options.caseId, path: "progressive", reason: "add_source_buffer", category: "AUDIO_DECODE_ERROR",
+            ...describeError(err),
+          });
+          fail(new VoiceStageError("audio_decode", "AUDIO_DECODE_ERROR", "voice_add_source_buffer_failed"));
           return;
         }
         sourceBuffer.addEventListener("updateend", () => {
@@ -379,7 +523,12 @@ function playProgressive(
           appendNext();
           maybeEndOfStream();
         });
-        sourceBuffer.addEventListener("error", () => fail(new Error("voice_sourcebuffer_error")));
+        sourceBuffer.addEventListener("error", () => {
+          logVoiceEvent("audio_decode_failed", {
+            caseId: options.caseId, path: "progressive", reason: "sourcebuffer_event", category: "AUDIO_DECODE_ERROR",
+          });
+          fail(new VoiceStageError("audio_decode", "AUDIO_DECODE_ERROR", "voice_sourcebuffer_error"));
+        });
         appendNext(); // chunks may already be queued
       },
       { once: true },
@@ -433,7 +582,11 @@ async function playBuffered(
   const blob = await response.blob();
   activeAbortController = null;
   if (!guard.isCurrent(generation)) return; // cancelled/superseded while downloading
-  if (blob.size === 0) throw new Error("voice_synthesis_empty_audio");
+  if (blob.size === 0) {
+    logVoiceEvent("tts_empty_audio", { caseId: options.caseId, path: "blob", category: "TTS_EMPTY_AUDIO" });
+    throw new VoiceStageError("tts_http", "TTS_EMPTY_AUDIO", "voice_synthesis_empty_audio");
+  }
+  logVoiceEvent("audio_blob_ready", { caseId: options.caseId, path: "blob" });
   devTiming("patient response → full audio downloaded (blob path)", t0);
 
   const wait = remainingPauseMs(pauseBeforeMs, performance.now() - requestStartedAt);
@@ -457,20 +610,30 @@ async function playBuffered(
       speaking = true;
       devLog("playback start", { caseId: options.caseId, progressive: false });
       devTiming("patient response → playback start (blob path)", t0);
+      logVoiceEvent("audio_play_started", { caseId: options.caseId, path: "blob" });
       options.onStart?.();
     };
     audio.onended = () => {
       devLog("playback end", { caseId: options.caseId });
+      logVoiceEvent("audio_play_success", { caseId: options.caseId, path: "blob" });
       releaseAudio();
       finish(resolve);
     };
     audio.onerror = () => {
+      logVoiceEvent("audio_decode_failed", {
+        caseId: options.caseId, path: "blob", reason: "media_error", category: "AUDIO_DECODE_ERROR",
+        ...describeError(audio.error),
+      });
       releaseAudio();
-      finish(() => reject(new Error("voice_playback_failed")));
+      finish(() => reject(new VoiceStageError("audio_decode", "AUDIO_DECODE_ERROR", "voice_playback_failed")));
     };
     audio.play().catch((err: unknown) => {
+      const category = classifyPlayRejection(err);
+      logVoiceEvent("audio_play_failed", {
+        caseId: options.caseId, path: "blob", category, ...describeError(err),
+      });
       releaseAudio();
-      finish(() => reject(err instanceof Error ? err : new Error("voice_playback_failed")));
+      finish(() => reject(new VoiceStageError("audio_play", category, "voice_play_rejected")));
     });
   });
   activeResolve = null;
@@ -502,15 +665,41 @@ export async function speakPatientResponse(options: SpeakOptions): Promise<void>
   const status = await getVoiceStatus(options.caseId);
   if (!guard.isCurrent(generation)) return; // a newer request or cancel won
 
-  if (chooseProvider(status.available) === "elevenlabs") {
+  // Bug-2 fix: a TRANSIENT status-probe failure (status.confirmed === false)
+  // must not be treated as a confirmed "no voice for this case". ElevenLabs
+  // is still attempted; only a real generation/playback failure below sends
+  // this turn to the browser voice. See shouldAttemptElevenLabs's docstring.
+  let browserFallbackReason: "status_confirmed_unavailable" | "elevenlabs_failed" | null = null;
+  if (shouldAttemptElevenLabs(status)) {
     try {
       await playElevenLabs(options, generation, t0);
+      logVoiceEvent("tts_succeeded", { caseId: options.caseId, path: "progressive" });
       return;
     } catch (err) {
       if (!guard.isCurrent(generation)) return; // cancelled mid-flight: done
-      devLog("elevenlabs failed; falling back to browser TTS", err);
       releaseAudio();
+      // Recovery order (mobile-friendly): if PLAYBACK (progressive MediaSource
+      // decode, or an audio.play() rejection) failed but the ElevenLabs
+      // request itself was fine, try a standard Blob download of the same
+      // audio BEFORE dropping to the robotic browser voice. A confirmed
+      // tts_http-stage failure skips straight to browser TTS - re-fetching
+      // the identical request would just fail the same way again.
+      if (canUseMediaSource() && !isFetchLevelVoiceError(err)) {
+        try {
+          await playElevenLabsBuffered(options, generation, t0);
+          logVoiceEvent("tts_succeeded", { caseId: options.caseId, path: "blob_recovery" });
+          return; // ElevenLabs voice preserved via Blob playback
+        } catch (blobErr) {
+          if (!guard.isCurrent(generation)) return;
+          releaseAudio();
+          devLog("blob recovery also failed; falling back to browser TTS", blobErr);
+        }
+      }
+      browserFallbackReason = "elevenlabs_failed";
+      devLog("elevenlabs failed; falling back to browser TTS", err);
     }
+  } else {
+    browserFallbackReason = "status_confirmed_unavailable";
   }
 
   if (!guard.isCurrent(generation)) return;
@@ -519,6 +708,9 @@ export async function speakPatientResponse(options: SpeakOptions): Promise<void>
     return;
   }
   try {
+    logVoiceEvent("browser_fallback_started", {
+      caseId: options.caseId, reason: browserFallbackReason ?? "elevenlabs_failed", category: "BROWSER_FALLBACK",
+    });
     await playBrowser(options, status.fallbackRate);
   } catch (err) {
     devLog("browser TTS failed; transcript-only", err);
@@ -546,6 +738,7 @@ function stopActivePlayback(): void {
 export function cancelPatientSpeech(): void {
   guard.invalidateAll(); // every in-flight generation becomes stale
   devLog("tts cancelled");
+  logVoiceEvent("tts_cancelled", {});
   stopActivePlayback();
   // Streaming pipeline (if active): aborts the SSE request, sentence TTS
   // fetches, queued audio, and settles the streaming promises exactly once.

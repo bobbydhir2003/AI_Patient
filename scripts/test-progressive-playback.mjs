@@ -271,9 +271,18 @@ function settleTracker(promise) {
 }
 
 test("MediaSource object URL is attached to the audio element before sourceopen", async () => {
+  // NOTE: startSpeak() is async and `return`s the still-pending
+  // speakPatientResponse() promise, so per JS's promise-resolution
+  // procedure, awaiting startSpeak() ITSELF would block until that inner
+  // promise settles. This test intentionally inspects state BEFORE anything
+  // (chunk, sourceopen, cancel) has happened to settle it, so it must NOT
+  // await that promise directly - every other test in this file avoids this
+  // via settleTracker(). Pre-fix, `await startSpeak()` here hung indefinitely
+  // in a --test-timeout=0 environment. A plain, unchained flush() still lets
+  // the fetch mocks and MediaSource/Audio construction run.
   const promise = startSpeak();
-  const speakPromise = await promise;
-  void speakPromise;
+  void promise;
+  await flush();
   const { mediaSource, audio } = latest();
   assert.ok(mediaSource, "MediaSource was created");
   assert.ok(audio, "Audio element was created");

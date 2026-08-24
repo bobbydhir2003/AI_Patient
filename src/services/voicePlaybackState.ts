@@ -53,6 +53,33 @@ export function chooseProvider(elevenLabsAvailable: boolean | undefined): TtsPro
   return elevenLabsAvailable === true ? "elevenlabs" : "browser";
 }
 
+/** Result of the /voice/status probe, distinguishing a DEFINITIVE backend
+ * answer from a probe that failed to get an answer at all. */
+export interface VoiceStatusResult {
+  available: boolean;
+  /** True only when the backend actually responded (200) with this value.
+   * False means the probe request itself failed (network/timeout/5xx) - the
+   * case's real voice availability is UNKNOWN, not "unavailable". */
+  confirmed: boolean;
+}
+
+/**
+ * Whether to attempt ElevenLabs for this turn.
+ *
+ * A CONFIRMED backend response is authoritative: available:false means this
+ * case genuinely has no realistic voice, so go straight to browser TTS.
+ *
+ * An UNCONFIRMED result (the status PROBE itself failed - e.g. the backend's
+ * own DB/auth hiccuped for 200ms - has nothing to do with whether ElevenLabs
+ * can generate audio) must NOT be treated the same as a confirmed "no voice":
+ * ElevenLabs is still attempted, and /synthesize's own result (a real
+ * generation attempt) becomes the authoritative signal instead of a probe
+ * that never even asked ElevenLabs anything.
+ */
+export function shouldAttemptElevenLabs(status: VoiceStatusResult): boolean {
+  return status.confirmed ? status.available : true;
+}
+
 /** Clamp the client-side pre-speech pause to the same safe range the backend
  * enforces, so a malformed header can never stall playback. */
 export function clampPauseMs(value: unknown, fallback = 150): number {

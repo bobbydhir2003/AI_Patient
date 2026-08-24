@@ -13,7 +13,7 @@
     "test:landing": "node --test scripts/test-landing-ui.mjs",
     "test:dashboard": "node --test scripts/test-student-dashboard.mjs",
     "test:assessment": "node --test scripts/test-assessment-review.mjs",
-    "test:voice": "tsc src/hooks/voiceStateMachine.ts src/services/interruptionJudge.ts src/services/voicePlaybackState.ts src/services/patientVoiceService.ts src/services/streamingQueueState.ts --ignoreConfig --outDir .test-build --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --types vite/client && node --test scripts/test-voice-state.mjs scripts/test-interruption-judge.mjs scripts/test-voice-playback.mjs scripts/test-progressive-playback.mjs scripts/test-streaming-queue.mjs",
+    "test:voice": "tsc src/hooks/voiceStateMachine.ts src/services/interruptionJudge.ts src/services/voicePlaybackState.ts src/services/patientVoiceService.ts src/services/streamingQueueState.ts --ignoreConfig --outDir .test-build --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --types vite/client && node --test scripts/test-voice-state.mjs scripts/test-interruption-judge.mjs scripts/test-voice-playback.mjs scripts/test-progressive-playback.mjs scripts/test-atomic-voice-fallback.mjs scripts/test-streaming-queue.mjs",
     "test:mobileaudio": "tsc src/services/mediaErrors.ts src/services/mobileAudio.ts src/hooks/voiceStateMachine.ts --ignoreConfig --outDir .test-build --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --types vite/client && node --test scripts/test-mobile-audio.mjs",
     "test:interviewui": "node --test scripts/test-interview-ui.mjs"
   },

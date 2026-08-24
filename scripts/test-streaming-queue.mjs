@@ -188,24 +188,76 @@ test("playback is not complete while later sentences are still generating", () =
 });
 
 // ---------------------------------------------------------------------------
-// ElevenLabs failure -> browser fallback ordering
+// Per-sentence ElevenLabs failure -> granular, recoverable fallback
+// (regression guard for the "one failure poisons the whole turn" bug)
 // ---------------------------------------------------------------------------
 
-test("first TTS failure flips voiceFailed and stops further fetches", () => {
-  let s = run(
+test("a single sentence TTS failure marks ONLY that sentence failed (voiceFailed stays false)", () => {
+  const s = run(
     initialStreamQueueState,
     { type: "ADD_SENTENCE", index: 0, text: "One." },
     { type: "ADD_SENTENCE", index: 1, text: "Two." },
     { type: "FETCH_STARTED", index: 0 },
     { type: "AUDIO_FAILED", index: 0 },
   );
-  assert.equal(s.voiceFailed, true);
-  assert.equal(pendingFetches(s).length, 0); // no more ElevenLabs requests
-  // The failed sentence still plays (browser TTS), in order.
+  assert.equal(s.voiceFailed, false); // NOT poisoned
+  assert.equal(s.sentences.find((x) => x.index === 0).status, "failed");
+  assert.equal(s.sentences.find((x) => x.index === 1).status, "queued");
+});
+
+test("ElevenLabs is still fetched for later sentences after one failure (no poisoning)", () => {
+  const s = run(
+    initialStreamQueueState,
+    { type: "ADD_SENTENCE", index: 0, text: "One." },
+    { type: "ADD_SENTENCE", index: 1, text: "Two." },
+    { type: "ADD_SENTENCE", index: 2, text: "Three." },
+    { type: "FETCH_STARTED", index: 0 },
+    { type: "AUDIO_FAILED", index: 0 }, // sentence 1 (index 0) hiccups
+  );
+  // Sentences 2 and 3 must STILL be queued for ElevenLabs fetches.
+  assert.deepEqual(pendingFetches(s).map((x) => x.index), [1, 2]);
+});
+
+test("sentence-2 failure: s1 ElevenLabs, s2 browser, s3 ElevenLabs again", () => {
+  // s1 succeeds on ElevenLabs, s2 fails (browser for THAT sentence only),
+  // s3 succeeds on ElevenLabs again — the exact desired recovery behavior.
+  let s = run(
+    initialStreamQueueState,
+    { type: "ADD_SENTENCE", index: 0, text: "One." },
+    { type: "ADD_SENTENCE", index: 1, text: "Two." },
+    { type: "ADD_SENTENCE", index: 2, text: "Three." },
+    { type: "FETCH_STARTED", index: 0 },
+    { type: "AUDIO_READY", index: 0 }, // s1 ElevenLabs OK
+    { type: "FETCH_STARTED", index: 1 },
+    { type: "AUDIO_FAILED", index: 1 }, // s2 transient failure
+    { type: "FETCH_STARTED", index: 2 },
+    { type: "AUDIO_READY", index: 2 }, // s3 ElevenLabs OK (still attempted!)
+  );
+  assert.equal(s.voiceFailed, false);
+  // s1 plays via ElevenLabs (status "ready", not "failed").
   assert.equal(nextPlayable(s).index, 0);
+  assert.equal(s.sentences.find((x) => x.index === 0).status, "ready");
   s = run(s, { type: "PLAY_STARTED", index: 0 }, { type: "PLAY_ENDED", index: 0 });
-  // The next queued sentence is playable via the browser path.
+  // s2 is the failed one -> browser path.
   assert.equal(nextPlayable(s).index, 1);
+  assert.equal(s.sentences.find((x) => x.index === 1).status, "failed");
+  s = run(s, { type: "PLAY_STARTED", index: 1 }, { type: "PLAY_ENDED", index: 1 });
+  // s3 plays via ElevenLabs again (recovered).
+  assert.equal(nextPlayable(s).index, 2);
+  assert.equal(s.sentences.find((x) => x.index === 2).status, "ready");
+});
+
+test("whole-case voiceFailed (no ElevenLabs for the case) still uses browser for every sentence", () => {
+  // voiceFailed set up-front (begin() path) is the ONLY thing that disables
+  // ElevenLabs for the whole turn — a single sentence failure never does.
+  let s = { ...initialStreamQueueState, voiceFailed: true };
+  s = run(
+    s,
+    { type: "ADD_SENTENCE", index: 0, text: "One." },
+    { type: "ADD_SENTENCE", index: 1, text: "Two." },
+  );
+  assert.equal(pendingFetches(s).length, 0); // no ElevenLabs fetches at all
+  assert.equal(nextPlayable(s).index, 0); // queued -> browser path
 });
 
 test("stale AUDIO_READY for a non-fetching sentence is ignored", () => {

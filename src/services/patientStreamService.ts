@@ -37,7 +37,17 @@ import {
   type StreamQueueState,
 } from "./streamingQueueState";
 import { cancelActiveStream, registerActiveStreamCancel } from "./streamRegistry";
+import { describeError, logVoiceEvent } from "./voiceDiagnostics";
 import type { PatientSpeechStyle } from "../types/interview";
+
+/** Whether a failed sentence TTS fetch is worth one retry. Transient conditions
+ * only — a permanent 4xx (bad request / too long / auth) will not succeed on a
+ * retry and must not waste a second call. No status (network/transport error)
+ * and empty audio are treated as transient. */
+function isRetriableTtsStatus(status: number | undefined): boolean {
+  if (status === undefined) return true; // network/transport error
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
 
 export class StreamStartFailedError extends Error {
   code: string;
@@ -217,48 +227,98 @@ export function startStreamingExchange(options: StartStreamingOptions): Streamin
         const next = pending[0];
         if (!next) break;
         dispatch({ type: "FETCH_STARTED", index: next.index });
-        const controller = new AbortController();
-        ttsAbort = controller;
-        try {
-          if (next.index === 0) devTiming("first sentence -> TTS request start", t0, turn);
-          const response = await fetch(`${API_BASE_URL}/api/voice/synthesize`, {
-            method: "POST",
-            headers: withAuthHeaders({ "Content-Type": "application/json" }),
-            signal: controller.signal,
-            body: JSON.stringify({
-              caseId: options.caseId,
-              text: next.text,
-              // Live sentence streaming: the turn is not committed yet, so there
-              // is no turnId. The backend authorizes by session ownership and
-              // caps the length (see voice.py A5 mode 2).
-              sessionId: options.sessionId,
-              turnId: "",
-              speechStyle: earlySpeech,
-              correlationId: `${turn}:s${next.index}`,
-            }),
-          });
-          if (!response.ok) throw new Error(`voice_synthesis_http_${response.status}`);
-          if (next.index === 0) {
-            pauseBeforeMs = clampPauseMs(
-              response.headers.get("X-Pause-Before-Ms") ?? earlySpeech?.pauseBeforeMs ?? 150,
-            );
-            devTiming("first sentence -> TTS response headers", t0, turn);
+        const correlationId = `${turn}:s${next.index}`;
+
+        // At most ONE retry, and only for a TRANSIENT failure of THIS sentence.
+        // A failure here never disables ElevenLabs for later sentences: if both
+        // attempts fail we mark only this sentence AUDIO_FAILED (browser TTS
+        // speaks it) and the pump continues fetching the next sentence normally.
+        const MAX_ATTEMPTS = 2;
+        let blob: Blob | null = null;
+        let failReason = "fetch_failed";
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          const controller = new AbortController();
+          ttsAbort = controller;
+          let retriable = true;
+          try {
+            logVoiceEvent("tts_requested", { caseId: options.caseId, index: next.index, correlationId });
+            if (next.index === 0 && attempt === 1) devTiming("first sentence -> TTS request start", t0, turn);
+            const response = await fetch(`${API_BASE_URL}/api/voice/synthesize`, {
+              method: "POST",
+              headers: withAuthHeaders({ "Content-Type": "application/json" }),
+              signal: controller.signal,
+              body: JSON.stringify({
+                caseId: options.caseId,
+                text: next.text,
+                // Live sentence streaming: the turn is not committed yet, so there
+                // is no turnId. The backend authorizes by session ownership and
+                // caps the length (see voice.py A5 mode 2).
+                sessionId: options.sessionId,
+                turnId: "",
+                speechStyle: earlySpeech,
+                correlationId,
+              }),
+            });
+            if (!response.ok) {
+              retriable = isRetriableTtsStatus(response.status);
+              failReason = `http_${response.status}`;
+              logVoiceEvent("tts_fetch_failed", {
+                caseId: options.caseId, index: next.index, correlationId, status: response.status,
+              });
+              throw new Error(`voice_synthesis_http_${response.status}`);
+            }
+            if (next.index === 0) {
+              pauseBeforeMs = clampPauseMs(
+                response.headers.get("X-Pause-Before-Ms") ?? earlySpeech?.pauseBeforeMs ?? 150,
+              );
+              devTiming("first sentence -> TTS response headers", t0, turn);
+            }
+            const body = await response.blob();
+            if (cancelled) return;
+            if (body.size === 0) {
+              retriable = true;
+              failReason = "empty_audio";
+              logVoiceEvent("tts_empty_audio", { caseId: options.caseId, index: next.index, correlationId });
+              throw new Error("voice_synthesis_empty_audio");
+            }
+            blob = body;
+            break; // success
+          } catch (err) {
+            // Cancellation (AbortError from cancel()) is NOT a failure and is
+            // never retried or turned into a fallback.
+            if (cancelled) return;
+            if (failReason === "fetch_failed") {
+              // Network/transport error (no HTTP response): transient.
+              const info = describeError(err);
+              logVoiceEvent("tts_fetch_failed", {
+                caseId: options.caseId, index: next.index, correlationId,
+                errorName: info.errorName, errorMessage: info.errorMessage,
+              });
+            }
+            if (retriable && attempt < MAX_ATTEMPTS) {
+              await new Promise((r) => window.setTimeout(r, 150)); // brief backoff
+              if (cancelled) return;
+              continue; // one retry
+            }
+            break; // give up on this sentence (permanent, or retry exhausted)
+          } finally {
+            if (ttsAbort === controller) ttsAbort = null;
           }
-          const blob = await response.blob();
-          if (cancelled) return;
-          if (blob.size === 0) throw new Error("voice_synthesis_empty_audio");
+        }
+
+        if (cancelled) return;
+        if (blob) {
           audioBlobs.set(next.index, blob);
           dispatch({ type: "AUDIO_READY", index: next.index });
+          logVoiceEvent("tts_succeeded", { caseId: options.caseId, index: next.index, correlationId });
           if (next.index === 0) devTiming("first sentence -> audio buffered", t0, turn);
-        } catch (err) {
-          if (cancelled) return;
-          devLog("sentence TTS failed; browser fallback for the rest", {
-            index: next.index,
-            err,
+        } else {
+          // Only THIS sentence falls back to browser TTS; ElevenLabs is still
+          // attempted for every later sentence.
+          logVoiceEvent("tts_browser_fallback", {
+            caseId: options.caseId, index: next.index, correlationId, reason: failReason,
           });
           dispatch({ type: "AUDIO_FAILED", index: next.index });
-        } finally {
-          if (ttsAbort === controller) ttsAbort = null;
         }
         void playPump();
       }
@@ -278,6 +338,7 @@ export function startStreamingExchange(options: StartStreamingOptions): Streamin
       for (;;) {
         const sentence = nextPlayable(state);
         if (!sentence) break;
+        const correlationId = `${turn}:s${sentence.index}`;
         const useBrowser =
           state.voiceFailed || sentence.status === "failed" || !audioBlobs.has(sentence.index);
         dispatch({ type: "PLAY_STARTED", index: sentence.index });
@@ -325,11 +386,30 @@ export function startStreamingExchange(options: StartStreamingOptions): Streamin
             };
             audio.onplay = markStarted;
             audio.onended = finish;
-            audio.onerror = finish;
-            audio.play().catch(() => {
-              // Autoplay rejection / decode failure: try the browser voice so
-              // the patient still speaks this sentence.
+            audio.onerror = () => {
+              // Decode/playback error (e.g. a truncated MP3 delivered under 200).
+              // If playback already began we accept the partial audio rather than
+              // replaying the whole sentence via the browser voice (which would
+              // double it); if it never started, the play().catch below handles
+              // the browser fallback.
+              logVoiceEvent("tts_audio_play_failed", {
+                caseId: options.caseId, index: sentence.index, correlationId, path: "blob",
+                reason: "media_error", ...describeError(audio.error),
+              });
+              finish();
+            };
+            audio.play().catch((err: unknown) => {
+              // Autoplay rejection / could-not-start-decode: this sentence never
+              // produced audio, so try the browser voice for THIS sentence only.
+              // ElevenLabs remains in use for the rest of the turn.
+              logVoiceEvent("tts_audio_play_failed", {
+                caseId: options.caseId, index: sentence.index, correlationId, path: "blob",
+                reason: "play_rejected", ...describeError(err),
+              });
               if (!cancelled && isBrowserTtsSupported()) {
+                logVoiceEvent("tts_browser_fallback", {
+                  caseId: options.caseId, index: sentence.index, correlationId, reason: "play_rejected",
+                });
                 markStarted();
                 void browserSpeak(sentence.text, {}, browserRate).finally(finish);
               } else {
@@ -357,6 +437,7 @@ export function startStreamingExchange(options: StartStreamingOptions): Streamin
     if (cancelled) return;
     cancelled = true;
     devLog("stream cancelled", { turn });
+    logVoiceEvent("tts_cancelled", { caseId: options.caseId, correlationId: turn });
     dispatch({ type: "CANCEL" });
     sseAbort.abort(); // backend commits exactly the sentences already emitted
     ttsAbort?.abort();

@@ -12,8 +12,13 @@
  *     audio readiness - per-sentence TTS results
  *     playback done   - every queued sentence finished (or queue cancelled)
  *   The patient is "finished speaking" only at playback done.
- * - The first ElevenLabs failure flips voiceFailed: remaining sentences are
- *   spoken by the browser-TTS fallback (in order) instead of being dropped.
+ * - A per-sentence ElevenLabs failure marks ONLY that sentence "failed" (it is
+ *   spoken by the browser-TTS fallback, in order); ElevenLabs is still attempted
+ *   for every subsequent sentence. A single transient sentence failure therefore
+ *   NEVER disables ElevenLabs for the rest of the turn.
+ * - voiceFailed is reserved for the deterministic whole-turn condition "this case
+ *   has no ElevenLabs voice at all" (decided before streaming begins); it makes
+ *   every sentence use browser TTS and skips ElevenLabs fetches entirely.
  */
 
 // ---------------------------------------------------------------------------
@@ -71,7 +76,10 @@ export interface StreamQueueState {
   /** OpenAI generation finished (final or error event) - NOT playback. */
   generationDone: boolean;
   cancelled: boolean;
-  /** First ElevenLabs failure: the rest of the turn uses browser TTS. */
+  /** Deterministic whole-turn condition ONLY: this case has no ElevenLabs voice,
+   * so every sentence uses browser TTS and no ElevenLabs fetch is issued. A
+   * single transient per-sentence failure must NOT set this (that would poison
+   * the rest of the turn); such a failure marks just that sentence "failed". */
   voiceFailed: boolean;
   /** Ordering cursor: only this index may start playing. */
   nextToPlay: number;
@@ -142,7 +150,11 @@ export function reduceStreamQueue(
     case "AUDIO_FAILED": {
       const s = state.sentences.find((x) => x.index === event.index);
       if (!s || (s.status !== "fetching" && s.status !== "queued")) return state;
-      return { ...withSentence(state, event.index, "failed"), voiceFailed: true };
+      // Granular fallback: mark ONLY this sentence "failed" (browser TTS will
+      // speak it). Do NOT set the global voiceFailed flag — a single transient
+      // sentence failure must never disable ElevenLabs for later sentences, which
+      // continue to be fetched and played through ElevenLabs normally.
+      return withSentence(state, event.index, "failed");
     }
     case "PLAY_STARTED": {
       // Strict ordering + no overlap: only the cursor sentence may start, and
