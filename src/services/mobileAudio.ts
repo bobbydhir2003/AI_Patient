@@ -31,3 +31,21 @@ export function autoInterruptNote(isMobile: boolean): string {
     ? "Best with headphones or earbuds. On the phone speaker the patient's voice can cause false interruptions — leave this off unless using headphones."
     : "Works best with headphones. Laptop speakers may cause false interruptions.";
 }
+
+/** Coarse, non-identifying device category for telemetry only. */
+export function deviceCategory(): "ios" | "android" | "desktop" {
+  if (typeof navigator === "undefined") return "desktop";
+
+  const ua = navigator.userAgent || "";
+  const isIOS =
+    /iPhone|iPod|iPad/.test(ua) ||
+    (navigator.platform === "MacIntel" &&
+      typeof navigator.maxTouchPoints === "number" &&
+      navigator.maxTouchPoints > 1);
+
+  if (isIOS) return "ios";
+  if (/Android/.test(ua)) return "android";
+
+  return "desktop";
+}
+
