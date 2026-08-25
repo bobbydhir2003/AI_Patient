@@ -1,10 +1,21 @@
-"""LiveKit room-scoped token minting - Phase 1 POC only.
+"""LiveKit room-scoped token minting - Phase 1/2 POC only.
 
 Not imported by any production interview/voice code path. Mirrors the exact
 security posture of /voice/synthesize's ElevenLabs key handling: the LiveKit
 API secret is read from settings (never from the client) and never leaves
 this module - only a short-lived signed JWT is returned.
+
+Phase 2: the minted token now ALSO carries an explicit LiveKit agent-dispatch
+entry (RoomConfiguration/RoomAgentDispatch), so the moment the token holder's
+browser creates the room, LiveKit automatically invites our registered
+persistent worker (see app/livekit_agent/worker.py) - no SSH command, no
+copying a room name into a terminal. The dispatch metadata carries ONLY the
+two ids the worker needs (session_id, case_id) - both server-derived from the
+ALREADY ownership-verified `session` argument, never patient text, never a
+secret. agent_name is the fixed, server-controlled settings.livekit_agent_name
+constant - never accepted from the client.
 """
+import json
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -59,7 +70,7 @@ def create_poc_token(*, user: User, session: InterviewSession) -> PocTokenResult
     # Local import: keeps the livekit-api dependency isolated to this one POC
     # module rather than a top-level import that every backend process pays
     # for, even ones that never touch the POC.
-    from livekit.api import AccessToken, VideoGrants
+    from livekit.api import AccessToken, RoomAgentDispatch, RoomConfiguration, VideoGrants
 
     room_name = poc_room_name(session.id)
     identity = poc_participant_identity(user)
@@ -71,11 +82,26 @@ def create_poc_token(*, user: User, session: InterviewSession) -> PocTokenResult
         can_subscribe=True,
         can_publish_data=True,
     )
+    # Explicit dispatch (Phase 2, "recommended for most applications" per
+    # LiveKit's own docs - not automatic dispatch, which invites an agent to
+    # EVERY room and cannot carry metadata). agent_name is the fixed,
+    # server-controlled constant; metadata is the two ids the worker needs,
+    # both taken from the ALREADY ownership-verified `session` row - never
+    # from the request payload.
+    room_config = RoomConfiguration(
+        agents=[
+            RoomAgentDispatch(
+                agent_name=settings.livekit_agent_name,
+                metadata=json.dumps({"session_id": session.id, "case_id": session.case_id}),
+            )
+        ]
+    )
     token = (
         AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
         .with_identity(identity)
         .with_name(user.full_name or user.email or identity)
         .with_grants(grants)
+        .with_room_config(room_config)
         .with_ttl(timedelta(minutes=settings.livekit_token_ttl_minutes))
         .to_jwt()
     )

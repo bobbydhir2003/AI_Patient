@@ -5,18 +5,64 @@ pydantic-settings>=2.4,<3.0
 SQLAlchemy>=2.0,<3.0
 alembic>=1.13,<2.0
 psycopg2-binary>=2.9,<3.0
+# openai stays below 2.0 - the Responses API surface this project uses
+# (client.responses.create with model/input/max_output_tokens/text/timeout)
+# is unchanged across 1.x, and livekit-agents (below) is deliberately pinned
+# to a release that does NOT force an upgrade past this ceiling. Do not bump
+# without re-verifying against app/patient_engine/openai_client.py.
 openai>=1.40,<2.0
 python-dotenv>=1.0,<2.0
 bcrypt>=4.1,<6.0
 cryptography>=42.0,<46.0
-psutil>=5.9,<7.0
+# Ceiling raised from <7.0 to <8.0: livekit-agents==1.3.5 (below) has an
+# unconditional psutil>=7.0 requirement. Verified call sites
+# (core/worker_registry.py, services/traffic_service.py) only use
+# Process()/.cpu_percent()/.virtual_memory(), stable across 6.x-7.x - full
+# suite green on psutil 7.2.2.
+psutil>=5.9,<8.0
 PyJWT>=2.8,<3.0
 redis>=5.0,<6.0
 pytest>=8.0,<9.0
 httpx>=0.27,<1.0
-# LiveKit POC (Phase 1) only - see backend/app/livekit_agent/. Not imported by
-# any production interview/voice path. livekit-api mints room-scoped tokens
-# (used by app/api/livekit.py); livekit (rtc module) is the room-join/audio-
-# publish client used only by the standalone agent worker (livekit_agent/worker.py).
+# LiveKit POC (Phase 1) + Phase 2 persistent agent worker - see
+# backend/app/livekit_agent/. Not imported by any production interview/voice
+# path. livekit-api mints room-scoped tokens (used by app/api/livekit.py and
+# livekit_token_service.py's explicit dispatch); livekit (rtc module) is the
+# room-join/audio-publish client used by the agent worker.
 livekit>=1.1,<2.0
 livekit-api>=1.2,<2.0
+#
+# livekit-agents: PINNED EXACTLY to 1.3.5 - do NOT change to "latest" or a
+# bare `>=` range without re-running the verification below first.
+#
+# WHY: livekit-agents>=1.4.0 has an unconditional `openai>=2` core dependency
+# (not an optional extra) - a bare `pip install livekit-agents` silently
+# upgrades this project's openai from 1.x to 2.x, violating the ceiling
+# above and risking a breaking change to the ONLY generator of patient
+# dialogue (app/patient_engine/openai_client.py). 1.3.5 is the newest
+# release whose own requirements (openai>=1.99.2, livekit<2,>=1.0.19,
+# livekit-api<2,>=1.0.7) are already satisfied by this project's existing
+# pins - installing it changes openai/livekit/livekit-api NOT AT ALL.
+#
+# Before ever bumping this pin: `pip download livekit-agents==<candidate>
+# --no-deps -d /tmp/x && unzip -p /tmp/x/*.whl "*.dist-info/METADATA" | grep
+# Requires-Dist` and confirm the openai/livekit/livekit-api lines still fit
+# the ceilings in this file - do not just `pip install --upgrade`.
+livekit-agents==1.3.5
+#
+# The opentelemetry-* pins below are required ONLY to make livekit-agents
+# 1.3.5 importable. 1.3.5 declares opentelemetry-sdk>=1.34.1 with NO
+# ceiling, but its bundled telemetry code imports `LogData` from
+# opentelemetry.sdk._logs - a class renamed to ReadableLogRecord /
+# ReadWriteLogRecord in newer opentelemetry-sdk releases. Without these
+# exact pins, a future `pip install -r requirements.txt` on a clean machine
+# can resolve a newer opentelemetry-sdk and `import livekit.agents` will
+# fail with ImportError. Verified: this exact set imports cleanly.
+opentelemetry-api==1.34.1
+opentelemetry-sdk==1.34.1
+opentelemetry-exporter-otlp==1.34.1
+opentelemetry-exporter-otlp-proto-grpc==1.34.1
+opentelemetry-exporter-otlp-proto-http==1.34.1
+opentelemetry-exporter-otlp-proto-common==1.34.1
+opentelemetry-proto==1.34.1
+opentelemetry-semantic-conventions==0.55b1

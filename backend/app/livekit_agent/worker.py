@@ -1,47 +1,59 @@
-"""Standalone LiveKit POC agent worker - Phase 1 ONLY.
+"""Persistent LiveKit Agents worker - Phase 2.
 
-Runs as its OWN process, never inside Uvicorn/FastAPI request workers (see
-the LiveKit feasibility audit: agent work must not compete with or destabilize
-the request-serving process). Independently startable for local testing:
+Replaces Phase 1's single-room, manually-invoked CLI script
+(`python -m app.livekit_agent.worker --room ... --session-id ... --case-id
+...`) with a long-running process built on the real LiveKit Agents
+job-dispatch framework (`livekit-agents` - see backend/requirements.txt for
+why it is PINNED to 1.3.5, not "latest"). Started ONCE (by systemd - see
+docs/DEPLOYMENT.md), it registers with LiveKit and receives one JOB per
+student interview automatically:
 
-    cd backend
-    source .venv/bin/activate
-    export LIVEKIT_URL=wss://your-project.livekit.cloud
-    export LIVEKIT_API_KEY=...
-    export LIVEKIT_API_SECRET=...
-    python -m app.livekit_agent.worker --room ptai-poc-<session_id> \
-        --session-id <session_id> --case-id carly
+    Start Interview (browser)
+        -> POST /api/livekit/token mints a token with an EXPLICIT agent
+           dispatch entry embedded (see livekit_token_service.py:
+           RoomConfiguration/RoomAgentDispatch, agent_name=
+           settings.livekit_agent_name - a fixed, server-controlled value)
+        -> the student's browser creates the room
+        -> LiveKit automatically sends THIS worker a job request carrying
+           {"session_id": ..., "case_id": ...} as JSON job metadata
+        -> entrypoint() below receives a JobContext already carrying a REAL
+           connected livekit.rtc.Room (ctx.room) - no --room/--session-id/
+           --case-id args, nothing copied by hand.
 
-The room name and session id come from POST /api/livekit/token's response
-(see app/api/livekit.py) - a developer starts the frontend POC page first,
-copies the room name it was issued, then starts this worker pointed at that
-same room.
+No SSH command, no copying a room name into a terminal. Everything below
+entrypoint()'s metadata parsing is UNCHANGED from Phase 1's turn-handling
+logic (PocAgentSession): same interview_slot()/tts_slot() semaphore reuse via
+patient_adapter.py, same "patient_turn_status" data-channel signaling, same
+one-persistent-audio-track-per-interview design.
 
-Joins the room as participant identity "patient-agent", listens for a
-student's recognized speech as a data message (topic="student_text",
-JSON: {"text": ..., "clientTurnId": ...}), and for each one:
+Job isolation: the Agents framework runs each accepted job in its OWN
+process by default (JobExecutorType.PROCESS - kept as the default; see
+WorkerOptions below), so one interview crashing can never affect another, and
+one PocAgentSession instance is constructed FRESH per job - there is no
+module-level/global mutable state shared across interviews (session_id,
+case_id, DB session factory, turn lock, and audio source are all
+instance-scoped).
 
-    interview_slot()  -> generate_patient_response()  -> persist transcript
-    tts_slot()         -> ElevenLabsClient (PCM output) -> publish audio frames
-                                                            on ONE persistent
-                                                            LiveKit audio track
-
-All patient-generation and TTS/voice logic is reused via patient_adapter.py -
-see that module's docstring for the exact list of production components
-reused and the two Redis semaphores this process participates in exactly like
-every FastAPI worker does. Nothing here re-implements prompt logic or talks
-to ElevenLabs/OpenAI directly.
+Room/job cleanup: verified against the ACTUAL installed API (not docs) that
+JobContext does NOT automatically end a job when a participant leaves -
+that behavior lives in the higher-level AgentSession/RoomIO voice pipeline,
+which this POC does not use (it keeps its own turn logic). This module
+therefore explicitly listens for "participant_disconnected" and calls
+ctx.shutdown() itself - idempotent (a second disconnect event, or the
+framework's own shutdown callback firing, is a no-op) - and deliberately
+ignores a disconnect that reports the AGENT's own identity (defensive; our
+own local participant is never delivered through this event, but the check
+costs nothing and matches the explicit requirement).
 """
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import logging
-import signal
 import time
-from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
+
+from livekit.agents import AutoSubscribe, JobContext, JobRequest, WorkerOptions, cli
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -54,61 +66,74 @@ if TYPE_CHECKING:
 logger = get_logger("app.livekit_agent.worker")
 
 STUDENT_TEXT_TOPIC = "student_text"
-AGENT_IDENTITY = "patient-agent"
+# Fixed identity our worker always joins under - matches the constant the
+# frontend (livekitPocEngine.ts's AGENT_IDENTITY) already checks for, so the
+# "Agent connected" diagnostic keeps working with ZERO frontend changes. Set
+# explicitly in _handle_job_request below (the framework's default identity
+# is "agent-<job_id>", which would silently break that check).
+AGENT_PARTICIPANT_IDENTITY = "patient-agent"
 
 # 20ms frames at 16kHz mono 16-bit PCM = 640 bytes/frame - a conventional
-# WebRTC frame duration.
+# WebRTC frame duration. Unchanged from Phase 1.
 _FRAME_SECONDS = 0.02
 _FRAME_BYTES = int(patient_adapter.LIVEKIT_PCM_SAMPLE_RATE * _FRAME_SECONDS) * 2
 
 
-def _build_agent_token(room_name: str) -> str:
-    """The agent mints its OWN room-join token using the SAME server-side
-    credentials livekit_token_service.py uses for the student's token - never
-    the frontend's token, never a client-supplied value."""
-    from livekit.api import AccessToken, VideoGrants
-
-    settings = get_settings()
-    grants = VideoGrants(
-        room_join=True, room=room_name, can_publish=True, can_subscribe=True, can_publish_data=True,
-    )
-    return (
-        AccessToken(settings.livekit_api_key, settings.livekit_api_secret)
-        .with_identity(AGENT_IDENTITY)
-        .with_name("PT AI Patient (POC)")
-        .with_grants(grants)
-        .with_ttl(timedelta(hours=6))  # long-lived: the agent stays connected for the whole POC session
-        .to_jwt()
-    )
+def parse_job_metadata(raw: str) -> tuple[str, str] | None:
+    """Extract (session_id, case_id) from a job's JSON metadata string (see
+    livekit_token_service.py's RoomAgentDispatch(metadata=...)). Returns None
+    for anything malformed/incomplete - the caller must fail closed, never
+    guess a session or case id."""
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    session_id = str(data.get("session_id") or "").strip()
+    case_id = str(data.get("case_id") or "").strip()
+    if not session_id or not case_id:
+        return None
+    return session_id, case_id
 
 
 class PocAgentSession:
-    """Owns exactly one room connection, one persistent outbound audio track,
-    and one turn lock, so two overlapping student messages can never trigger
-    two simultaneous/overlapping patient responses (mirrors the frontend's
-    own single-active-generation guard, patientVoiceService.ts's guard).
+    """Owns exactly ONE job's room interaction, ONE persistent outbound audio
+    track, and ONE turn lock, so two overlapping student messages can never
+    trigger two simultaneous/overlapping patient responses (mirrors the
+    frontend's own single-active-generation guard, patientVoiceService.ts's
+    guard). A fresh instance is constructed per job (see entrypoint()) - no
+    state here is ever shared across interviews.
 
-    Barge-in/interruption is explicitly OUT of scope for this Phase 1 POC
-    (see the final report) - a student message that arrives while a patient
-    turn is already in flight is dropped with a log line, not queued or
-    used to interrupt playback.
+    Barge-in/interruption is explicitly OUT of scope for this POC (see the
+    Phase 1 final report) - a student message that arrives while a patient
+    turn is already in flight is dropped with a log line, not queued or used
+    to interrupt playback.
     """
 
-    def __init__(self, *, room_name: str, session_id: str, case_id: str) -> None:
-        self.room_name = room_name
+    def __init__(
+        self,
+        *,
+        room: "rtc.Room",
+        session_id: str,
+        case_id: str,
+        on_shutdown: Callable[[str], None],
+    ) -> None:
+        self._room = room
         self.session_id = session_id
         self.case_id = case_id
+        self._on_shutdown = on_shutdown
+        self._shutdown_called = False  # idempotency guard - see _trigger_shutdown
         self._turn_lock = asyncio.Lock()
         self._session_factory = get_db_factory()
         self._audio_source: "rtc.AudioSource | None" = None
-        self._room: "rtc.Room | None" = None
 
-    async def run(self) -> None:
+    async def start(self) -> None:
+        """Wire room event handlers and publish the ONE persistent audio
+        track for this job's entire lifetime. The room is already connected
+        (JobContext.connect() was awaited by the caller) - this method never
+        connects/disconnects the room itself; that is the framework's job."""
         import livekit.rtc as rtc
 
-        settings = get_settings()
-        room = rtc.Room()
-        self._room = room
+        room = self._room
 
         @room.on("data_received")
         def _on_data(packet: "rtc.DataPacket") -> None:
@@ -117,7 +142,7 @@ class PocAgentSession:
             try:
                 payload = json.loads(packet.data.decode("utf-8"))
             except Exception:
-                logger.warning("livekit_poc_agent_bad_payload room=%s", self.room_name)
+                logger.warning("livekit_agent_bad_payload session_id=%s", self.session_id)
                 return
             text = str(payload.get("text") or "").strip()
             client_turn_id = str(payload.get("clientTurnId") or "")
@@ -128,52 +153,45 @@ class PocAgentSession:
         @room.on("participant_disconnected")
         def _on_participant_left(participant: object) -> None:
             identity = getattr(participant, "identity", "?")
-            logger.info("livekit_poc_agent_participant_left room=%s identity=%s", self.room_name, identity)
+            logger.info("livekit_agent_participant_left session_id=%s identity=%s", self.session_id, identity)
+            # Only the STUDENT leaving ends the job - never our own agent
+            # identity (see the module docstring: defensive, not load-bearing
+            # today, since a local participant never fires this event for
+            # itself, but explicit per the isolation requirement).
+            if identity == AGENT_PARTICIPANT_IDENTITY:
+                return
+            self._trigger_shutdown("student_left")
 
-        token = _build_agent_token(self.room_name)
-        await room.connect(settings.livekit_url, token)
-        logger.info("livekit_poc_agent_connected room=%s identity=%s", self.room_name, AGENT_IDENTITY)
-
-        # ONE persistent audio source/track for the WHOLE session, published
-        # ONCE - subsequent turns push new frames into the SAME source, never
-        # publish a new track. This is the exact structural property (one
-        # long-lived track vs. a fresh player per turn) the mobile/LiveKit
-        # feasibility audits identified as the point of this experiment.
         self._audio_source = rtc.AudioSource(
             sample_rate=patient_adapter.LIVEKIT_PCM_SAMPLE_RATE, num_channels=1,
         )
         track = rtc.LocalAudioTrack.create_audio_track("patient-voice", self._audio_source)
         await room.local_participant.publish_track(track, rtc.TrackPublishOptions())
-        logger.info("livekit_poc_agent_track_published room=%s", self.room_name)
+        logger.info("livekit_agent_track_published session_id=%s", self.session_id)
 
-        await self._wait_for_stop_signal()
-        await room.disconnect()
-        logger.info("livekit_poc_agent_disconnected room=%s", self.room_name)
-
-    @staticmethod
-    async def _wait_for_stop_signal() -> None:
-        stop_event = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, stop_event.set)
-            except NotImplementedError:
-                pass  # Windows: no add_signal_handler; Ctrl+C still raises KeyboardInterrupt
-        await stop_event.wait()
+    def _trigger_shutdown(self, reason: str) -> None:
+        """Idempotent: a second disconnect event (or the framework's own
+        shutdown callback firing for an unrelated reason) must never raise or
+        double-signal - the job must never be left orphaned OR crash on a
+        redundant cleanup attempt."""
+        if self._shutdown_called:
+            return
+        self._shutdown_called = True
+        logger.info("livekit_agent_job_shutdown session_id=%s reason=%s", self.session_id, reason)
+        self._on_shutdown(reason)
 
     async def _handle_student_turn(self, text: str, client_turn_id: str) -> None:
         if self._turn_lock.locked():
-            logger.info("livekit_poc_agent_turn_dropped_busy client_turn_id=%s", client_turn_id)
+            logger.info("livekit_agent_turn_dropped_busy session_id=%s client_turn_id=%s", self.session_id, client_turn_id)
             return
         async with self._turn_lock:
             await self._run_turn(text, client_turn_id)
 
     async def _run_turn(self, text: str, client_turn_id: str) -> None:
         loop = asyncio.get_running_loop()
-        # Best-effort per-turn latency breakdown for real-device validation
-        # (see the Phase 1 validation plan) - stage name -> monotonic
-        # timestamp, logged as ONE line at the end. Never includes patient
-        # text, audio bytes, or any secret - just stage names and elapsed ms.
+        # Best-effort per-turn latency breakdown for real-device validation -
+        # stage name -> monotonic timestamp, logged as ONE line at the end.
+        # Never includes patient text, audio bytes, or any secret.
         stages: list[tuple[str, float]] = [("turn_received", time.monotonic())]
 
         def on_stage(name: str) -> None:
@@ -188,11 +206,11 @@ class PocAgentSession:
                 None, self._generate_turn_sync, text, client_turn_id, on_stage
             )
         except patient_adapter.LiveKitPocSessionNotFoundError:
-            logger.error("livekit_poc_agent_session_not_found session_id=%s", self.session_id)
+            logger.error("livekit_agent_session_not_found session_id=%s", self.session_id)
             self._send_turn_status(client_turn_id, "failed")
             return
         except Exception:
-            logger.exception("livekit_poc_agent_generation_failed client_turn_id=%s", client_turn_id)
+            logger.exception("livekit_agent_generation_failed session_id=%s client_turn_id=%s", self.session_id, client_turn_id)
             self._send_turn_status(client_turn_id, "failed")
             return
         on_stage("persisted")
@@ -206,10 +224,9 @@ class PocAgentSession:
         if pcm is None:
             # Deliberately NOT falling back to any other TTS here - the POC
             # must surface a real failure, not silently degrade to legacy
-            # browser TTS (that would hide exactly what this experiment is
-            # trying to measure). The frontend surfaces its own diagnostic
-            # error state on receiving this "failed" status (LiveKitTestPage).
-            logger.error("livekit_poc_agent_tts_failed client_turn_id=%s", client_turn_id)
+            # browser TTS. The frontend surfaces its own diagnostic error
+            # state on receiving this "failed" status (LiveKitTestPage).
+            logger.error("livekit_agent_tts_failed session_id=%s client_turn_id=%s", self.session_id, client_turn_id)
             self._send_turn_status(client_turn_id, "failed")
             self._log_turn_timing(client_turn_id, stages)
             return
@@ -219,15 +236,14 @@ class PocAgentSession:
         # reliably infer turn boundaries from element events alone. Signal
         # them explicitly via the data channel so LiveKitTestPage's state
         # machine (THINKING -> SPEAKING -> LISTENING) has an unambiguous
-        # source of truth, matching how the legacy engine's onplay/onended
-        # already drive its own state machine.
+        # source of truth.
         on_stage("first_audio_publish_start")
         self._send_turn_status(client_turn_id, "speaking_started")
         await self._publish_pcm(pcm)
         on_stage("speech_complete")
         self._send_turn_status(client_turn_id, "speaking_ended")
         self._log_turn_timing(client_turn_id, stages)
-        logger.info("livekit_poc_agent_turn_audio_published client_turn_id=%s bytes=%d", client_turn_id, len(pcm))
+        logger.info("livekit_agent_turn_audio_published session_id=%s client_turn_id=%s bytes=%d", self.session_id, client_turn_id, len(pcm))
 
     @staticmethod
     def _log_turn_timing(client_turn_id: str, stages: list[tuple[str, float]]) -> None:
@@ -238,18 +254,16 @@ class PocAgentSession:
             return
         t0 = stages[0][1]
         breakdown = " ".join(f"{name}=+{round((t - t0) * 1000)}ms" for name, t in stages[1:])
-        logger.info("livekit_poc_turn_timing client_turn_id=%s %s", client_turn_id, breakdown)
+        logger.info("livekit_agent_turn_timing client_turn_id=%s %s", client_turn_id, breakdown)
 
     def _send_turn_status(self, client_turn_id: str, status: str) -> None:
-        if self._room is None:
-            return
         payload = json.dumps({"clientTurnId": client_turn_id, "status": status}).encode("utf-8")
         try:
             asyncio.ensure_future(
                 self._room.local_participant.publish_data(payload, reliable=True, topic="patient_turn_status")
             )
         except Exception:
-            logger.exception("livekit_poc_agent_status_publish_failed client_turn_id=%s status=%s", client_turn_id, status)
+            logger.exception("livekit_agent_status_publish_failed session_id=%s client_turn_id=%s status=%s", self.session_id, client_turn_id, status)
 
     def _generate_turn_sync(
         self, text: str, client_turn_id: str, on_stage
@@ -280,27 +294,97 @@ class PocAgentSession:
             await self._audio_source.capture_frame(frame)
 
 
-async def _amain() -> None:
-    parser = argparse.ArgumentParser(description="PT AI Patient - LiveKit POC agent worker (Phase 1 only)")
-    parser.add_argument("--room", required=True, help="Room name, e.g. ptai-poc-<session_id>")
-    parser.add_argument("--session-id", required=True, help="Existing InterviewSession id (POC/admin session)")
-    parser.add_argument("--case-id", default="carly", help="Existing case id (default: carly)")
-    args = parser.parse_args()
+async def _handle_job_request(request: JobRequest) -> None:
+    """Accept every job dispatched to us under our fixed agent_name, joining
+    with a FIXED, predictable identity (AGENT_PARTICIPANT_IDENTITY) rather
+    than the framework's default "agent-<job_id>" - see that constant's
+    docstring for why."""
+    await request.accept(identity=AGENT_PARTICIPANT_IDENTITY, name="PT AI Patient")
 
+
+async def entrypoint(ctx: JobContext) -> None:
+    """One call per accepted job = one student interview. Everything here is
+    scoped to THIS job - no module-level dict/cache keyed by session_id, no
+    state that could leak between two concurrent interviews (see the module
+    docstring's isolation notes)."""
+    parsed = parse_job_metadata(ctx.job.metadata)
+    if parsed is None:
+        logger.error("livekit_agent_job_missing_metadata job_id=%s", ctx.job.id)
+        ctx.shutdown(reason="missing_or_invalid_metadata")
+        return
+    session_id, case_id = parsed
+
+    # SUBSCRIBE_NONE: this worker never processes the student's raw mic audio
+    # (transcription happens client-side via the browser's Web Speech API and
+    # arrives as a "student_text" data message) - subscribing to audio tracks
+    # here would be pure waste.
+    await ctx.connect(auto_subscribe=AutoSubscribe.SUBSCRIBE_NONE)
+    logger.info(
+        "livekit_agent_job_connected job_id=%s session_id=%s case_id=%s room=%s",
+        ctx.job.id, session_id, case_id, ctx.room.name,
+    )
+
+    done = asyncio.Event()
+
+    def _on_session_shutdown(reason: str) -> None:
+        ctx.shutdown(reason=reason)
+        done.set()
+
+    async def _on_ctx_shutdown(reason: str) -> None:
+        # Safety net: if the framework itself ends the job for a reason our
+        # own participant_disconnected handler never saw (e.g. a drain/
+        # timeout), make sure entrypoint() still returns instead of hanging
+        # forever on done.wait().
+        done.set()
+
+    ctx.add_shutdown_callback(_on_ctx_shutdown)
+
+    poc_session = PocAgentSession(
+        room=ctx.room, session_id=session_id, case_id=case_id, on_shutdown=_on_session_shutdown,
+    )
+    await poc_session.start()
+
+    # Block here for the job's entire lifetime - returning from entrypoint()
+    # ends the job, so this await is what keeps the interview's room/track
+    # alive until the student leaves (or the framework shuts us down).
+    await done.wait()
+
+
+def _build_worker_options() -> WorkerOptions:
     settings = get_settings()
-    if not (settings.livekit_url and settings.livekit_api_key and settings.livekit_api_secret):
+    if not (
+        settings.livekit_poc_enabled
+        and settings.livekit_url
+        and settings.livekit_api_key
+        and settings.livekit_api_secret
+    ):
         raise SystemExit(
-            "LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET are not set. "
-            "This worker will not start without real LiveKit Cloud credentials - "
-            "see backend/.env.example and the Phase 1 POC report."
+            "LIVEKIT_POC_ENABLED / LIVEKIT_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET are "
+            "not fully set. This worker will not start without real LiveKit Cloud "
+            "credentials AND LIVEKIT_POC_ENABLED=true - see backend/.env.example."
         )
-
-    # Timestamped to match app/core/logging.py's format - lets real-device
-    # testing correlate agent log lines with backend/frontend timestamps.
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s")
-    session = PocAgentSession(room_name=args.room, session_id=args.session_id, case_id=args.case_id)
-    await session.run()
+    return WorkerOptions(
+        entrypoint_fnc=entrypoint,
+        request_fnc=_handle_job_request,
+        # Explicit dispatch ONLY - setting agent_name means we are NEVER
+        # auto-dispatched to a room we weren't explicitly invited to (see
+        # livekit_token_service.py's RoomAgentDispatch, the only caller that
+        # can invite this agent, gated by the SAME require_admin +
+        # user_can_access_session ownership check every other session-scoped
+        # endpoint uses).
+        agent_name=settings.livekit_agent_name,
+        # Explicit, not the framework's own os.environ fallback - single
+        # source of truth stays app.core.config.get_settings(), exactly like
+        # every other provider credential in this codebase.
+        ws_url=settings.livekit_url,
+        api_key=settings.livekit_api_key,
+        api_secret=settings.livekit_api_secret,
+    )
 
 
 if __name__ == "__main__":
-    asyncio.run(_amain())
+    # Persistent process - started ONCE by systemd (ptai-livekit-agent.service,
+    # see docs/DEPLOYMENT.md), never per-interview, never with --room/
+    # --session-id/--case-id. Run via:
+    #   python -m app.livekit_agent.worker start
+    cli.run_app(_build_worker_options())

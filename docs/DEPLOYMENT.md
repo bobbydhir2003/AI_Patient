@@ -164,3 +164,69 @@ data only - **do not state "170 concurrent students supported" until a real
 run at that level comes back PASS or PASS_WITH_WARNING**; until then, describe
 the architecture as "designed for / being validated for 170 concurrent
 students."
+
+## LiveKit POC agent worker (Phase 2, optional, behind LIVEKIT_POC_ENABLED)
+
+Not part of the production interview path - only relevant if the LiveKit
+voice POC (`app/livekit_agent/`, `app/api/livekit.py`) is enabled. This is a
+**second, independent systemd service** alongside `ptai-backend.service`
+above - never started inside Uvicorn, never per-interview. It registers ONCE
+with LiveKit and receives one job per student interview automatically (see
+`app/livekit_agent/worker.py`'s module docstring for the full design) - there
+is no `--room`/`--session-id`/`--case-id` to pass; those now arrive as job
+metadata from LiveKit's own dispatch mechanism.
+
+```ini
+# /etc/systemd/system/ptai-livekit-agent.service
+[Unit]
+Description=PT AI Patient Simulator - LiveKit Agent Worker
+After=network.target ptai-backend.service
+
+[Service]
+Type=simple
+User=ptai
+WorkingDirectory=/srv/ptai/backend
+EnvironmentFile=/srv/ptai/backend/.env
+ExecStart=/srv/ptai/backend/.venv/bin/python -m app.livekit_agent.worker start
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Notes:
+- **Same `.env` file** as `ptai-backend.service` - the worker needs
+  `LIVEKIT_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`/`LIVEKIT_POC_ENABLED`
+  (LiveKit), `REDIS_URL` (so `interview_slot()`/`tts_slot()` share the SAME
+  fleet-wide semaphores the FastAPI workers use - this is not optional; a
+  worker without Redis configured falls back to a per-process limit, which
+  is unsafe the moment more than one worker process exists), `DATABASE_URL`
+  (same Postgres, so transcripts land in the same place production writes
+  to), `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`.
+- `start` is the LiveKit Agents framework's own CLI subcommand (from
+  `livekit-agents`'s `cli.run_app`) - not a custom flag of ours. It is
+  required; running the module with no subcommand does nothing.
+- The worker fails closed at startup (`SystemExit`, non-zero exit code) if
+  `LIVEKIT_POC_ENABLED` is not `true` or any of the three LiveKit credentials
+  are missing - `Restart=on-failure` will keep retrying every 5s, which is
+  intentionally harmless (it just keeps failing closed) until an operator
+  fixes the `.env`, not a crash loop that does anything unsafe.
+- `Restart=on-failure` also covers a whole-process crash: on restart the
+  worker simply re-registers with LiveKit and resumes accepting jobs. A job
+  that was mid-flight when the process died is not silently resumed - the
+  student sees the same "no response from the agent" thinking-timeout error
+  the frontend already handles explicitly (see `livekitPocEngine.ts`), and
+  can speak again once the worker is back.
+- Per-job crash isolation is handled by the Agents framework itself
+  (`JobExecutorType.PROCESS`, the default `WorkerOptions` kept unchanged in
+  this codebase) - one interview's job process crashing does not affect any
+  other concurrent interview's job or the worker process itself.
+- Scaling: one worker process can serve many concurrent interviews (each
+  accepted job runs in the framework's own isolated subprocess pool). If load
+  testing shows one process is not enough, run a second
+  `ptai-livekit-agent.service`-style unit (or bump its own internal
+  concurrency settings) - this is additive, matching how `APP_WORKERS` is
+  scaled for the FastAPI backend above. Do not assume a specific number
+  without measuring it.

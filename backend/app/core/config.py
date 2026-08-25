@@ -124,7 +124,7 @@ class Settings(BaseSettings):
     # if the internal connection pool is somehow still exhausted.
     elevenlabs_pool_timeout_seconds: float = 10.0
 
-    # --- LiveKit (Phase 1 POC only - see app/livekit_agent/, app/api/livekit.py) ---
+    # --- LiveKit (Phase 1/2 POC only - see app/livekit_agent/, app/api/livekit.py) ---
     # NOT used by any production interview/voice path. All blank/disabled by
     # default; the token endpoint reports itself unavailable until an operator
     # supplies real LiveKit Cloud credentials via environment variables. The
@@ -135,6 +135,13 @@ class Settings(BaseSettings):
     livekit_poc_enabled: bool = False
     # How long a minted POC room-join token remains valid.
     livekit_token_ttl_minutes: int = 60
+    # Fixed, server-controlled dispatch name (Phase 2) - NEVER derived from
+    # client/request input. Both livekit_token_service.py's explicit-dispatch
+    # RoomAgentDispatch and livekit_agent/worker.py's WorkerOptions(agent_name=)
+    # must reference the SAME value or dispatch silently never reaches the
+    # worker (a mismatch is not a security issue, just a "nothing happens"
+    # bug) - changing this requires updating both sides together.
+    livekit_agent_name: str = "ptai-patient-agent"
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
