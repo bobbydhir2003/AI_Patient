@@ -37,6 +37,7 @@ import { PatientVoicesPage } from "./pages/admin/system/PatientVoicesPage";
 import { AiUsageCostPage } from "./pages/admin/system/AiUsageCostPage";
 import { ApiCredentialsPage } from "./pages/admin/system/ApiCredentialsPage";
 import { SystemHealthPage } from "./pages/admin/system/subpages";
+import { LiveKitTestPage } from "./pages/admin/system/LiveKitTestPage";
 import { ProtectedRoute } from "./portal/ProtectedRoute";
 
 function App() {
@@ -120,6 +121,8 @@ function App() {
           <Route path="system/config" element={<AiConfigurationPage />} />
           <Route path="system/credentials" element={<ApiCredentialsPage />} />
           <Route path="system/health" element={<SystemHealthPage />} />
+          {/* Phase 1 LiveKit POC only - admin/test-gated, does not touch /interview */}
+          <Route path="system/livekit-poc" element={<LiveKitTestPage />} />
         </Route>
       </Routes>
       {!isHomePage && !isAdminArea && <AppFooter />}

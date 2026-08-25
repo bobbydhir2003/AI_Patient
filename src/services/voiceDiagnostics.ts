@@ -1,7 +1,7 @@
 /**
  * Production-safe patient-voice diagnostics.
  *
- * Two jobs, both metadata-only:
+ * Three jobs, all metadata-only:
  *  1. Classified event logging so the NEXT incident can be diagnosed from
  *     ordinary browser logs — no need to reproduce with real students. Failures
  *     and fallbacks log at warn level (visible in production); routine
@@ -9,11 +9,20 @@
  *  2. Lightweight in-memory counters (ElevenLabs requested/succeeded/failed,
  *     playback failed, browser fallback used) readable via getVoiceCounters()
  *     for a quick health snapshot.
+ *  3. A small, fire-and-forget POST to the backend (POST /api/voice/telemetry)
+ *     for the SAME events, so a mobile robotic-fallback incident can finally
+ *     be correlated server-side with the matching tts_request_start/complete
+ *     log line via correlationId - closing the "console-only" observability
+ *     gap. Never awaited by callers, never retried, never throws, never
+ *     blocks or delays playback in any way.
  *
- * NEVER logs: patient text, API keys, auth tokens, or any transcript content.
- * Only metadata (caseId, sentence index, correlationId, HTTP status, DOM error
- * name/message, fallback reason) is emitted.
+ * NEVER logs (locally or remotely): patient text, API keys, auth tokens, or
+ * any transcript content. Only metadata (caseId, sentence index,
+ * correlationId, HTTP status, DOM error name/message, fallback reason) is
+ * emitted.
  */
+import { API_BASE_URL, withAuthHeaders } from "./api";
+import { deviceCategory } from "./mobileAudio";
 
 export type VoiceEvent =
   | "tts_requested"
@@ -43,7 +52,41 @@ export type VoiceEvent =
   | "audio_play_started"
   | "audio_play_success"
   | "audio_play_failed"
-  | "browser_fallback_started";
+  | "browser_fallback_started"
+  // --- 409 (no TTS capacity slot) bounded single retry. ElevenLabs was never
+  // contacted for a 409, so this retry costs no provider capacity - see
+  // TTS_CAPACITY_RETRY_DELAY_MS in patientVoiceService.ts. Exactly one retry,
+  // never more; every other failure (502/5xx/timeout/empty) is NOT retried
+  // here since the backend already exhausted its own provider retry loop.
+  | "tts_capacity_retry_scheduled"
+  | "tts_capacity_retry_started"
+  | "tts_capacity_retry_succeeded"
+  | "tts_capacity_retry_failed"
+  // --- Mobile playback strategy + user-gesture recovery (see the mobile
+  // voice reliability audit and patientVoiceService.ts). "mobile_buffered_first"
+  // fires once when a device (currently: iOS) is routed to buffered playback
+  // instead of progressive MediaSource. The recovery events fire only when
+  // ElevenLabs generated valid audio but playback itself failed - never for a
+  // confirmed generation failure (409-exhausted/502/5xx/timeout/empty).
+  | "mobile_buffered_first"
+  | "audio_user_gesture_recovery_offered"
+  | "audio_user_gesture_recovery_clicked"
+  | "audio_user_gesture_recovery_success"
+  | "audio_user_gesture_recovery_failed"
+  // --- Phase 1 LiveKit POC only (src/services/livekit/, LiveKitTestPage) -
+  // NOT emitted by the production interview/voice path. Mirrors the same
+  // metadata-only, no-patient-text discipline as every event above.
+  | "livekit_room_connecting"
+  | "livekit_room_connected"
+  | "livekit_room_disconnected"
+  | "livekit_room_reconnecting"
+  | "livekit_room_reconnected"
+  | "livekit_mic_published"
+  | "livekit_patient_track_subscribed"
+  | "livekit_agent_started"
+  | "livekit_patient_audio_started"
+  | "livekit_patient_audio_completed"
+  | "livekit_patient_audio_failed";
 
 /** Stage-level failure category. See file header for how these map to the
  * report categories STATUS_PROBE_TRANSIENT / STATUS_CONFIRMED_UNAVAILABLE /
@@ -78,6 +121,10 @@ export interface VoiceEventMeta {
   path?: string;
   /** Stage-level failure classification (see VoiceFailureCategory). */
   category?: VoiceFailureCategory;
+  /** Elapsed milliseconds for this event, when relevant (e.g. time from a
+   * LiveKit turn being sent to the patient's first audio). Bounded/validated
+   * server-side (VoiceTelemetryEvent.duration_ms) - never patient content. */
+  durationMs?: number;
 }
 
 export interface VoiceCounters {
@@ -123,6 +170,7 @@ const COUNTER_FOR: Partial<Record<VoiceEvent, keyof VoiceCounters>> = {
   audio_play_failed: "playbackFailed",
   browser_fallback_started: "browserFallback",
   voice_status_failed: "fetchFailed",
+  audio_user_gesture_recovery_failed: "playbackFailed",
 };
 
 /** Events surfaced at warn level in production (diagnostic signal for incidents).
@@ -145,6 +193,9 @@ const WARN_EVENTS = new Set<VoiceEvent>([
   "audio_decode_failed",
   "audio_play_failed",
   "browser_fallback_started",
+  "tts_capacity_retry_failed",
+  "audio_user_gesture_recovery_failed",
+  "livekit_patient_audio_failed",
 ]);
 
 function isDev(): boolean {
@@ -167,6 +218,62 @@ export function describeError(err: unknown): { errorName?: string; errorMessage?
   return { errorMessage: typeof err === "string" ? err : undefined };
 }
 
+/** Events the backend schema (VoiceTelemetryEvent) actually accepts. Kept as
+ * an explicit allowlist (mirroring the backend's Literal[...] validation) so
+ * a locally-added frontend-only event never produces a noisy 422 in the
+ * network tab - it just silently isn't shipped until the backend list is
+ * updated to match. */
+const TELEMETRY_EVENTS = new Set<VoiceEvent>([
+  "voice_status_ok", "voice_status_failed", "voice_status_confirmed_unavailable",
+  "tts_requested", "tts_request_started", "tts_succeeded", "tts_fetch_failed",
+  "tts_http_success", "tts_http_failed", "tts_empty_audio",
+  "audio_blob_ready", "audio_decode_failed", "audio_play_started",
+  "audio_play_success", "audio_play_failed",
+  "mobile_buffered_first",
+  "audio_user_gesture_recovery_offered", "audio_user_gesture_recovery_clicked",
+  "audio_user_gesture_recovery_success", "audio_user_gesture_recovery_failed",
+  "browser_fallback_started",
+  "tts_capacity_retry_scheduled", "tts_capacity_retry_started",
+  "tts_capacity_retry_succeeded", "tts_capacity_retry_failed",
+  "tts_cancelled",
+  "livekit_room_connecting", "livekit_room_connected", "livekit_room_disconnected",
+  "livekit_room_reconnecting", "livekit_room_reconnected", "livekit_mic_published",
+  "livekit_patient_track_subscribed", "livekit_agent_started",
+  "livekit_patient_audio_started", "livekit_patient_audio_completed",
+  "livekit_patient_audio_failed",
+]);
+
+/**
+ * Fire-and-forget: ship this event to POST /api/voice/telemetry so it can be
+ * correlated server-side. Never awaited, never retried, swallows every
+ * failure silently (a telemetry outage must never be visible to a student or
+ * affect playback in any way). `keepalive` lets the request survive a page
+ * navigation immediately after a turn ends.
+ */
+function sendTelemetry(event: VoiceEvent, meta: VoiceEventMeta): void {
+  if (!TELEMETRY_EVENTS.has(event)) return;
+  try {
+    const body = JSON.stringify({
+      event,
+      correlationId: meta.correlationId ?? "",
+      caseId: meta.caseId ?? "",
+      status: meta.status ?? null,
+      category: meta.category ?? "",
+      deviceCategory: deviceCategory(),
+      playbackMethod: meta.path ?? "",
+      durationMs: meta.durationMs ?? null,
+    });
+    void fetch(`${API_BASE_URL}/api/voice/telemetry`, {
+      method: "POST",
+      headers: withAuthHeaders({ "Content-Type": "application/json" }),
+      body,
+      keepalive: true,
+    }).catch(() => undefined);
+  } catch {
+    /* telemetry must never affect playback */
+  }
+}
+
 /** Record a classified voice event (metadata only). Never throws. */
 export function logVoiceEvent(event: VoiceEvent, meta: VoiceEventMeta = {}): void {
   const key = COUNTER_FOR[event];
@@ -182,6 +289,7 @@ export function logVoiceEvent(event: VoiceEvent, meta: VoiceEventMeta = {}): voi
   } catch {
     /* logging must never affect playback */
   }
+  sendTelemetry(event, meta);
 }
 
 /** Snapshot of the voice counters (for a quick health check / diagnostics). */

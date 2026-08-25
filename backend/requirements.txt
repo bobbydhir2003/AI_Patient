@@ -14,3 +14,9 @@ PyJWT>=2.8,<3.0
 redis>=5.0,<6.0
 pytest>=8.0,<9.0
 httpx>=0.27,<1.0
+# LiveKit POC (Phase 1) only - see backend/app/livekit_agent/. Not imported by
+# any production interview/voice path. livekit-api mints room-scoped tokens
+# (used by app/api/livekit.py); livekit (rtc module) is the room-join/audio-
+# publish client used only by the standalone agent worker (livekit_agent/worker.py).
+livekit>=1.1,<2.0
+livekit-api>=1.2,<2.0

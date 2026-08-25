@@ -19,6 +19,7 @@ from app.api import (
     cases,
     health,
     interviews,
+    livekit,
     queue as queue_api,
     sessions,
     students,
@@ -126,6 +127,9 @@ def create_app() -> FastAPI:
     _app.include_router(queue_api.router, prefix="/api")
     _app.include_router(assessments.router, prefix="/api")
     _app.include_router(voice.router, prefix="/api")
+    # Phase 1 LiveKit POC only (admin-gated) - additive, does not alter any
+    # route above. See app/api/livekit.py.
+    _app.include_router(livekit.router, prefix="/api")
 
     if settings.auto_create_tables:
         from app.database.base import Base

@@ -180,6 +180,18 @@ class VoiceSynthesisError(AppError):
         super().__init__("The patient voice could not be generated right now.")
 
 
+class LiveKitNotConfiguredError(AppError):
+    """Phase 1 LiveKit POC only. Raised when LIVEKIT_URL/API_KEY/API_SECRET or
+    the livekit_poc_enabled flag are not set - never in the production voice
+    path, which does not use LiveKit at all."""
+
+    status_code = 503
+    code = "livekit_not_configured"
+
+    def __init__(self) -> None:
+        super().__init__("The LiveKit POC is not configured on this server.")
+
+
 class SessionNotCompletedError(AppError):
     status_code = 409
     code = "session_not_completed"

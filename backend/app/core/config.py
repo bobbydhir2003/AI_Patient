@@ -124,6 +124,18 @@ class Settings(BaseSettings):
     # if the internal connection pool is somehow still exhausted.
     elevenlabs_pool_timeout_seconds: float = 10.0
 
+    # --- LiveKit (Phase 1 POC only - see app/livekit_agent/, app/api/livekit.py) ---
+    # NOT used by any production interview/voice path. All blank/disabled by
+    # default; the token endpoint reports itself unavailable until an operator
+    # supplies real LiveKit Cloud credentials via environment variables. The
+    # API secret stays backend-only, exactly like ELEVENLABS_API_KEY above.
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    livekit_poc_enabled: bool = False
+    # How long a minted POC room-join token remains valid.
+    livekit_token_ttl_minutes: int = 60
+
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     log_level: str = "INFO"
