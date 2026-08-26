@@ -200,7 +200,7 @@ globalThis.fetch = async (url, init) => {
   };
 };
 
-const { LiveKitPocEngine } = await import(
+const { LiveKitPocEngine, fetchAdminPocLiveKitToken, fetchStudentLiveKitToken } = await import(
   path.join(buildDir, "livekit", "livekitPocEngine.js")
 );
 
@@ -433,4 +433,185 @@ test("STATE: 10 consecutive turns - fresh recognizer per cycle, no dupes, no sta
   assert.equal(engine.getTurnCount(), 10, "turn count must be unaffected by a stale recognizer firing late");
 
   await engine.end();
+});
+
+// ===========================================================================
+// Phase B: token-source injection (admin POC vs real student InterviewPage)
+// and the public sendText() entry point (typed input while LiveKit mode is
+// active - see useLiveKitInterviewVoice.ts's submitExternal).
+// ===========================================================================
+
+test("PHASE B: fetchAdminPocLiveKitToken posts to the admin-only endpoint (regression guard for LiveKitTestPage.tsx)", async () => {
+  fetchCalls.length = 0;
+  await fetchAdminPocLiveKitToken("session-admin-1");
+  const calls = fetchCalls.filter((c) => c.url.includes("/livekit/token") || c.url.includes("livekit-token"));
+  assert.equal(calls.length, 1);
+  assert.ok(calls[0].url.endsWith("/api/livekit/token"), calls[0].url);
+  assert.equal(JSON.parse(calls[0].init.body).sessionId, "session-admin-1");
+});
+
+test("PHASE B: fetchStudentLiveKitToken posts to the student-safe interviews endpoint, never the admin one", async () => {
+  fetchCalls.length = 0;
+  await fetchStudentLiveKitToken("session-student-1");
+  const calls = fetchCalls.filter((c) => c.url.includes("/livekit/token") || c.url.includes("livekit-token"));
+  assert.equal(calls.length, 1);
+  assert.ok(
+    calls[0].url.endsWith("/api/interviews/session-student-1/livekit-token"),
+    calls[0].url,
+  );
+  assert.ok(!calls[0].url.includes("/api/livekit/token"), "must never hit the admin-only endpoint");
+});
+
+test("PHASE B: engine.start() uses an INJECTED token fetcher instead of the default admin one - same engine serves both POC and real interview", async () => {
+  createdRooms.length = 0;
+  fetchCalls.length = 0;
+
+  const injectedCalls = [];
+  const customFetchToken = async (sessionId) => {
+    injectedCalls.push(sessionId);
+    return {
+      token: "fake.jwt.token", url: "wss://fake-project.livekit.cloud",
+      roomName: `ptai-interview-${sessionId}`, participantIdentity: "user-1",
+    };
+  };
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("real-session-1", customFetchToken);
+  await flushMicrotasks();
+
+  assert.deepEqual(injectedCalls, ["real-session-1"], "the injected fetcher must be called, not the default");
+  assert.deepEqual(rec.roomNames, ["ptai-interview-real-session-1"]);
+  // The global fetch mock (used by the DEFAULT admin fetcher) must never
+  // have been hit for the token itself - only the injected function was.
+  const tokenLikeCalls = fetchCalls.filter((c) => c.url.includes("livekit-token") || c.url.includes("/livekit/token"));
+  assert.equal(tokenLikeCalls.length, 0);
+
+  await engine.end();
+});
+
+test("PHASE B: a failing injected token fetcher still surfaces a clean error state (not just the default fetcher's error path)", async () => {
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const failingFetch = async () => {
+    throw new Error("network down");
+  };
+  await engine.start("real-session-2", failingFetch);
+  assert.equal(engine.getState(), "error");
+  assert.equal(rec.errors.length, 1);
+});
+
+test("PHASE B: sendText() is public and sends student_text while listening (typed input, no speech required)", async () => {
+  createdRooms.length = 0;
+  fetchCalls.length = 0;
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-typed-1");
+  await flushMicrotasks();
+  const room = createdRooms[0];
+
+  await engine.sendText("What brings you in today?");
+  await flushMicrotasks();
+
+  const studentTextCalls = room.publishedData.filter((p) => p.options.topic === "student_text");
+  assert.equal(studentTextCalls.length, 1);
+  const payload = JSON.parse(new TextDecoder().decode(studentTextCalls[0].payload));
+  assert.equal(payload.text, "What brings you in today?");
+  assert.equal(engine.getState(), "thinking");
+
+  await engine.end();
+});
+
+test("PHASE B: sendText() is a no-op while not listening (thinking/speaking) - no barge-in via typed input either", async () => {
+  createdRooms.length = 0;
+  fetchCalls.length = 0;
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-typed-2");
+  await flushMicrotasks();
+  const room = createdRooms[0];
+
+  await engine.sendText("First question");
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "thinking");
+  const countAfterFirst = room.publishedData.filter((p) => p.options.topic === "student_text").length;
+
+  // Attempting a SECOND send while still "thinking" must be dropped, exactly
+  // like a spoken utterance would be (see the recognizer's own guard).
+  await engine.sendText("Second question while still thinking");
+  await flushMicrotasks();
+  const countAfterSecond = room.publishedData.filter((p) => p.options.topic === "student_text").length;
+  assert.equal(countAfterSecond, countAfterFirst, "a typed message sent while not listening must be dropped");
+
+  await engine.end();
+});
+
+// ---------------------------------------------------------------------------
+// Phase B: useLiveKitInterviewVoice.ts must never reference the legacy
+// playback stack - same static-scan technique already proven above for
+// livekitPocEngine.ts itself.
+// ---------------------------------------------------------------------------
+test("STATIC: useLiveKitInterviewVoice.ts source never references speechSynthesis or patientVoiceService", () => {
+  const rawSource = fs.readFileSync(
+    path.join(repoRoot, "src", "hooks", "useLiveKitInterviewVoice.ts"),
+    "utf8",
+  );
+  const source = rawSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  for (const forbidden of ["speechSynthesis.", "SpeechSynthesisUtterance", "patientVoiceService", "new MediaSource(", "new Audio("]) {
+    assert.ok(!source.includes(forbidden), `useLiveKitInterviewVoice.ts must never use "${forbidden}"`);
+  }
+  // Positive control: it DOES wrap the real, shared LiveKitPocEngine.
+  assert.ok(source.includes("LiveKitPocEngine"));
+});
+
+// ---------------------------------------------------------------------------
+// Phase B: InterviewPage.tsx's engine-selection guards, checked statically.
+// This is a TEXT-LEVEL regression guard (this project has no React
+// component-rendering test harness - see the Phase B report), not a
+// behavioral proof that the guards execute correctly at runtime. It exists
+// to catch an accidental removal of a guard, not to replace real-device/
+// manual verification of the actual rendered UI.
+// ---------------------------------------------------------------------------
+test("STATIC (regression guard, not behavioral proof): InterviewPage.tsx textually guards every patientVoiceService call site behind voiceEngine !== \"livekit\"", () => {
+  const source = fs.readFileSync(
+    path.join(repoRoot, "src", "pages", "InterviewPage.tsx"),
+    "utf8",
+  );
+
+  // Every cancelPatientSpeech() call must be preceded on the SAME line by
+  // the voiceEngine guard, EXCEPT the "Speak patient replies" checkbox
+  // toggle - that call site sits inside the Audio Settings panel, which is
+  // itself entirely hidden when voiceEngine === "livekit" (checked below),
+  // so it can never execute in LiveKit mode despite having no guard of its
+  // own on that line.
+  const UNGUARDED_BUT_UNREACHABLE = "if (!e.target.checked) cancelPatientSpeech();";
+  const cancelLines = source.split("\n").map((l) => l.trim()).filter((l) => l.includes("cancelPatientSpeech()"));
+  assert.ok(cancelLines.length >= 3, "expected multiple cancelPatientSpeech() call sites");
+  for (const line of cancelLines) {
+    if (line === UNGUARDED_BUT_UNREACHABLE) continue;
+    assert.ok(
+      line.includes('voiceEngine !== "livekit"'),
+      `cancelPatientSpeech() call site must be guarded: "${line}"`,
+    );
+  }
+
+  // The typed-send speakPatientResponse() call must be gated in the same
+  // condition as the other legacy-only checks.
+  const typedSendGuardIndex = source.indexOf('voiceEnabled && ttsAvailable && caseId && voiceEngine !== "livekit"');
+  assert.ok(typedSendGuardIndex !== -1, "typed-send speakPatientResponse() must be gated on voiceEngine !== \"livekit\"");
+
+  // The legacy recovery banner must be gated the same way.
+  assert.ok(
+    source.includes('recoveryAction && voiceEngine !== "livekit"'),
+    "the legacy recovery banner must be hidden when voiceEngine === \"livekit\"",
+  );
+
+  // The Audio Settings panel (speak-replies/auto-interrupt/sensitivity - all
+  // legacy-only concepts) must also be hidden in LiveKit mode.
+  assert.ok(
+    source.includes('(ttsAvailable || voice.supported) && voiceEngine !== "livekit"'),
+    "the legacy-only Audio Settings panel must be hidden when voiceEngine === \"livekit\"",
+  );
 });

@@ -204,26 +204,35 @@ export function fetchVoiceStatus(caseId: string): Promise<VoiceStatus> {
   return request<VoiceStatus>(`/voice/status/${encodeURIComponent(caseId)}`);
 }
 
+/** Which voice architecture the real InterviewPage should use. Always
+ * narrowed to exactly these two values on the client too (see
+ * fetchInterviewConfig) - an unrecognized backend value fails safe to
+ * "legacy", mirroring Settings.voice_engine's own backend-side validator. */
+export type VoiceEngine = "legacy" | "livekit";
+
 /** Student-safe interview feature flags (streaming patient responses). */
 export interface InterviewConfig {
   streamingEnabled: boolean;
   sentencePipeliningEnabled: boolean;
+  voiceEngine: VoiceEngine;
 }
 
 let interviewConfigCache: InterviewConfig | null = null;
 
 /** Fetch (and cache) the backend's interview feature flags. Unknown/failed
- * fetches report streaming disabled so the stable path is always the default. */
+ * fetches report streaming disabled AND voiceEngine "legacy" so the stable,
+ * proven path is always the default when config can't be reached. */
 export async function fetchInterviewConfig(): Promise<InterviewConfig> {
   if (interviewConfigCache) return interviewConfigCache;
   try {
-    const cfg = await request<InterviewConfig>("/interviews/config");
+    const cfg = await request<InterviewConfig & { voiceEngine?: unknown }>("/interviews/config");
     interviewConfigCache = {
       streamingEnabled: cfg.streamingEnabled === true,
       sentencePipeliningEnabled: cfg.sentencePipeliningEnabled === true,
+      voiceEngine: cfg.voiceEngine === "livekit" ? "livekit" : "legacy",
     };
   } catch {
-    return { streamingEnabled: false, sentencePipeliningEnabled: false }; // not cached
+    return { streamingEnabled: false, sentencePipeliningEnabled: false, voiceEngine: "legacy" }; // not cached
   }
   return interviewConfigCache;
 }

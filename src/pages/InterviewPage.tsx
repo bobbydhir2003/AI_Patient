@@ -8,6 +8,8 @@ import {
   fetchSession,
   fetchSessionTurns,
   sendStudentMessage,
+  type ApiSession,
+  type VoiceEngine,
 } from "../services/api";
 import { classifyInterviewInitError } from "../services/interviewErrors";
 import {
@@ -24,6 +26,7 @@ import type { AudioSetup, InterruptionSensitivity } from "../services/voiceActiv
 import { unlockAudioPlayback } from "../services/audioUnlock";
 import { audioSetupOptions, autoInterruptNote } from "../services/mobileAudio";
 import { useVoiceConversation } from "../hooks/useVoiceConversation";
+import { useLiveKitInterviewVoice } from "../hooks/useLiveKitInterviewVoice";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { AppImage } from "../components/common/AppImage";
 import { isUsableTranscript, type VoiceConversationState } from "../hooks/voiceStateMachine";
@@ -43,6 +46,24 @@ import type {
   PatientExchange,
 } from "../types/interview";
 import styles from "./InterviewPage.module.css";
+
+/** Shared by the initial "resume an in-progress session" restore AND, in
+ * LiveKit mode, the per-turn refresh after the agent completes a turn - the
+ * backend transcript is the single source of truth in both cases. */
+function mapSessionMessages(session: ApiSession): ConversationMessage[] {
+  return session.messages.map((m) => ({
+    id: m.id,
+    sender: m.sender,
+    text: m.text,
+    speakerId: m.speakerId,
+    speakerLabel: m.speakerLabel,
+    saveStatus: "saved" as const,
+    timestamp: new Date(m.timestamp).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+  }));
+}
 
 const PROGRESS_STEPS = ["Case Introduction", "Interview", "Complete"];
 
@@ -125,6 +146,22 @@ export function InterviewPage() {
     setMessages,
     addMessage,
   } = useAppContext();
+
+  // Phase B: which voice architecture to use. Fetched ONCE at mount (not
+  // tied to case/session lifecycle) and defaults to "legacy" until the fetch
+  // resolves - fetchInterviewConfig itself ALSO fails safe to "legacy" on any
+  // network/parse error, so this can never silently start in an unintended
+  // mode. Chosen once per page load, never switched mid-conversation.
+  const [voiceEngine, setVoiceEngine] = useState<VoiceEngine>("legacy");
+  useEffect(() => {
+    let cancelled = false;
+    void fetchInterviewConfig().then((config) => {
+      if (!cancelled) setVoiceEngine(config.voiceEngine);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   // Specific message for non-connectivity init failures (403/401/5xx). When set
@@ -367,11 +404,15 @@ export function InterviewPage() {
   // It routes every recognized question through performExchange above and
   // never generates patient text itself.
   // ------------------------------------------------------------------
-  const voice = useVoiceConversation({
+  const legacyVoice = useVoiceConversation({
     patientName: patientCase?.name ?? "the patient",
     caseId: caseId ?? "",
     sessionId: activeInterview?.sessionId ?? null,
-    enabled: sessionReady,
+    // Only actually runs when the legacy engine is selected - see the
+    // "enabled" gate on the LiveKit hook below for the mirror-image guard.
+    // Both hooks are called unconditionally every render (rules of hooks);
+    // exactly one of them is ever allowed to actually start.
+    enabled: sessionReady && voiceEngine === "legacy",
     speakReplies: voiceEnabled,
     autoInterrupt,
     audioSetup,
@@ -381,6 +422,34 @@ export function InterviewPage() {
     onPlaybackRecoveryAvailable: handleRecoveryAvailable,
     onPlaybackRecoveryResolved: handleRecoveryResolved,
   });
+
+  // LiveKit mode: patient audio comes ONLY from the LiveKit RemoteAudioTrack
+  // (see useLiveKitInterviewVoice.ts / livekitPocEngine.ts) - patientVoiceService
+  // is never constructed or called anywhere in this branch. Patient TEXT is
+  // never invented client-side: onTurnCompleted re-fetches the session's
+  // authoritative transcript (the SAME rows the agent already persisted via
+  // patient_adapter.py), reusing the exact mapSessionMessages() helper the
+  // "resume an in-progress session" path above already uses.
+  const liveKitVoice = useLiveKitInterviewVoice({
+    sessionId: activeInterview?.sessionId ?? null,
+    enabled: sessionReady && voiceEngine === "livekit",
+    onInterim: setDraft,
+    onTurnCompleted: () => {
+      if (!activeInterview) return;
+      void fetchSession(activeInterview.sessionId)
+        .then((session) => setMessages(mapSessionMessages(session)))
+        .catch((err) => {
+          if (import.meta.env.DEV) console.error("Could not refresh transcript after LiveKit turn:", err);
+        });
+    },
+  });
+
+  // Exactly ONE engine drives the UI below - chosen once per page load (see
+  // the voiceEngine fetch above), never switched mid-conversation. Both
+  // hooks expose a compatible shape so the rest of this component (badges,
+  // ConversationControl, the mic toggle, End Interview) needs no further
+  // branching beyond this one line.
+  const voice = voiceEngine === "livekit" ? liveKitVoice : legacyVoice;
   const voiceRef = useRef(voice);
   voiceRef.current = voice;
 
@@ -393,7 +462,7 @@ export function InterviewPage() {
     let cancelled = false;
 
     voiceRef.current.reset();
-    cancelPatientSpeech();
+    if (voiceEngine !== "livekit") cancelPatientSpeech();
     setMessages([]);
     setDraft("");
     setBanner(null);
@@ -416,19 +485,7 @@ export function InterviewPage() {
           if (session.caseId === routeCaseId && !session.locked) {
             // The backend transcript is the source of truth: restored turns
             // are saved by definition.
-            const restored: ConversationMessage[] = session.messages.map((m) => ({
-              id: m.id,
-              sender: m.sender,
-              text: m.text,
-              speakerId: m.speakerId,
-              speakerLabel: m.speakerLabel,
-              saveStatus: "saved" as const,
-              timestamp: new Date(m.timestamp).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-              }),
-            }));
-            setMessages(restored);
+            setMessages(mapSessionMessages(session));
             setConnection("connected");
             return;
           }
@@ -465,7 +522,7 @@ export function InterviewPage() {
     return () => {
       cancelled = true;
       voiceRef.current.reset();
-      cancelPatientSpeech();
+      if (voiceEngine !== "livekit") cancelPatientSpeech();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseId, connectAttempt]);
@@ -497,9 +554,13 @@ export function InterviewPage() {
         // sentence; stay busy until the WHOLE response audio finished (or the
         // final text arrived when voice is off).
         await exchange.streaming.playbackDone;
-      } else if (voiceEnabled && ttsAvailable && caseId) {
+      } else if (voiceEnabled && ttsAvailable && caseId && voiceEngine !== "livekit") {
         // Same provider path as voice mode: ElevenLabs via the backend when
-        // available, browser speechSynthesis otherwise.
+        // available, browser speechSynthesis otherwise. NEVER reached in
+        // LiveKit mode - patientVoiceService/browser TTS must never be used
+        // there, even for a typed question sent before the LiveKit room was
+        // started (the reply text still appears via performExchange above;
+        // it is simply silent until the student starts voice mode).
         await speakPatientResponse({
           caseId,
           text: exchange.patientText,
@@ -521,7 +582,7 @@ export function InterviewPage() {
     if (endPhase) return; // prevent duplicate clicks while a request runs
     setShowEndModal(false);
     voice.reset();
-    cancelPatientSpeech();
+    if (voiceEngine !== "livekit") cancelPatientSpeech();
     if (!activeInterview) {
       clearInterview();
       navigate("/interview/complete");
@@ -749,7 +810,12 @@ export function InterviewPage() {
             </div>
           </div>
 
-          {(ttsAvailable || voice.supported) && (
+          {/* Speak-replies / auto-interrupt / sensitivity are all legacy-only
+              concepts (patientVoiceService/VAD) - LiveKit mode always plays
+              the agent's persistent audio track and does not support
+              barge-in yet, so this panel would offer controls that silently
+              do nothing there. Hidden entirely rather than shown-but-inert. */}
+          {(ttsAvailable || voice.supported) && voiceEngine !== "livekit" && (
             <details className={styles.audioSettings} open={!isMobile}>
               <summary className={styles.audioSettingsSummary}>Audio Settings</summary>
               <div className={styles.audioSettingsBody}>
@@ -854,7 +920,14 @@ export function InterviewPage() {
             </span>
           </div>
 
-          {recoveryAction && (
+          {/* Legacy-only affordance (patientVoiceService's Blob recovery) -
+              never applicable in LiveKit mode, which has no per-turn
+              HTMLAudioElement to recover in the first place. recoveryAction
+              is in practice never set in LiveKit mode anyway (its callbacks
+              are only wired into the legacy hook and the typed-send
+              speakPatientResponse call, both guarded above), but this is
+              explicit for clarity and defense-in-depth. */}
+          {recoveryAction && voiceEngine !== "livekit" && (
             <div className={styles.recoveryBanner} role="status">
               <span>Patient audio needs your tap to play.</span>
               <button type="button" className="btn btn-primary" onClick={() => void handleRecoveryTap()} disabled={recoveryBusy}>

@@ -125,6 +125,10 @@ class InterviewConfigOut(CamelModel):
 
     streaming_enabled: bool = False
     sentence_pipelining_enabled: bool = False
+    # Phase B: which voice architecture InterviewPage should use. Always one
+    # of "legacy"/"livekit" (Settings.voice_engine's own validator already
+    # guarantees this - see core/config.py). Never a key, never a secret.
+    voice_engine: str = "legacy"
 
 
 class TurnSegmentOut(CamelModel):

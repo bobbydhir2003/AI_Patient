@@ -53,8 +53,13 @@ export interface LiveKitTokenResponse {
  * covers the SAME OpenAI + ElevenLabs round-trip the legacy path makes. */
 const THINKING_TIMEOUT_MS = 20_000;
 
-async function fetchLiveKitToken(sessionId: string): Promise<LiveKitTokenResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/livekit/token`, {
+/** Injectable so this ONE engine can serve both the admin POC page and the
+ * real student InterviewPage (Phase B) - each passes a function pointing at
+ * its own token endpoint; the engine itself has no opinion on which. */
+export type FetchLiveKitToken = (sessionId: string) => Promise<LiveKitTokenResponse>;
+
+async function postForToken(url: string, sessionId: string): Promise<LiveKitTokenResponse> {
+  const response = await fetch(url, {
     method: "POST",
     headers: withAuthHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ sessionId }),
@@ -62,13 +67,24 @@ async function fetchLiveKitToken(sessionId: string): Promise<LiveKitTokenRespons
   if (!response.ok) {
     throw new Error(`livekit_token_http_${response.status}`);
   }
-  const data = (await response.json()) as {
-    token: string;
-    url: string;
-    roomName: string;
-    participantIdentity: string;
-  };
-  return data;
+  return (await response.json()) as LiveKitTokenResponse;
+}
+
+/** Phase 1/2 admin POC token source (require_admin-gated) - the DEFAULT for
+ * LiveKitPocEngine.start(), so LiveKitTestPage.tsx needs no changes at all. */
+export function fetchAdminPocLiveKitToken(sessionId: string): Promise<LiveKitTokenResponse> {
+  return postForToken(`${API_BASE_URL}/api/livekit/token`, sessionId);
+}
+
+/** Phase A/B student-safe token source (require_session_access-gated) - the
+ * real InterviewPage's token source (see useLiveKitInterviewVoice.ts). That
+ * endpoint takes session_id from the URL path, not the body - the body sent
+ * here is simply unread server-side, kept only for a uniform call shape. */
+export function fetchStudentLiveKitToken(sessionId: string): Promise<LiveKitTokenResponse> {
+  return postForToken(
+    `${API_BASE_URL}/api/interviews/${encodeURIComponent(sessionId)}/livekit-token`,
+    sessionId,
+  );
 }
 
 interface TurnStatusPayload {
@@ -164,7 +180,10 @@ export class LiveKitPocEngine {
    * begin listening - all inside this one call/gesture, exactly once for the
    * whole session. Everything after this is automatic.
    */
-  async start(sessionId: string): Promise<void> {
+  async start(
+    sessionId: string,
+    fetchToken: FetchLiveKitToken = fetchAdminPocLiveKitToken,
+  ): Promise<void> {
     if (this.state !== "idle" && this.state !== "ended" && this.state !== "error") return;
     this.ended = false;
     this.diagnostics = { ...INITIAL_DIAGNOSTICS };
@@ -174,7 +193,7 @@ export class LiveKitPocEngine {
 
     let tokenInfo: LiveKitTokenResponse;
     try {
-      tokenInfo = await fetchLiveKitToken(sessionId);
+      tokenInfo = await fetchToken(sessionId);
     } catch {
       this.callbacks.onError("Could not get a LiveKit connection token from the server.");
       this.setState("error");
@@ -270,7 +289,7 @@ export class LiveKitPocEngine {
       onInterim: (text) => this.callbacks.onStudentTranscript(text, false),
       onFinal: (text) => {
         this.callbacks.onStudentTranscript(text, true);
-        void this.sendStudentTurn(text);
+        void this.sendText(text);
       },
       onError: () => {
         // Non-fatal: the recognizer restarts itself via onEnd below, matching
@@ -307,7 +326,13 @@ export class LiveKitPocEngine {
     }
   }
 
-  private async sendStudentTurn(text: string): Promise<void> {
+  /** Send one turn of student text to the agent - called internally by the
+   * recognizer's onFinal, and PUBLICLY by a caller wanting to submit typed
+   * text through the exact same path (Phase B: InterviewPage's typed chat
+   * input while LiveKit mode is active - see useLiveKitInterviewVoice.ts).
+   * A no-op while not "listening" (already thinking/speaking/etc.) - the
+   * same guard the recognizer path relies on; barge-in is out of scope. */
+  async sendText(text: string): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed || !this.room || this.state !== "listening") return;
     const clientTurnId = newClientTurnId();

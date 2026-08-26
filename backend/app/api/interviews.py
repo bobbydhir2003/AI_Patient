@@ -34,6 +34,7 @@ def interview_config() -> InterviewConfigOut:
     return InterviewConfigOut(
         streaming_enabled=settings.openai_patient_streaming_enabled,
         sentence_pipelining_enabled=settings.patient_sentence_pipelining_enabled,
+        voice_engine=settings.voice_engine,
     )
 
 
