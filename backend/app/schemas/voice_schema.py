@@ -87,6 +87,18 @@ VoiceTelemetryEventName = Literal[
     "livekit_patient_audio_started",
     "livekit_patient_audio_completed",
     "livekit_patient_audio_failed",
+    # Phase C1: readiness/timeout diagnosability (real student LiveKit path).
+    "livekit_first_turn_sent",
+    "livekit_turn_status_received",
+    "livekit_turn_status_matched",
+    "livekit_turn_status_ignored",
+    "livekit_thinking_timeout_started",
+    "livekit_thinking_timeout_cancelled",
+    "livekit_thinking_timeout_fired",
+    "livekit_audio_element_attached",
+    "livekit_audio_playing",
+    "livekit_audio_play_failed",
+    "livekit_engine_error",
 ]
 
 
@@ -110,3 +122,9 @@ class VoiceTelemetryEvent(CamelModel):
     device_category: str = Field(default="", max_length=16)
     playback_method: str = Field(default="", max_length=32)
     duration_ms: float | None = Field(default=None, ge=0, le=120_000)
+    # Phase C1: LiveKitPocEngine's PocState at event time (e.g. "thinking"),
+    # and the patient_turn_status payload's status / diagnostic outcome (e.g.
+    # "speaking_started", "client_turn_id_mismatch"). Bounded operational
+    # strings only - never patient content.
+    engine_state: str = Field(default="", max_length=32)
+    turn_status: str = Field(default="", max_length=32)

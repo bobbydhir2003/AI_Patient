@@ -86,7 +86,23 @@ export type VoiceEvent =
   | "livekit_agent_started"
   | "livekit_patient_audio_started"
   | "livekit_patient_audio_completed"
-  | "livekit_patient_audio_failed";
+  | "livekit_patient_audio_failed"
+  // --- Phase C1: readiness/timeout diagnosability (see the 4-device
+  // production-test inspection). Answers, from logs alone, whether a
+  // patient_turn_status data message arrived at all, whether it matched the
+  // pending turn, and exactly when the thinking-timeout watchdog was armed/
+  // cancelled/fired - without needing to reproduce the incident live.
+  | "livekit_first_turn_sent"
+  | "livekit_turn_status_received"
+  | "livekit_turn_status_matched"
+  | "livekit_turn_status_ignored"
+  | "livekit_thinking_timeout_started"
+  | "livekit_thinking_timeout_cancelled"
+  | "livekit_thinking_timeout_fired"
+  | "livekit_audio_element_attached"
+  | "livekit_audio_playing"
+  | "livekit_audio_play_failed"
+  | "livekit_engine_error";
 
 /** Stage-level failure category. See file header for how these map to the
  * report categories STATUS_PROBE_TRANSIENT / STATUS_CONFIRMED_UNAVAILABLE /
@@ -125,6 +141,14 @@ export interface VoiceEventMeta {
    * LiveKit turn being sent to the patient's first audio). Bounded/validated
    * server-side (VoiceTelemetryEvent.duration_ms) - never patient content. */
   durationMs?: number;
+  /** LiveKitPocEngine's PocState at the moment of this event (e.g. "thinking",
+   * "error"). Engine lifecycle only - never patient content. */
+  engineState?: string;
+  /** The patient_turn_status data message's status field ("speaking_started" |
+   * "speaking_ended" | "failed"), or a diagnostic outcome for that message
+   * ("received" | "matched" | "parse_error" | "client_turn_id_mismatch" |
+   * "unsupported_status"). Never patient text. */
+  turnStatus?: string;
 }
 
 export interface VoiceCounters {
@@ -196,6 +220,9 @@ const WARN_EVENTS = new Set<VoiceEvent>([
   "tts_capacity_retry_failed",
   "audio_user_gesture_recovery_failed",
   "livekit_patient_audio_failed",
+  "livekit_thinking_timeout_fired",
+  "livekit_audio_play_failed",
+  "livekit_engine_error",
 ]);
 
 function isDev(): boolean {
@@ -241,6 +268,11 @@ const TELEMETRY_EVENTS = new Set<VoiceEvent>([
   "livekit_patient_track_subscribed", "livekit_agent_started",
   "livekit_patient_audio_started", "livekit_patient_audio_completed",
   "livekit_patient_audio_failed",
+  "livekit_first_turn_sent", "livekit_turn_status_received",
+  "livekit_turn_status_matched", "livekit_turn_status_ignored",
+  "livekit_thinking_timeout_started", "livekit_thinking_timeout_cancelled",
+  "livekit_thinking_timeout_fired", "livekit_audio_element_attached",
+  "livekit_audio_playing", "livekit_audio_play_failed", "livekit_engine_error",
 ]);
 
 /**
@@ -262,6 +294,8 @@ function sendTelemetry(event: VoiceEvent, meta: VoiceEventMeta): void {
       deviceCategory: deviceCategory(),
       playbackMethod: meta.path ?? "",
       durationMs: meta.durationMs ?? null,
+      engineState: meta.engineState ?? "",
+      turnStatus: meta.turnStatus ?? "",
     });
     void fetch(`${API_BASE_URL}/api/voice/telemetry`, {
       method: "POST",

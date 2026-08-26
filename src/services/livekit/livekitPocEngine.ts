@@ -29,7 +29,7 @@
 import { Room, RoomEvent, Track, type RemoteParticipant, type RemoteTrack } from "livekit-client";
 import { API_BASE_URL, withAuthHeaders } from "../api";
 import { createRecognizer, type Recognizer } from "../speechRecognitionService";
-import { logVoiceEvent } from "../voiceDiagnostics";
+import { describeError, logVoiceEvent } from "../voiceDiagnostics";
 
 export type PocState =
   | "idle"
@@ -168,11 +168,26 @@ export class LiveKitPocEngine {
     this.callbacks.onStateChange(next);
   }
 
-  private clearThinkingWatchdog(): void {
+  /** Cancels the armed thinking-timeout watchdog, if any, and logs WHY it was
+   * cancelled (e.g. "speaking_started", "turn_failed", "engine_end") - the
+   * counterpart to livekit_thinking_timeout_started, so the full arm/cancel/
+   * fire lifecycle of every turn's watchdog is reconstructable from logs
+   * alone. A no-op (and no log) when nothing was armed. */
+  private clearThinkingWatchdog(reason: string): void {
     if (this.thinkingWatchdog !== null) {
       window.clearTimeout(this.thinkingWatchdog);
       this.thinkingWatchdog = null;
+      logVoiceEvent("livekit_thinking_timeout_cancelled", { reason, engineState: this.state });
     }
+  }
+
+  /** Every user-facing error path funnels through here so
+   * livekit_engine_error is a true catch-all - a single event that, counted
+   * alone, answers "how many LiveKit sessions hit ANY error" regardless of
+   * which specific failure category it was. */
+  private emitError(message: string, reason: string): void {
+    logVoiceEvent("livekit_engine_error", { reason, engineState: this.state });
+    this.callbacks.onError(message);
   }
 
   /**
@@ -195,7 +210,7 @@ export class LiveKitPocEngine {
     try {
       tokenInfo = await fetchToken(sessionId);
     } catch {
-      this.callbacks.onError("Could not get a LiveKit connection token from the server.");
+      this.emitError("Could not get a LiveKit connection token from the server.", "token_fetch_failed");
       this.setState("error");
       return;
     }
@@ -207,7 +222,7 @@ export class LiveKitPocEngine {
     room.on(RoomEvent.Disconnected, () => {
       logVoiceEvent("livekit_room_disconnected", {});
       if (!this.ended) {
-        this.callbacks.onError("The LiveKit room disconnected unexpectedly.");
+        this.emitError("The LiveKit room disconnected unexpectedly.", "room_disconnected");
         this.setState("error");
       }
     });
@@ -230,6 +245,28 @@ export class LiveKitPocEngine {
       el.autoplay = true;
       this.audioEl = el;
       this.patchDiagnostics({ patientTrackSubscribed: true });
+      logVoiceEvent("livekit_audio_element_attached", {});
+
+      // 'error' fires for real media errors (decode/network) - it does NOT
+      // fire for an autoplay-policy rejection, which surfaces only as a
+      // rejected play() promise (handled below). Both are logged separately
+      // so a "browser silently blocked audio" report is distinguishable from
+      // a genuine media error.
+      el.onerror = () => {
+        logVoiceEvent("livekit_audio_play_failed", {
+          reason: "media_error",
+          errorMessage: el.error ? `code_${el.error.code}` : undefined,
+        });
+      };
+
+      const playResult = el.play();
+      if (playResult && typeof playResult.then === "function") {
+        playResult
+          .then(() => logVoiceEvent("livekit_audio_playing", {}))
+          .catch((err: unknown) => {
+            logVoiceEvent("livekit_audio_play_failed", { reason: "play_rejected", ...describeError(err) });
+          });
+      }
     });
     room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
       if (participant.identity !== AGENT_IDENTITY) return;
@@ -238,6 +275,12 @@ export class LiveKitPocEngine {
     });
     room.on(RoomEvent.DataReceived, (payload: Uint8Array, _participant, _kind, topic?: string) => {
       if (topic !== "patient_turn_status") return;
+      // Logged BEFORE any parsing/correlation filtering, so "did a
+      // patient_turn_status message arrive at all" is answerable from logs
+      // even when the payload is malformed or for a turn we've already
+      // timed out - this is the critical arrival signal the 4-device
+      // incident inspection found was previously invisible.
+      logVoiceEvent("livekit_turn_status_received", { engineState: this.state });
       this.handleTurnStatus(payload);
     });
 
@@ -254,7 +297,10 @@ export class LiveKitPocEngine {
       logVoiceEvent("livekit_mic_published", {});
       this.patchDiagnostics({ micPublished: true });
     } catch {
-      this.callbacks.onError("Could not connect to the LiveKit room or publish the microphone.");
+      this.emitError(
+        "Could not connect to the LiveKit room or publish the microphone.",
+        "room_connect_failed",
+      );
       this.setState("error");
       return;
     }
@@ -310,7 +356,7 @@ export class LiveKitPocEngine {
       },
     });
     if (!this.recognizer) {
-      this.callbacks.onError("This browser does not support speech recognition.");
+      this.emitError("This browser does not support speech recognition.", "recognition_unsupported");
       return;
     }
     try {
@@ -339,21 +385,39 @@ export class LiveKitPocEngine {
     this.pendingClientTurnId = clientTurnId;
     this.turnSentAt = Date.now();
     this.setState("thinking");
-    this.clearThinkingWatchdog();
+    this.clearThinkingWatchdog("new_turn_started");
+    logVoiceEvent("livekit_thinking_timeout_started", { correlationId: clientTurnId, engineState: "thinking" });
     this.thinkingWatchdog = window.setTimeout(() => {
+      // Logged unconditionally: proves the raw timer actually fired,
+      // independent of what the guard below decides to do with it.
+      logVoiceEvent("livekit_thinking_timeout_fired", {
+        correlationId: clientTurnId,
+        engineState: this.state,
+        turnStatus: this.pendingClientTurnId === clientTurnId ? "still_pending" : "already_resolved",
+      });
       if (this.pendingClientTurnId === clientTurnId && this.state === "thinking") {
         logVoiceEvent("livekit_patient_audio_failed", { correlationId: clientTurnId, reason: "thinking_timeout" });
-        this.callbacks.onError("Patient audio connection failed (no response from the agent).");
+        // Proven bug fix: invalidate the timed-out turn's identity BEFORE
+        // transitioning to error. Without this, a late "speaking_started"
+        // for this SAME clientTurnId would still pass handleTurnStatus's
+        // correlation check (parsed.clientTurnId === this.pendingClientTurnId)
+        // and silently move the UI from ERROR back to SPEAKING after the
+        // student already saw the error message.
+        this.thinkingWatchdog = null;
+        this.pendingClientTurnId = null;
+        this.turnSentAt = null;
+        this.emitError("Patient audio connection failed (no response from the agent).", "thinking_timeout");
         this.setState("error");
       }
     }, THINKING_TIMEOUT_MS);
 
+    logVoiceEvent("livekit_first_turn_sent", { correlationId: clientTurnId, engineState: "thinking" });
     const payload = new TextEncoder().encode(JSON.stringify({ text: trimmed, clientTurnId }));
     try {
       await this.room.localParticipant.publishData(payload, { reliable: true, topic: "student_text" });
     } catch {
-      this.clearThinkingWatchdog();
-      this.callbacks.onError("Could not send your message to the patient agent.");
+      this.clearThinkingWatchdog("publish_failed");
+      this.emitError("Could not send your message to the patient agent.", "publish_data_failed");
       this.setState("error");
     }
   }
@@ -363,12 +427,31 @@ export class LiveKitPocEngine {
     try {
       parsed = JSON.parse(new TextDecoder().decode(payload)) as TurnStatusPayload;
     } catch {
+      logVoiceEvent("livekit_turn_status_ignored", { reason: "parse_error", engineState: this.state });
       return;
     }
-    if (!parsed.clientTurnId || parsed.clientTurnId !== this.pendingClientTurnId) return; // stale/foreign turn
+    if (!parsed.clientTurnId || parsed.clientTurnId !== this.pendingClientTurnId) {
+      // Stale (already timed-out/completed) or foreign turn. This is the
+      // exact case the timeout-state fix above makes possible to observe
+      // safely: a late "speaking_started" for an already-timed-out
+      // clientTurnId now lands here (pendingClientTurnId was cleared) instead
+      // of being able to match and resurrect a finished/errored turn.
+      logVoiceEvent("livekit_turn_status_ignored", {
+        reason: "client_turn_id_mismatch",
+        correlationId: parsed.clientTurnId || undefined,
+        turnStatus: parsed.status,
+        engineState: this.state,
+      });
+      return;
+    }
+    logVoiceEvent("livekit_turn_status_matched", {
+      correlationId: parsed.clientTurnId,
+      turnStatus: parsed.status,
+      engineState: this.state,
+    });
 
     if (parsed.status === "speaking_started") {
-      this.clearThinkingWatchdog();
+      this.clearThinkingWatchdog("speaking_started");
       // Time from the student's transcript being sent to the agent's first
       // audio signal - "total speech-to-first-patient-audio latency" for
       // real-device validation (see the Phase 1 validation plan).
@@ -398,15 +481,27 @@ export class LiveKitPocEngine {
       return;
     }
     if (parsed.status === "failed") {
-      this.clearThinkingWatchdog();
+      this.clearThinkingWatchdog("turn_failed");
       logVoiceEvent("livekit_patient_audio_failed", { correlationId: parsed.clientTurnId, reason: "agent_failed" });
       this.pendingClientTurnId = null;
       this.turnSentAt = null;
       // Explicit POC diagnostic state - deliberately NOT a silent fallback to
       // legacy browser TTS (see the POC's "no hidden fallback" requirement).
-      this.callbacks.onError("Patient audio generation failed for this turn.");
+      this.emitError("Patient audio generation failed for this turn.", "agent_turn_failed");
       this.setState("error");
+      return;
     }
+    // Matched this turn's clientTurnId, but the status value itself is
+    // unrecognized (future/malformed agent payload) - distinct from a parse
+    // error or a mismatched turn, and deliberately NOT treated as a failure:
+    // the turn simply stays "thinking" until either a recognized status
+    // arrives or the watchdog fires.
+    logVoiceEvent("livekit_turn_status_ignored", {
+      reason: "unsupported_status",
+      correlationId: parsed.clientTurnId,
+      turnStatus: parsed.status,
+      engineState: this.state,
+    });
   }
 
   /** The End Interview gesture: tears everything down cleanly - mirrors
@@ -415,7 +510,7 @@ export class LiveKitPocEngine {
    * recognizer or a stale "speaking" state). */
   async end(): Promise<void> {
     this.ended = true;
-    this.clearThinkingWatchdog();
+    this.clearThinkingWatchdog("engine_end");
     this.pendingClientTurnId = null;
     this.turnSentAt = null;
     this.stopRecognition();

@@ -232,6 +232,51 @@ async function flushMicrotasks() {
 }
 
 // ---------------------------------------------------------------------------
+// Phase C1 helpers: telemetry inspection (voiceDiagnostics.ts ships every
+// logVoiceEvent() call to the SAME fetch mock used for the token endpoint
+// above, filtered by URL) and manual fake-timer control (the thinking-timeout
+// watchdog is armed via the fake `window.setTimeout` at the top of this file,
+// whose pendingTimers Map is reused directly here rather than duplicated).
+// ---------------------------------------------------------------------------
+function telemetryEvents() {
+  return fetchCalls
+    .filter((c) => c.url.includes("/voice/telemetry"))
+    .map((c) => JSON.parse(c.init.body));
+}
+
+function latestTimerId() {
+  const keys = [...pendingTimers.keys()];
+  return keys.at(-1);
+}
+
+function fireTimerById(id) {
+  const fn = pendingTimers.get(id);
+  assert.ok(fn, `expected a pending fake timer with id ${id}`);
+  fn();
+}
+
+/** A minimal fake HTMLMediaElement for the patient audio track - supports
+ * exactly what livekitPocEngine.ts's TrackSubscribed handler touches
+ * (autoplay, error/onerror, play()) so audio-diagnostics tests can control
+ * whether play() resolves or rejects (autoplay-policy block). */
+function makeFakeAudioElement({ playResult } = {}) {
+  return {
+    autoplay: false,
+    error: null,
+    onerror: null,
+    pause() {},
+    play() {
+      if (playResult === "reject") {
+        const err = new Error("play() was not allowed");
+        err.name = "NotAllowedError";
+        return Promise.reject(err);
+      }
+      return Promise.resolve();
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // STATE: full turn lifecycle.
 // ---------------------------------------------------------------------------
 test("STATE: IDLE -> CONNECTING -> LISTENING -> THINKING -> SPEAKING -> LISTENING -> ENDED", async () => {
@@ -266,7 +311,10 @@ test("STATE: IDLE -> CONNECTING -> LISTENING -> THINKING -> SPEAKING -> LISTENIN
 
   // Simulate the agent's patient-audio track arriving.
   let attachCalls = 0;
-  const fakeTrack = { kind: Track.Kind.Audio, attach: () => (attachCalls += 1, { pause: () => {} }) };
+  const fakeTrack = {
+    kind: Track.Kind.Audio,
+    attach: () => (attachCalls += 1, { pause: () => {}, play: () => Promise.resolve() }),
+  };
   room.emit(RoomEvent.TrackSubscribed, fakeTrack);
   assert.equal(attachCalls, 1);
   assert.equal(rec.diagnostics.at(-1).patientTrackSubscribed, true);
@@ -546,6 +594,329 @@ test("PHASE B: sendText() is a no-op while not listening (thinking/speaking) - n
   assert.equal(countAfterSecond, countAfterFirst, "a typed message sent while not listening must be dropped");
 
   await engine.end();
+});
+
+// ===========================================================================
+// Phase C1: proven timeout-state bug fix + readiness/timeout telemetry (see
+// the 4-device production-test inspection - server logs proved all four
+// sessions succeeded end-to-end, yet two devices showed "no response from
+// the agent", so this phase makes the client-side turn/timeout lifecycle
+// fully reconstructable from logs alone, plus fixes the one PROVEN client
+// bug found along the way: a late speaking_started for an already-timed-out
+// turn could silently move ERROR back to SPEAKING).
+// ===========================================================================
+
+test("PHASE C1: a late speaking_started after the thinking-timeout fires can never move ERROR back to SPEAKING (proven bug fix)", async () => {
+  createdRooms.length = 0;
+  FakeSpeechRecognition.instances.length = 0;
+  fetchCalls.length = 0;
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-timeout-1");
+  await flushMicrotasks();
+  const room = createdRooms[0];
+
+  FakeSpeechRecognition.instances[0].emitFinal("Does it hurt when I press here?");
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "thinking");
+
+  const sentPayload = JSON.parse(new TextDecoder().decode(room.publishedData.at(-1).payload));
+  const clientTurnId = sentPayload.clientTurnId;
+
+  fireTimerById(latestTimerId());
+  assert.equal(engine.getState(), "error");
+  assert.equal(rec.errors.length, 1);
+
+  // The agent's response finally arrives AFTER the timeout already fired -
+  // this is EXACTLY the scenario proven from server logs (all four sessions
+  // succeeded server-side; two devices' UI still showed the timeout error).
+  const encode = (obj) => new TextEncoder().encode(JSON.stringify(obj));
+  room.emit(
+    RoomEvent.DataReceived,
+    encode({ clientTurnId, status: "speaking_started" }),
+    undefined, undefined, "patient_turn_status",
+  );
+
+  assert.equal(
+    engine.getState(), "error",
+    "a late speaking_started for a timed-out turn must never move ERROR -> SPEAKING",
+  );
+  assert.equal(rec.errors.length, 1, "the ignored late message must not add a second error");
+
+  await engine.end();
+});
+
+test("PHASE C1: a matched speaking_started cancels the thinking watchdog", async () => {
+  createdRooms.length = 0;
+  FakeSpeechRecognition.instances.length = 0;
+  fetchCalls.length = 0;
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-timeout-2");
+  await flushMicrotasks();
+  const room = createdRooms[0];
+
+  FakeSpeechRecognition.instances[0].emitFinal("Any fever?");
+  await flushMicrotasks();
+  const sentPayload = JSON.parse(new TextDecoder().decode(room.publishedData.at(-1).payload));
+  const watchdogId = latestTimerId();
+
+  const encode = (obj) => new TextEncoder().encode(JSON.stringify(obj));
+  room.emit(
+    RoomEvent.DataReceived,
+    encode({ clientTurnId: sentPayload.clientTurnId, status: "speaking_started" }),
+    undefined, undefined, "patient_turn_status",
+  );
+  assert.equal(engine.getState(), "speaking");
+  assert.ok(!pendingTimers.has(watchdogId), "the watchdog timer must be cleared once its turn is matched");
+
+  await engine.end();
+});
+
+test("PHASE C1: a mismatched clientTurnId status message does not cancel the thinking watchdog", async () => {
+  createdRooms.length = 0;
+  FakeSpeechRecognition.instances.length = 0;
+  fetchCalls.length = 0;
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-timeout-3");
+  await flushMicrotasks();
+  const room = createdRooms[0];
+
+  FakeSpeechRecognition.instances[0].emitFinal("Any swelling?");
+  await flushMicrotasks();
+  const watchdogId = latestTimerId();
+
+  const encode = (obj) => new TextEncoder().encode(JSON.stringify(obj));
+  room.emit(
+    RoomEvent.DataReceived,
+    encode({ clientTurnId: "some-other-turn", status: "speaking_started" }),
+    undefined, undefined, "patient_turn_status",
+  );
+
+  assert.equal(engine.getState(), "thinking", "a foreign turn's status must not move state out of thinking");
+  assert.ok(pendingTimers.has(watchdogId), "the watchdog must remain armed for a mismatched turn id");
+
+  fireTimerById(watchdogId);
+  assert.equal(engine.getState(), "error", "the watchdog must still fire normally for the actual pending turn");
+
+  await engine.end();
+});
+
+test("PHASE C1: telemetry captures the full thinking-timeout arm/cancel/fire lifecycle", async () => {
+  createdRooms.length = 0;
+  FakeSpeechRecognition.instances.length = 0;
+  fetchCalls.length = 0;
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-telemetry-1");
+  await flushMicrotasks();
+  const room = createdRooms[0];
+  const encode = (obj) => new TextEncoder().encode(JSON.stringify(obj));
+
+  // Turn 1 completes normally: started, then cancelled (matched) - never fired.
+  FakeSpeechRecognition.instances.at(-1).emitFinal("Turn one");
+  await flushMicrotasks();
+  const payload1 = JSON.parse(new TextDecoder().decode(room.publishedData.at(-1).payload));
+  room.emit(RoomEvent.DataReceived, encode({ clientTurnId: payload1.clientTurnId, status: "speaking_started" }), undefined, undefined, "patient_turn_status");
+  room.emit(RoomEvent.DataReceived, encode({ clientTurnId: payload1.clientTurnId, status: "speaking_ended" }), undefined, undefined, "patient_turn_status");
+  await flushMicrotasks();
+
+  let events = telemetryEvents().map((e) => e.event);
+  assert.ok(events.includes("livekit_thinking_timeout_started"), "turn 1: watchdog must be logged as armed");
+  assert.ok(events.includes("livekit_thinking_timeout_cancelled"), "turn 1: watchdog must be logged as cancelled");
+  assert.ok(!events.includes("livekit_thinking_timeout_fired"), "turn 1 completed normally - the watchdog must never fire");
+
+  // Turn 2 times out: started, then fired - plus the failure + catch-all error events.
+  fetchCalls.length = 0;
+  FakeSpeechRecognition.instances.at(-1).emitFinal("Turn two");
+  await flushMicrotasks();
+  fireTimerById(latestTimerId());
+  await flushMicrotasks();
+
+  events = telemetryEvents().map((e) => e.event);
+  assert.ok(events.includes("livekit_thinking_timeout_started"), "turn 2: watchdog must be logged as armed");
+  assert.ok(events.includes("livekit_thinking_timeout_fired"), "turn 2: watchdog must be logged as fired");
+  assert.ok(events.includes("livekit_patient_audio_failed"), "turn 2: the specific failure category must be logged");
+  assert.ok(events.includes("livekit_engine_error"), "turn 2: the generic catch-all error event must be logged");
+
+  await engine.end();
+});
+
+test("PHASE C1: DataReceived telemetry distinguishes received vs matched vs ignored - logged before any parsing/correlation filtering", async () => {
+  createdRooms.length = 0;
+  FakeSpeechRecognition.instances.length = 0;
+  fetchCalls.length = 0;
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-datareceived-1");
+  await flushMicrotasks();
+  const room = createdRooms[0];
+  const encode = (obj) => new TextEncoder().encode(JSON.stringify(obj));
+
+  FakeSpeechRecognition.instances[0].emitFinal("Question");
+  await flushMicrotasks();
+  const payload = JSON.parse(new TextDecoder().decode(room.publishedData.at(-1).payload));
+  const clientTurnId = payload.clientTurnId;
+
+  // (a) malformed payload -> received, then ignored(parse_error) - never matched.
+  fetchCalls.length = 0;
+  room.emit(RoomEvent.DataReceived, new TextEncoder().encode("not json"), undefined, undefined, "patient_turn_status");
+  await flushMicrotasks();
+  assert.deepEqual(
+    telemetryEvents().map((e) => e.event),
+    ["livekit_turn_status_received", "livekit_turn_status_ignored"],
+  );
+
+  // (b) mismatched clientTurnId -> received, then ignored(mismatch).
+  fetchCalls.length = 0;
+  room.emit(RoomEvent.DataReceived, encode({ clientTurnId: "foreign-turn", status: "speaking_started" }), undefined, undefined, "patient_turn_status");
+  await flushMicrotasks();
+  assert.deepEqual(
+    telemetryEvents().map((e) => e.event),
+    ["livekit_turn_status_received", "livekit_turn_status_ignored"],
+  );
+
+  // (c) matched -> received, then matched, then the specific status event.
+  fetchCalls.length = 0;
+  room.emit(RoomEvent.DataReceived, encode({ clientTurnId, status: "speaking_started" }), undefined, undefined, "patient_turn_status");
+  await flushMicrotasks();
+  const matchedEventNames = telemetryEvents().map((e) => e.event);
+  assert.equal(matchedEventNames[0], "livekit_turn_status_received");
+  assert.equal(matchedEventNames[1], "livekit_turn_status_matched");
+  assert.ok(matchedEventNames.includes("livekit_patient_audio_started"));
+
+  await engine.end();
+});
+
+test("PHASE C1: an unsupported turn-status value is logged as ignored, not treated as a failure", async () => {
+  createdRooms.length = 0;
+  FakeSpeechRecognition.instances.length = 0;
+  fetchCalls.length = 0;
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-unsupported-1");
+  await flushMicrotasks();
+  const room = createdRooms[0];
+  const encode = (obj) => new TextEncoder().encode(JSON.stringify(obj));
+
+  FakeSpeechRecognition.instances[0].emitFinal("Question");
+  await flushMicrotasks();
+  const payload = JSON.parse(new TextDecoder().decode(room.publishedData.at(-1).payload));
+
+  fetchCalls.length = 0;
+  room.emit(
+    RoomEvent.DataReceived,
+    encode({ clientTurnId: payload.clientTurnId, status: "some_future_status" }),
+    undefined, undefined, "patient_turn_status",
+  );
+  await flushMicrotasks();
+
+  assert.equal(engine.getState(), "thinking", "an unrecognized status must not move state out of thinking");
+  assert.equal(rec.errors.length, 0, "an unrecognized status must not surface as an error");
+  const events = telemetryEvents();
+  const ignoredEvent = events.find((e) => e.event === "livekit_turn_status_ignored");
+  assert.ok(ignoredEvent, "an unsupported status must still be logged as ignored");
+
+  await engine.end();
+});
+
+test("PHASE C1: telemetry never carries patient/student text, even for a distinctive spoken phrase", async () => {
+  createdRooms.length = 0;
+  FakeSpeechRecognition.instances.length = 0;
+  fetchCalls.length = 0;
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-notext-1");
+  await flushMicrotasks();
+  const room = createdRooms[0];
+
+  const secretPhrase = "I have had crushing chest pain radiating to my left arm for three days";
+  FakeSpeechRecognition.instances[0].emitFinal(secretPhrase);
+  await flushMicrotasks();
+  const payload = JSON.parse(new TextDecoder().decode(room.publishedData.at(-1).payload));
+  const encode = (obj) => new TextEncoder().encode(JSON.stringify(obj));
+  room.emit(RoomEvent.DataReceived, encode({ clientTurnId: payload.clientTurnId, status: "speaking_started" }), undefined, undefined, "patient_turn_status");
+  room.emit(RoomEvent.DataReceived, encode({ clientTurnId: payload.clientTurnId, status: "speaking_ended" }), undefined, undefined, "patient_turn_status");
+  await flushMicrotasks();
+
+  const bodies = fetchCalls.filter((c) => c.url.includes("/voice/telemetry")).map((c) => c.init.body);
+  assert.ok(bodies.length > 0, "expected at least one telemetry ping during this turn");
+  for (const body of bodies) {
+    assert.ok(!body.includes(secretPhrase));
+    assert.ok(!body.includes("crushing chest pain"));
+    assert.ok(!body.includes("left arm"));
+  }
+
+  await engine.end();
+});
+
+test("PHASE C1: a successfully playing patient-audio element logs attached + playing, never play_failed", async () => {
+  createdRooms.length = 0;
+  fetchCalls.length = 0;
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-audio-1");
+  await flushMicrotasks();
+  const room = createdRooms[0];
+
+  fetchCalls.length = 0;
+  const fakeTrack = { kind: Track.Kind.Audio, attach: () => makeFakeAudioElement() };
+  room.emit(RoomEvent.TrackSubscribed, fakeTrack);
+  await flushMicrotasks();
+
+  const events = telemetryEvents().map((e) => e.event);
+  assert.ok(events.includes("livekit_audio_element_attached"));
+  assert.ok(events.includes("livekit_audio_playing"));
+  assert.ok(!events.includes("livekit_audio_play_failed"));
+
+  await engine.end();
+});
+
+test("PHASE C1: a rejected play() promise (autoplay blocked) logs audio_play_failed with no user-facing error and no fallback UI", async () => {
+  createdRooms.length = 0;
+  fetchCalls.length = 0;
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-audio-2");
+  await flushMicrotasks();
+  const room = createdRooms[0];
+
+  fetchCalls.length = 0;
+  const fakeTrack = { kind: Track.Kind.Audio, attach: () => makeFakeAudioElement({ playResult: "reject" }) };
+  room.emit(RoomEvent.TrackSubscribed, fakeTrack);
+  await flushMicrotasks();
+
+  const events = telemetryEvents().map((e) => e.event);
+  assert.ok(events.includes("livekit_audio_element_attached"));
+  assert.ok(events.includes("livekit_audio_play_failed"));
+  assert.ok(!events.includes("livekit_audio_playing"));
+
+  // Deliberately NOT a user-facing error and NOT any fallback (no browser TTS,
+  // no "Tap to hear patient") - this phase adds diagnostics only.
+  assert.equal(rec.errors.length, 0, "a blocked autoplay must not surface a user-facing error or trigger a fallback");
+
+  await engine.end();
+});
+
+test("PHASE C1: the STATIC source scan also covers no browser-TTS-fallback / tap-to-hear UI was introduced", () => {
+  const rawSource = fs.readFileSync(
+    path.join(repoRoot, "src", "services", "livekit", "livekitPocEngine.ts"),
+    "utf8",
+  );
+  const source = rawSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  for (const forbidden of ["speechSynthesis.", "SpeechSynthesisUtterance", "Tap to hear", "tap-to-hear", "tapToHear"]) {
+    assert.ok(!source.includes(forbidden), `livekitPocEngine.ts must never introduce "${forbidden}"`);
+  }
 });
 
 // ---------------------------------------------------------------------------

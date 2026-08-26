@@ -796,6 +796,65 @@ def test_telemetry_never_accepts_patient_text_field(engine):
     assert not hasattr(VoiceTelemetryEvent(event="tts_succeeded"), "text")
 
 
+def test_telemetry_accepts_phase_c1_livekit_event_names(engine, caplog):
+    """Phase C1 added 11 new LiveKit readiness/timeout diagnostic event names
+    (see voiceDiagnostics.ts) - the backend allowlist (VoiceTelemetryEventName)
+    must accept every one of them, or the frontend's own TELEMETRY_EVENTS
+    allowlist and this backend allowlist would silently disagree and no
+    Phase C1 event would ever reach the logs."""
+    import logging
+
+    client = make_voice_client(engine)
+    phase_c1_events = [
+        "livekit_first_turn_sent",
+        "livekit_turn_status_received",
+        "livekit_turn_status_matched",
+        "livekit_turn_status_ignored",
+        "livekit_thinking_timeout_started",
+        "livekit_thinking_timeout_cancelled",
+        "livekit_thinking_timeout_fired",
+        "livekit_audio_element_attached",
+        "livekit_audio_playing",
+        "livekit_audio_play_failed",
+        "livekit_engine_error",
+    ]
+    with caplog.at_level(logging.INFO, logger="app.api.voice"):
+        for event in phase_c1_events:
+            resp = client.post(
+                "/api/voice/telemetry",
+                json={
+                    "event": event,
+                    "correlationId": "turn-abc",
+                    "engineState": "thinking",
+                    "turnStatus": "speaking_started",
+                },
+            )
+            assert resp.status_code == 200, f"{event} must be accepted: {resp.text}"
+    assert any(
+        "engine_state=thinking" in r.message and "turn_status=speaking_started" in r.message
+        for r in caplog.records
+    )
+
+
+def test_telemetry_engine_state_and_turn_status_are_bounded_operational_strings(engine):
+    """engine_state/turn_status are plain bounded strings (max_length=32), not
+    a validated enum - mirrors category/playback_method's existing looseness -
+    but they must still reject an oversized value rather than silently
+    truncate or accept arbitrary-length content."""
+    client = make_voice_client(engine)
+    resp = client.post(
+        "/api/voice/telemetry",
+        json={"event": "livekit_engine_error", "engineState": "x" * 33},
+    )
+    assert resp.status_code == 422
+
+    resp = client.post(
+        "/api/voice/telemetry",
+        json={"event": "livekit_engine_error", "engineState": "error", "turnStatus": "y" * 33},
+    )
+    assert resp.status_code == 422
+
+
 def test_telemetry_rate_limit_bucket_is_isolated_from_synthesize():
     """Telemetry must not share /synthesize's rate-limit bucket - otherwise a
     burst of diagnostic events could exhaust a student's real TTS budget.
