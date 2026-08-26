@@ -87,8 +87,7 @@ VoiceTelemetryEventName = Literal[
     "livekit_patient_audio_started",
     "livekit_patient_audio_completed",
     "livekit_patient_audio_failed",
-    # Phase C1: readiness/timeout diagnosability (real student LiveKit path).
-    "livekit_first_turn_sent",
+    # Readiness/timeout diagnosability (real student LiveKit path).
     "livekit_turn_status_received",
     "livekit_turn_status_matched",
     "livekit_turn_status_ignored",
@@ -99,6 +98,16 @@ VoiceTelemetryEventName = Literal[
     "livekit_audio_playing",
     "livekit_audio_play_failed",
     "livekit_engine_error",
+    # Production reliability protocol: agent-ready handshake + turn-delivery
+    # ACK + bounded automatic retry (see livekitPocEngine.ts's module
+    # docstring for the confirmed production incident this answers).
+    "livekit_agent_ready_received",
+    "livekit_turn_publish_started",
+    "livekit_turn_publish_resolved",
+    "livekit_turn_ack_received",
+    "livekit_turn_ack_timeout",
+    "livekit_turn_auto_retry",
+    "livekit_turn_delivery_failed",
 ]
 
 
@@ -128,3 +137,13 @@ class VoiceTelemetryEvent(CamelModel):
     # strings only - never patient content.
     engine_state: str = Field(default="", max_length=32)
     turn_status: str = Field(default="", max_length=32)
+    # Retry attempt number for the bounded automatic turn-delivery retry -
+    # 0 for the first (non-retry) attempt. Bounded well above
+    # MAX_DELIVERY_RETRIES (2) so a malformed/inflated value is rejected.
+    attempt: int | None = Field(default=None, ge=0, le=10)
+    # Internal failure category for livekit_engine_error (e.g.
+    # "agent_not_ready", "turn_delivery_failed", "turn_processing_timeout",
+    # "audio_transport_failed") - lets the SAME catch-all error event be
+    # broken down by cause without a free-text field. Bounded operational
+    # string only - never patient content.
+    reason: str = Field(default="", max_length=64)

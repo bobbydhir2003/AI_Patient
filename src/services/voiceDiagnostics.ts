@@ -87,12 +87,11 @@ export type VoiceEvent =
   | "livekit_patient_audio_started"
   | "livekit_patient_audio_completed"
   | "livekit_patient_audio_failed"
-  // --- Phase C1: readiness/timeout diagnosability (see the 4-device
-  // production-test inspection). Answers, from logs alone, whether a
-  // patient_turn_status data message arrived at all, whether it matched the
-  // pending turn, and exactly when the thinking-timeout watchdog was armed/
-  // cancelled/fired - without needing to reproduce the incident live.
-  | "livekit_first_turn_sent"
+  // --- readiness/timeout diagnosability (see the 4-device production-test
+  // inspection). Answers, from logs alone, whether a patient_turn_status
+  // data message arrived at all, whether it matched the pending turn, and
+  // exactly when the thinking-timeout watchdog was armed/cancelled/fired -
+  // without needing to reproduce the incident live.
   | "livekit_turn_status_received"
   | "livekit_turn_status_matched"
   | "livekit_turn_status_ignored"
@@ -102,7 +101,20 @@ export type VoiceEvent =
   | "livekit_audio_element_attached"
   | "livekit_audio_playing"
   | "livekit_audio_play_failed"
-  | "livekit_engine_error";
+  | "livekit_engine_error"
+  // --- Production reliability protocol (agent-ready handshake + turn
+  // delivery ACK + bounded automatic retry - see livekitPocEngine.ts's
+  // module docstring for the confirmed production incident this answers).
+  // Supersedes the old "livekit_first_turn_sent" event with a pair that
+  // distinguishes "about to call publishData" from "publishData resolved",
+  // closing the exact gap a prior forensic inspection identified.
+  | "livekit_agent_ready_received"
+  | "livekit_turn_publish_started"
+  | "livekit_turn_publish_resolved"
+  | "livekit_turn_ack_received"
+  | "livekit_turn_ack_timeout"
+  | "livekit_turn_auto_retry"
+  | "livekit_turn_delivery_failed";
 
 /** Stage-level failure category. See file header for how these map to the
  * report categories STATUS_PROBE_TRANSIENT / STATUS_CONFIRMED_UNAVAILABLE /
@@ -149,6 +161,10 @@ export interface VoiceEventMeta {
    * ("received" | "matched" | "parse_error" | "client_turn_id_mismatch" |
    * "unsupported_status"). Never patient text. */
   turnStatus?: string;
+  /** Retry attempt number for the bounded automatic turn-delivery retry
+   * (see livekitPocEngine.ts's armDeliveryWatchdog) - 0 for the first
+   * (non-retry) attempt. Never patient content. */
+  attempt?: number;
 }
 
 export interface VoiceCounters {
@@ -223,6 +239,9 @@ const WARN_EVENTS = new Set<VoiceEvent>([
   "livekit_thinking_timeout_fired",
   "livekit_audio_play_failed",
   "livekit_engine_error",
+  "livekit_turn_ack_timeout",
+  "livekit_turn_auto_retry",
+  "livekit_turn_delivery_failed",
 ]);
 
 function isDev(): boolean {
@@ -268,11 +287,14 @@ const TELEMETRY_EVENTS = new Set<VoiceEvent>([
   "livekit_patient_track_subscribed", "livekit_agent_started",
   "livekit_patient_audio_started", "livekit_patient_audio_completed",
   "livekit_patient_audio_failed",
-  "livekit_first_turn_sent", "livekit_turn_status_received",
+  "livekit_turn_status_received",
   "livekit_turn_status_matched", "livekit_turn_status_ignored",
   "livekit_thinking_timeout_started", "livekit_thinking_timeout_cancelled",
   "livekit_thinking_timeout_fired", "livekit_audio_element_attached",
   "livekit_audio_playing", "livekit_audio_play_failed", "livekit_engine_error",
+  "livekit_agent_ready_received", "livekit_turn_publish_started",
+  "livekit_turn_publish_resolved", "livekit_turn_ack_received",
+  "livekit_turn_ack_timeout", "livekit_turn_auto_retry", "livekit_turn_delivery_failed",
 ]);
 
 /**
@@ -296,6 +318,8 @@ function sendTelemetry(event: VoiceEvent, meta: VoiceEventMeta): void {
       durationMs: meta.durationMs ?? null,
       engineState: meta.engineState ?? "",
       turnStatus: meta.turnStatus ?? "",
+      attempt: meta.attempt ?? null,
+      reason: meta.reason ?? "",
     });
     void fetch(`${API_BASE_URL}/api/voice/telemetry`, {
       method: "POST",

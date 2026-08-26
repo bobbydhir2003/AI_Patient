@@ -367,7 +367,7 @@ def telemetry(
     """
     logger.info(
         "voice_telemetry event=%s correlation_id=%s case_id=%s status=%s category=%s "
-        "device=%s method=%s duration_ms=%s engine_state=%s turn_status=%s user_id=%s",
+        "device=%s method=%s duration_ms=%s engine_state=%s turn_status=%s attempt=%s reason=%s user_id=%s",
         payload.event,
         payload.correlation_id or "-",
         payload.case_id or "-",
@@ -378,6 +378,8 @@ def telemetry(
         f"{payload.duration_ms:.0f}" if payload.duration_ms is not None else "-",
         payload.engine_state or "-",
         payload.turn_status or "-",
+        payload.attempt if payload.attempt is not None else "-",
+        payload.reason or "-",
         current_user.id,
     )
     return {"ok": True}

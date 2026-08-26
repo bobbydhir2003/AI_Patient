@@ -488,13 +488,17 @@ def _fake_rtc_for_worker():
 
 class _FakeLocalParticipant:
     def __init__(self):
-        self.published_data: list[tuple[str, dict]] = []
+        # (topic, decoded_json_body, destination_identities) - the third
+        # element defaults to [] to match the real SDK's own "empty means
+        # broadcast to everyone" semantics (see Phase C's
+        # PocAgentSession._destination_identities).
+        self.published_data: list[tuple[str, dict, list]] = []
 
     async def publish_track(self, track, opts):
         pass
 
-    async def publish_data(self, payload, reliable=True, topic=""):
-        self.published_data.append((topic, json.loads(payload.decode())))
+    async def publish_data(self, payload, reliable=True, topic="", destination_identities=None):
+        self.published_data.append((topic, json.loads(payload.decode()), list(destination_identities or [])))
 
 
 class _FakeAgentRoom:
@@ -502,9 +506,10 @@ class _FakeAgentRoom:
     connected) - PocAgentSession only ever calls .on()/.local_participant on
     it, both reproduced here."""
 
-    def __init__(self):
+    def __init__(self, remote_identities: dict | None = None):
         self._handlers: dict = {}
         self.local_participant = _FakeLocalParticipant()
+        self.remote_participants: dict = remote_identities or {}
 
     def on(self, event, cb=None):
         # PocAgentSession uses `room.on(...)` as a DECORATOR
@@ -632,7 +637,12 @@ def test_poc_agent_session_turn_uses_tts_slot(monkeypatch, engine):
         asyncio.run(_run_one_turn(room, session_id, "carly"))
 
     assert calls == ["acquire", "release"]
-    statuses = [p[1]["status"] for p in room.local_participant.published_data]
+    # Filtered to the turn-lifecycle topic only - published_data also now
+    # carries agent_ready/turn_ack control messages (topic "agent_control"),
+    # which have no "status" key at all (see Phase C's protocol).
+    statuses = [
+        p[1]["status"] for p in room.local_participant.published_data if p[0] == "patient_turn_status"
+    ]
     assert statuses == ["speaking_started", "speaking_ended"]
 
 
@@ -650,6 +660,10 @@ def test_participant_disconnect_triggers_idempotent_shutdown(monkeypatch, engine
             room=room, session_id="sess-x", case_id="carly",
             on_shutdown=lambda reason: shutdown_reasons.append(reason),
         )
+        # This test is about disconnect/shutdown mechanics, not readiness
+        # verification - bypass the real DB existence check (see Phase C's
+        # _verify_session_exists) rather than seeding an unrelated session.
+        monkeypatch.setattr(session, "_verify_session_exists", lambda: True)
         asyncio.run(session.start())
 
         class _Student:
@@ -687,6 +701,11 @@ def test_two_jobs_do_not_share_state(monkeypatch, engine):
             room=room_b, session_id="session-b", case_id="camden",
             on_shutdown=lambda r: shutdowns_b.append(r),
         )
+        # Isolation-only test - bypass the real DB existence check (see
+        # Phase C's _verify_session_exists) rather than seeding two unrelated
+        # sessions purely to satisfy it.
+        monkeypatch.setattr(session_a, "_verify_session_exists", lambda: True)
+        monkeypatch.setattr(session_b, "_verify_session_exists", lambda: True)
         asyncio.run(session_a.start())
         asyncio.run(session_b.start())
 

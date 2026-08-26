@@ -983,6 +983,7 @@ export function InterviewPage() {
                 onStop={voice.stopConversation}
                 onInterrupt={voice.interruptPatient}
                 onRetry={voice.retry}
+                retryDisabled={voiceEngine === "livekit"}
               />
             }
           />

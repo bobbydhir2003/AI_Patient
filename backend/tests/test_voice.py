@@ -796,17 +796,16 @@ def test_telemetry_never_accepts_patient_text_field(engine):
     assert not hasattr(VoiceTelemetryEvent(event="tts_succeeded"), "text")
 
 
-def test_telemetry_accepts_phase_c1_livekit_event_names(engine, caplog):
-    """Phase C1 added 11 new LiveKit readiness/timeout diagnostic event names
-    (see voiceDiagnostics.ts) - the backend allowlist (VoiceTelemetryEventName)
+def test_telemetry_accepts_livekit_reliability_event_names(engine, caplog):
+    """LiveKit readiness/timeout/turn-delivery diagnostic event names (see
+    voiceDiagnostics.ts) - the backend allowlist (VoiceTelemetryEventName)
     must accept every one of them, or the frontend's own TELEMETRY_EVENTS
-    allowlist and this backend allowlist would silently disagree and no
-    Phase C1 event would ever reach the logs."""
+    allowlist and this backend allowlist would silently disagree and the
+    event would never reach the logs."""
     import logging
 
     client = make_voice_client(engine)
-    phase_c1_events = [
-        "livekit_first_turn_sent",
+    livekit_events = [
         "livekit_turn_status_received",
         "livekit_turn_status_matched",
         "livekit_turn_status_ignored",
@@ -817,9 +816,16 @@ def test_telemetry_accepts_phase_c1_livekit_event_names(engine, caplog):
         "livekit_audio_playing",
         "livekit_audio_play_failed",
         "livekit_engine_error",
+        "livekit_agent_ready_received",
+        "livekit_turn_publish_started",
+        "livekit_turn_publish_resolved",
+        "livekit_turn_ack_received",
+        "livekit_turn_ack_timeout",
+        "livekit_turn_auto_retry",
+        "livekit_turn_delivery_failed",
     ]
     with caplog.at_level(logging.INFO, logger="app.api.voice"):
-        for event in phase_c1_events:
+        for event in livekit_events:
             resp = client.post(
                 "/api/voice/telemetry",
                 json={
@@ -851,6 +857,50 @@ def test_telemetry_engine_state_and_turn_status_are_bounded_operational_strings(
     resp = client.post(
         "/api/voice/telemetry",
         json={"event": "livekit_engine_error", "engineState": "error", "turnStatus": "y" * 33},
+    )
+    assert resp.status_code == 422
+
+
+def test_telemetry_reason_field_categorizes_engine_error(engine, caplog):
+    """reason lets the single livekit_engine_error catch-all be broken down
+    by internal failure category (Part 6's taxonomy) without a free-text
+    field - accepts a plausible value and rejects an oversized one."""
+    import logging
+
+    client = make_voice_client(engine)
+    with caplog.at_level(logging.INFO, logger="app.api.voice"):
+        resp = client.post(
+            "/api/voice/telemetry",
+            json={"event": "livekit_engine_error", "correlationId": "turn-1", "reason": "turn_delivery_failed"},
+        )
+    assert resp.status_code == 200
+    assert any("reason=turn_delivery_failed" in r.message for r in caplog.records)
+
+    resp = client.post(
+        "/api/voice/telemetry",
+        json={"event": "livekit_engine_error", "reason": "x" * 65},
+    )
+    assert resp.status_code == 422
+
+
+def test_telemetry_attempt_field_is_bounded(engine, caplog):
+    """attempt (the automatic delivery-retry counter) must accept a small,
+    plausible value and reject an out-of-range one - MAX_DELIVERY_RETRIES is
+    2, so anything above the generous ge=0/le=10 bound is clearly garbage."""
+    import logging
+
+    client = make_voice_client(engine)
+    with caplog.at_level(logging.INFO, logger="app.api.voice"):
+        resp = client.post(
+            "/api/voice/telemetry",
+            json={"event": "livekit_turn_auto_retry", "correlationId": "turn-1", "attempt": 1},
+        )
+    assert resp.status_code == 200
+    assert any("attempt=1" in r.message for r in caplog.records)
+
+    resp = client.post(
+        "/api/voice/telemetry",
+        json={"event": "livekit_turn_auto_retry", "attempt": 11},
     )
     assert resp.status_code == 422
 

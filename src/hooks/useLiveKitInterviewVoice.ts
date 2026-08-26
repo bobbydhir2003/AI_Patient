@@ -51,6 +51,12 @@ function mapPocState(state: PocState): LiveKitVoiceUIState {
     case "idle":
       return "IDLE";
     case "connecting":
+    // Room connected + mic published is not yet "ready" (see
+    // livekitPocEngine.ts's Phase C protocol docstring: an explicit
+    // agent_ready handshake is required before LISTENING) - reusing the
+    // SAME UI state as "connecting" keeps this invisible to the student
+    // (no new badge/label), matching "keep student-facing messages simple".
+    case "waiting_for_agent":
       return "REQUESTING_PERMISSION";
     case "listening":
       return "LISTENING";

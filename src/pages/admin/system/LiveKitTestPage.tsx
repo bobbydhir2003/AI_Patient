@@ -24,6 +24,7 @@ const POC_CASE_ID = "carly";
 const STATE_LABELS: Record<PocState, string> = {
   idle: "Idle",
   connecting: "Connecting…",
+  waiting_for_agent: "Waiting for patient agent…",
   listening: "Listening",
   thinking: "Thinking…",
   speaking: "Speaking",

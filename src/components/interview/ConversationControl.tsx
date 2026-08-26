@@ -14,6 +14,13 @@ interface ConversationControlProps {
   onStop: () => void;
   onInterrupt: () => void;
   onRetry: () => void;
+  /** When true, the ERROR-state main button never acts as a manual "Retry"
+   * affordance - used for the LiveKit voice path, where recovery is fully
+   * automatic (agent-ready handshake + turn-delivery ACK + bounded retry,
+   * see livekitPocEngine.ts) and a student-facing retry button is explicitly
+   * out of scope by product requirement. Defaults to false so the legacy
+   * voice path's existing behavior is unchanged. */
+  retryDisabled?: boolean;
 }
 
 function statusText(state: VoiceConversationState, patientName: string): string {
@@ -52,6 +59,7 @@ export function ConversationControl({
   onStop,
   onInterrupt,
   onRetry,
+  retryDisabled = false,
 }: ConversationControlProps) {
   if (!supported) {
     return (
@@ -111,9 +119,17 @@ export function ConversationControl({
       mainAction = null;
       break;
     case "ERROR":
-      mainLabel = "Retry Voice Conversation";
-      mainAria = "Retry the voice conversation";
-      mainAction = onRetry;
+      if (retryDisabled) {
+        // No manual recovery affordance at all - recovery already happened
+        // automatically (or was already exhausted) inside the engine.
+        mainLabel = "Voice conversation stopped";
+        mainAria = "Voice conversation stopped";
+        mainAction = null;
+      } else {
+        mainLabel = "Retry Voice Conversation";
+        mainAria = "Retry the voice conversation";
+        mainAction = onRetry;
+      }
       break;
     case "FINISHED":
       mainLabel = "Conversation finished";

@@ -229,4 +229,114 @@ Notes:
   `ptai-livekit-agent.service`-style unit (or bump its own internal
   concurrency settings) - this is additive, matching how `APP_WORKERS` is
   scaled for the FastAPI backend above. Do not assume a specific number
-  without measuring it.
+  without measuring it. See "LiveKit horizontal scaling" below for the full
+  analysis and the recommended topology for 60-65 concurrent students.
+
+### LiveKit horizontal scaling
+
+**The dispatch mechanism already supports N identical workers with zero code
+changes.** `livekit_token_service.py` mints every token with an explicit
+`RoomAgentDispatch(agent_name=settings.livekit_agent_name)` entry (see
+`test_token_embeds_explicit_agent_dispatch_with_fixed_agent_name`) -
+LiveKit Cloud's own dispatcher assigns each new room's job to *any* currently
+registered worker process sharing that `agent_name`, load-balanced by each
+worker's self-reported load (`WorkerOptions.load_threshold`, prod default
+`0.7` - a worker stops receiving new jobs once its own CPU load crosses that
+threshold, and the dispatcher routes to a less-loaded one instead). Running
+two, five, or twenty copies of `ptai-livekit-agent.service` - on one box or
+spread across several - is therefore the intended scaling mechanism, not a
+workaround.
+
+**Per-session state is confirmed process-local.** Every `PocAgentSession` is
+constructed fresh per job (`entrypoint()`) with its own `session_id`,
+`case_id`, `job_id`, `room_id`, turn lock, and (Phase C) in-flight/completed
+`clientTurnId` dedup sets - there is no module-level dict/cache anywhere in
+`worker.py` keyed by session. Verified explicitly by
+`test_two_jobs_do_not_share_state` and Phase C's
+`test_two_sessions_have_independent_dedup_and_identity_state`/
+`test_two_sessions_deliver_status_to_their_own_room_only`. Additionally, each
+accepted job already runs in its own OS process
+(`JobExecutorType.PROCESS`, the framework default, unchanged here) - so even
+a bug in this isolation would still be contained to one interview, never
+leak across a whole worker, let alone across machines.
+
+**Shared capacity control already goes through Redis, not per-process
+memory.** `interview_slot()`/`tts_slot()` (`app/core/concurrency.py`) are
+Redis-backed distributed semaphores - the SAME ones every FastAPI worker
+uses for `/api/interviews` and `/api/voice` - and `patient_adapter.py`
+routes every OpenAI/ElevenLabs call through them (see
+`test_poc_agent_session_turn_uses_interview_slot`/`_uses_tts_slot`). This
+means the *provider-level* concurrency cap (how many simultaneous OpenAI/
+ElevenLabs calls are allowed fleet-wide) is already correct no matter how
+many LiveKit worker processes or machines are running - it is enforced in
+Redis, not in any one process's memory.
+
+**Remaining machine-local requirements to verify before adding a second
+machine** (none require code changes, all are `.env`/infrastructure
+configuration):
+1. `REDIS_URL` must point at ONE shared Redis instance (e.g. ElastiCache)
+   reachable from every worker machine - not a `localhost` Redis per box.
+   `settings.redis_required` already fails the process closed if
+   `REDIS_URL` is unset (see `app/core/config.py`), but nothing stops two
+   *different* Redis instances from each being individually "configured" and
+   silently maintaining two disconnected sets of counters - this is an
+   operational check, not something the code can enforce.
+2. `DATABASE_URL` must point at ONE shared, centrally-reachable database
+   (the same Postgres production already uses) - `config.py`'s own default
+   (`postgresql+psycopg2://ptai:ptai@localhost:5432/ptai`) is a `localhost`
+   URL, so an operator who forgets to override it on a second machine would
+   silently write transcripts to a second, disconnected database instead of
+   failing loudly. Verify `DATABASE_URL` is explicitly set to the shared
+   instance in every worker machine's `.env`.
+3. `LIVEKIT_AGENT_NAME` (-> `settings.livekit_agent_name`) must be IDENTICAL
+   across every worker machine - a typo here would silently create a worker
+   that registers but never receives any jobs (LiveKit has no one else to
+   dispatch to under that name), which looks like "the worker is running"
+   but behaves like "the worker doesn't exist."
+4. The agent's fixed participant identity (`AGENT_PARTICIPANT_IDENTITY =
+   "patient-agent"`) is reused by every worker process/machine - this is
+   intentional and safe, NOT a collision risk: identities only need to be
+   unique *within a room*, and every interview has its own room with at
+   most one agent participant in it.
+5. `WorkerOptions`' capacity-tuning fields (`load_threshold`,
+   `num_idle_processes`, `job_memory_warn_mb`, `job_memory_limit_mb`) are
+   currently left at framework defaults in `_build_worker_options()` -
+   reasonable to start, but should be set explicitly (not left to
+   framework-version defaults that could change) once real per-interview
+   CPU/memory numbers exist from a load test, so each machine's own capacity
+   is declared rather than assumed.
+
+**Recommended topology for 60-65 concurrent students** (to be confirmed by
+an actual load test, not assumed - see the load-testing section above):
+- **FastAPI backend**: unchanged from the existing `APP_WORKERS`-scaled
+  Uvicorn deployment - LiveKit voice traffic barely touches it (one token
+  mint per interview start; the rest is WebRTC data/media, not HTTP).
+- **LiveKit SFU**: LiveKit Cloud (managed) - no self-hosting concern for
+  media routing/relay at this scale.
+- **LiveKit agent workers**: 2-3 EC2 instances (start with 2, add a 3rd if
+  load testing shows headroom is thin), each running ONE
+  `ptai-livekit-agent.service`, all sharing the SAME `LIVEKIT_AGENT_NAME`,
+  `REDIS_URL`, and `DATABASE_URL`. Splitting ~65 concurrent interviews
+  across 2-3 machines (roughly 22-33 per machine) keeps each machine's
+  per-job-process overhead (a full Python interpreter + SQLAlchemy +
+  livekit.rtc import graph per accepted job - see the module docstring's
+  `JobExecutorType.PROCESS` note) comfortably below the point where CPU/
+  memory contention would push `load_threshold` past its `0.7` cutoff and
+  start silently rejecting new jobs on that machine mid-event.
+- **Redis**: ONE managed instance (e.g. ElastiCache), shared by the FastAPI
+  backend AND every LiveKit worker machine - already the case for
+  `interview_slot()`/`tts_slot()`; no new capacity concern, since the
+  semaphore keys are tiny and the LiveKit agents just add more clients
+  against the same limits, not a new kind of load.
+- **Database**: the existing shared Postgres instance - no schema or
+  connection-pooling change from LiveKit's addition (`patient_adapter.py`
+  reuses the same repositories/models every HTTP request already writes
+  through).
+
+**Blockers before a real 65-user load test** (see task list): (1) run it
+against 2+ worker machines from the start, not one, so the topology above is
+validated rather than assumed; (2) explicitly set `WorkerOptions`' capacity
+fields per machine once real per-interview CPU/RAM numbers exist; (3)
+confirm `REDIS_URL`/`DATABASE_URL` are identically the shared instances on
+every machine (item 1/2 above) - a misconfigured second machine would fail
+silently in a way that looks like reduced capacity, not an error.
