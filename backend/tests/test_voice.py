@@ -725,3 +725,88 @@ def test_no_db_session_held_open_during_audio_stream(engine, db_session, monkeyp
     # back, BEFORE any chunk of audio has been consumed, they are all closed.
     assert open_count["n"] == 0
     assert response.headers["content-type"].startswith("audio/mpeg")
+
+
+# ------------------------------------------------- POST /voice/telemetry
+def test_telemetry_requires_auth(engine):
+    """Unauthenticated telemetry POSTs are rejected, same as every other
+    voice endpoint - this is not an open logging sink."""
+    client = make_client(engine, authenticate=False)
+    resp = client.post("/api/voice/telemetry", json={"event": "tts_succeeded"})
+    assert resp.status_code == 401
+
+
+def test_telemetry_accepts_a_known_event_and_logs_it(engine, caplog):
+    """A valid, allowlisted event is accepted and logged with its
+    correlation_id - the whole point of this endpoint (see the mobile voice
+    reliability audit's telemetry design)."""
+    import logging
+
+    client = make_voice_client(engine)
+    with caplog.at_level(logging.INFO, logger="app.api.voice"):
+        resp = client.post(
+            "/api/voice/telemetry",
+            json={
+                "event": "audio_play_failed",
+                "correlationId": "gen-42",
+                "caseId": "carly",
+                "category": "AUDIO_PLAY_NOT_ALLOWED",
+                "deviceCategory": "ios",
+                "playbackMethod": "blob",
+            },
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+    assert any(
+        "voice_telemetry" in r.message and "gen-42" in r.message and "audio_play_failed" in r.message
+        for r in caplog.records
+    )
+
+
+def test_telemetry_rejects_unknown_event_name(engine):
+    """The event field is a validated allowlist (Literal[...] in
+    VoiceTelemetryEvent), not free text - an arbitrary/injected string is
+    rejected with 422, never logged. This is what prevents the endpoint from
+    being usable as an arbitrary log-injection sink."""
+    client = make_voice_client(engine)
+    resp = client.post(
+        "/api/voice/telemetry",
+        json={"event": "not_a_real_event\nFAKE LOG LINE INJECTED"},
+    )
+    assert resp.status_code == 422
+
+
+def test_telemetry_never_accepts_patient_text_field(engine):
+    """The schema has no field for patient text/transcript content at all -
+    an attempt to smuggle it in under an unexpected key is simply ignored
+    (Pydantic drops unknown fields by default), never stored or logged."""
+    client = make_voice_client(engine)
+    resp = client.post(
+        "/api/voice/telemetry",
+        json={
+            "event": "tts_succeeded",
+            "patientText": "this must never be accepted or logged",
+            "text": "also must never be accepted or logged",
+        },
+    )
+    assert resp.status_code == 200  # unknown fields are dropped, not rejected
+    from app.schemas.voice_schema import VoiceTelemetryEvent
+
+    assert not hasattr(VoiceTelemetryEvent(event="tts_succeeded"), "patientText")
+    assert not hasattr(VoiceTelemetryEvent(event="tts_succeeded"), "text")
+
+
+def test_telemetry_rate_limit_bucket_is_isolated_from_synthesize():
+    """Telemetry must not share /synthesize's rate-limit bucket - otherwise a
+    burst of diagnostic events could exhaust a student's real TTS budget.
+    rate_limit(bucket, ...) closes over `bucket`; inspect it directly rather
+    than firing 60+ real requests to prove the counters are independent."""
+    from app.api.voice import _voice_rate_limit, _voice_telemetry_rate_limit
+
+    def bucket_of(dependency) -> str:
+        idx = dependency.__code__.co_freevars.index("bucket")
+        return dependency.__closure__[idx].cell_contents
+
+    assert bucket_of(_voice_rate_limit) == "voice"
+    assert bucket_of(_voice_telemetry_rate_limit) == "voice_telemetry"
+    assert bucket_of(_voice_rate_limit) != bucket_of(_voice_telemetry_rate_limit)

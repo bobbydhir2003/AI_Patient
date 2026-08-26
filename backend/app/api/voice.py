@@ -31,7 +31,7 @@ from app.database.connection import get_db_factory
 from app.core.rate_limit import rate_limit
 from app.dependencies.auth import get_current_user, load_user_from_token, user_can_access_session
 from app.models import ConversationTurn, InterviewSession, User
-from app.schemas.voice_schema import VoiceStatusOut, VoiceSynthesizeRequest
+from app.schemas.voice_schema import VoiceStatusOut, VoiceSynthesizeRequest, VoiceTelemetryEvent
 from app.voice.audio_cache import get_audio_cache, make_cache_key
 from app.voice.elevenlabs_client import ElevenLabsClient, get_elevenlabs_client, media_type_for
 from app.voice.speech_style_mapper import map_speech_style
@@ -42,6 +42,9 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/voice", tags=["voice"])
 
 _voice_rate_limit = rate_limit("voice", lambda s: s.voice_rate_limit)
+# Separate bucket from _voice_rate_limit: telemetry must never eat into a
+# student's /synthesize budget (same configured rate, isolated bucket name).
+_voice_telemetry_rate_limit = rate_limit("voice_telemetry", lambda s: s.voice_rate_limit)
 
 
 @router.get("/status/{case_id}", response_model=VoiceStatusOut, dependencies=[Depends(get_current_user)])
@@ -246,14 +249,17 @@ def synthesize(
 
     slot = _tts_slot().acquire()
     if not slot.ok:
-        logger.info("tts_browser_fallback case_id=%s reason=no_capacity_slot", ctx.case_id)
+        logger.info(
+            "tts_browser_fallback case_id=%s reason=no_capacity_slot correlation_id=%s",
+            ctx.case_id, payload.correlation_id or "-",
+        )
         raise VoiceNotAvailableError()
     if ctx.session_id:
         _get_tele().live.set_status(ctx.session_id, "STREAMING_AUDIO")
 
     logger.info(
-        "tts_request_start case_id=%s provider=elevenlabs chars=%d speech=%s",
-        ctx.case_id, len(ctx.text), ctx.speech or "default",
+        "tts_request_start case_id=%s provider=elevenlabs chars=%d speech=%s correlation_id=%s",
+        ctx.case_id, len(ctx.text), ctx.speech or "default", payload.correlation_id or "-",
     )
 
     if settings.debug:
@@ -329,8 +335,47 @@ def synthesize(
                 logger.warning("tts_stream_aborted case_id=%s", ctx.case_id)
                 return
             cache.put(ctx.cache_key, b"".join(buffered))
-            logger.info("tts_request_complete case_id=%s", ctx.case_id)
+            logger.info(
+                "tts_request_complete case_id=%s correlation_id=%s",
+                ctx.case_id, payload.correlation_id or "-",
+            )
         finally:
             slot.release()
 
     return StreamingResponse(audio_stream(), media_type=ctx.media_type, headers=headers)
+
+
+@router.post("/telemetry", dependencies=[Depends(_voice_telemetry_rate_limit)])
+def telemetry(
+    payload: VoiceTelemetryEvent,
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    """Fire-and-forget client-side voice-playback diagnostics (see
+    voiceDiagnostics.ts). Logging only - no DB write, no patient content.
+
+    Purpose: join a browser-side event (e.g. "ElevenLabs audio arrived but
+    audio.play() was rejected") to the matching server-side
+    tts_request_start/tts_request_complete log line for the SAME turn via
+    correlation_id, so a mobile robotic-fallback report can be diagnosed from
+    logs alone instead of requiring a student's phone in hand.
+
+    The request schema (VoiceTelemetryEvent) has no field capable of carrying
+    patient text, transcript content, audio bytes, or a secret - `event` is a
+    validated enum (unknown values are rejected with 422, not logged), and
+    every other field is a bounded-length operational string or number. This
+    endpoint can therefore never be used to inject arbitrary log content.
+    """
+    logger.info(
+        "voice_telemetry event=%s correlation_id=%s case_id=%s status=%s category=%s "
+        "device=%s method=%s duration_ms=%s user_id=%s",
+        payload.event,
+        payload.correlation_id or "-",
+        payload.case_id or "-",
+        payload.status if payload.status is not None else "-",
+        payload.category or "-",
+        payload.device_category or "-",
+        payload.playback_method or "-",
+        f"{payload.duration_ms:.0f}" if payload.duration_ms is not None else "-",
+        current_user.id,
+    )
+    return {"ok": True}

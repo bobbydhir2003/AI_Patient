@@ -19,8 +19,12 @@ import { fileURLToPath } from "node:url";
 // 1. Make the compiled Vite modules loadable in Node (import.meta.env shim).
 // ---------------------------------------------------------------------------
 const buildDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", ".test-build", "services");
-for (const file of ["patientVoiceService.js", "api.js", "textToSpeechService.js", "voicePlaybackState.js"]) {
+for (const file of [
+  "patientVoiceService.js", "api.js", "textToSpeechService.js",
+  "voicePlaybackState.js", "voiceDiagnostics.js", "mobileAudio.js",
+]) {
   const p = path.join(buildDir, file);
+  if (!fs.existsSync(p)) continue;
   let code = fs.readFileSync(p, "utf8");
   code = code.replaceAll("import.meta.env", "(globalThis.__viteEnv ?? {})");
   // Node ESM needs explicit extensions on relative imports (tsc leaves them bare).

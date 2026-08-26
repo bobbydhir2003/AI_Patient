@@ -75,6 +75,11 @@ export interface UseVoiceConversationOptions {
   onSubmitQuestion: (text: string, source?: "typed" | "speech") => Promise<PatientExchange>;
   /** Interim transcript display (e.g. into the chat input). */
   onInterim: (transcript: string) => void;
+  /** Passed straight through to speakPatientResponse - see its docstring in
+   * patientVoiceService.ts. Lets the page surface a "Tap to hear patient"
+   * affordance when ElevenLabs generated valid audio but playback failed. */
+  onPlaybackRecoveryAvailable?: (attemptRecovery: () => Promise<boolean>) => void;
+  onPlaybackRecoveryResolved?: () => void;
 }
 
 export interface UseVoiceConversationResult {
@@ -263,6 +268,8 @@ export function useVoiceConversation(
             },
           });
         },
+        onPlaybackRecoveryAvailable: optionsRef.current.onPlaybackRecoveryAvailable,
+        onPlaybackRecoveryResolved: optionsRef.current.onPlaybackRecoveryResolved,
       }).then(() => {
         vadRef.current?.stopMonitoring();
         const next = dispatch({ type: "TTS_ENDED" });

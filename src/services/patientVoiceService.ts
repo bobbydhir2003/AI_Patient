@@ -31,6 +31,7 @@
  * the progressive reducer makes CANCEL/FAIL terminal in every phase.
  */
 import { API_BASE_URL, fetchVoiceStatus, withAuthHeaders } from "./api";
+import { isIOSDevice } from "./mobileAudio";
 import { cancelActiveStream } from "./streamRegistry";
 import {
   cancelSpeech as cancelBrowserSpeech,
@@ -114,12 +115,50 @@ export interface SpeakOptions {
   speechStyle?: PatientSpeechStyle | null;
   /** Fires when audio actually starts playing (used to arm barge-in VAD). */
   onStart?: () => void;
+  /** Set internally (see speakPatientResponse) to a stable, non-sensitive id
+   * shared with the backend /synthesize call, so a browser diagnostic event
+   * can be joined to the matching server-side log line for the same turn.
+   * Callers do not need to set this themselves. */
+  correlationId?: string;
+  /**
+   * Mobile/playback recovery hook. Called AT MOST ONCE per turn, only when
+   * ElevenLabs generated valid audio but playback itself failed for a
+   * recoverable reason (autoplay block, decode hiccup) - never for a confirmed
+   * generation failure (409-exhausted/502/5xx/timeout/empty audio), and never
+   * when no valid audio exists to replay.
+   *
+   * The caller (UI) should surface a simple affordance (e.g. "Tap to hear
+   * patient") and, on a REAL click/tap event, invoke the provided function.
+   * That function replays the SAME already-downloaded ElevenLabs audio via a
+   * fresh <audio> element created inside the gesture - no new /synthesize
+   * call, no OpenAI call, no transcript change. Resolves true if the fresh
+   * gesture let the audio play, false if it failed again (the caller then
+   * falls through to the existing browser-TTS fallback, exactly once).
+   */
+  onPlaybackRecoveryAvailable?: (attemptRecovery: () => Promise<boolean>) => void;
+  /** Called when a previously-offered recovery affordance is no longer valid
+   * (the student tapped it, the turn was superseded/cancelled, or it timed
+   * out) so the UI can hide the affordance. Always called after
+   * onPlaybackRecoveryAvailable fires, exactly once per turn that offered it. */
+  onPlaybackRecoveryResolved?: () => void;
 }
 
 /** If progressive playback has not actually started ('playing') within this
  * window, the attempt is failed over to the next provider. Prevents a silent
  * MediaSource stall from ever leaving the speaking promise pending. */
 export const PROGRESSIVE_PLAYBACK_START_TIMEOUT_MS = 10_000;
+
+/** Bounded delay before the ONE allowed retry of a 409 ("no TTS capacity
+ * slot") response. Short and fixed - no exponential backoff, and this is
+ * exactly one retry, never more. A 409 means the backend's Redis TTS
+ * semaphore had no free slot in the ~5s it already waited server-side
+ * (tts_wait_seconds) - ElevenLabs itself was never contacted, so this retry
+ * costs no provider capacity; it is just one more chance at a slot shortly
+ * after the first one was full. This is deliberately NOT used for any other
+ * failure (502/5xx/timeout/empty audio) - those already exhausted the
+ * backend's own 4-attempt ElevenLabs retry loop, and retrying them here
+ * would double provider load for no benefit. */
+export const TTS_CAPACITY_RETRY_DELAY_MS = 400;
 
 const guard = createPlaybackGuard();
 
@@ -273,37 +312,75 @@ async function playElevenLabs(options: SpeakOptions, generation: number, t0: num
   const requestStartedAt = performance.now(); // pause overlap starts HERE
   devLog("tts request start", { caseId: options.caseId, provider: "elevenlabs" });
   devTiming("patient response → TTS request start", t0);
-  logVoiceEvent("tts_request_started", { caseId: options.caseId, path: "progressive" });
+  logVoiceEvent("tts_request_started", { caseId: options.caseId, path: "progressive", correlationId: options.correlationId });
 
-  const response = await fetch(`${API_BASE_URL}/api/voice/synthesize`, {
-    method: "POST",
-    headers: withAuthHeaders({ "Content-Type": "application/json" }),
-    signal: abort.signal,
-    body: JSON.stringify({
-      caseId: options.caseId,
-      text: options.text,
-      sessionId: options.sessionId ?? "",
-      turnId: options.turnId ?? "",
-      speechStyle: options.speechStyle ?? null,
-    }),
+  const requestBody = JSON.stringify({
+    caseId: options.caseId,
+    text: options.text,
+    sessionId: options.sessionId ?? "",
+    turnId: options.turnId ?? "",
+    speechStyle: options.speechStyle ?? null,
+    correlationId: options.correlationId ?? "",
   });
+  const fetchSynthesize = () =>
+    fetch(`${API_BASE_URL}/api/voice/synthesize`, {
+      method: "POST",
+      headers: withAuthHeaders({ "Content-Type": "application/json" }),
+      signal: abort.signal,
+      body: requestBody,
+    });
+
+  let response = await fetchSynthesize();
+
+  // ONE bounded retry, ONLY for 409 (no TTS capacity slot). See
+  // TTS_CAPACITY_RETRY_DELAY_MS for why 409 - and only 409 - is safe to
+  // retry here without duplicating the backend's own provider retry loop.
+  if (response.status === 409) {
+    logVoiceEvent("tts_capacity_retry_scheduled", { caseId: options.caseId, status: 409, correlationId: options.correlationId });
+    await cancellableDelay(TTS_CAPACITY_RETRY_DELAY_MS);
+    if (!guard.isCurrent(generation)) return; // cancelled/superseded during the wait
+    logVoiceEvent("tts_capacity_retry_started", { caseId: options.caseId, correlationId: options.correlationId });
+    response = await fetchSynthesize();
+    if (response.status === 409) {
+      logVoiceEvent("tts_capacity_retry_failed", {
+        caseId: options.caseId, status: 409, category: "TTS_HTTP_ERROR", correlationId: options.correlationId,
+      });
+    } else if (response.ok) {
+      logVoiceEvent("tts_capacity_retry_succeeded", { caseId: options.caseId, correlationId: options.correlationId });
+    }
+  }
+
   if (!response.ok) {
-    logVoiceEvent("tts_http_failed", { caseId: options.caseId, status: response.status, category: "TTS_HTTP_ERROR" });
+    logVoiceEvent("tts_http_failed", {
+      caseId: options.caseId, status: response.status, category: "TTS_HTTP_ERROR", correlationId: options.correlationId,
+    });
     throw new VoiceStageError("tts_http", "TTS_HTTP_ERROR", `voice_synthesis_http_${response.status}`);
   }
-  logVoiceEvent("tts_http_success", { caseId: options.caseId, status: response.status });
+  logVoiceEvent("tts_http_success", { caseId: options.caseId, status: response.status, correlationId: options.correlationId });
   devTiming("patient response → response headers", t0);
   const pauseBeforeMs = clampPauseMs(
     response.headers.get("X-Pause-Before-Ms") ?? options.speechStyle?.pauseBeforeMs ?? 150,
   );
 
-  if (canUseMediaSource() && response.body) {
+  // Device-aware primary strategy: iOS prefers fully-buffered Blob playback
+  // FIRST (skipping MediaSource entirely) rather than progressive. Android
+  // and desktop keep the existing progressive-first path - see isIOSDevice's
+  // docstring for why this is scoped to iOS specifically, not "mobile"
+  // generally, and the mobile voice reliability audit for the evidence.
+  const useBufferedFirst = isIOSDevice();
+  if (useBufferedFirst) {
+    logVoiceEvent("mobile_buffered_first", { caseId: options.caseId, correlationId: options.correlationId });
+  }
+
+  if (!useBufferedFirst && canUseMediaSource() && response.body) {
     await playProgressive(response.body, options, generation, pauseBeforeMs, requestStartedAt, t0);
     return;
   }
-  // MediaSource unsupported in this browser: keep the ElevenLabs voice via
-  // Blob playback (full buffering), still with the overlapped pause.
-  devLog("MediaSource unsupported; using Blob playback", { caseId: options.caseId });
+  if (!useBufferedFirst) {
+    // MediaSource unsupported in this browser: keep the ElevenLabs voice via
+    // Blob playback (full buffering), still with the overlapped pause.
+    devLog("MediaSource unsupported; using Blob playback", { caseId: options.caseId });
+  }
   await playBuffered(response, options, generation, pauseBeforeMs, requestStartedAt, t0);
 }
 
@@ -318,7 +395,7 @@ async function playElevenLabsBuffered(options: SpeakOptions, generation: number,
   const abort = new AbortController();
   activeAbortController = abort;
   const requestStartedAt = performance.now();
-  logVoiceEvent("tts_request_started", { caseId: options.caseId, path: "blob_recovery" });
+  logVoiceEvent("tts_request_started", { caseId: options.caseId, path: "blob_recovery", correlationId: options.correlationId });
   const response = await fetch(`${API_BASE_URL}/api/voice/synthesize`, {
     method: "POST",
     headers: withAuthHeaders({ "Content-Type": "application/json" }),
@@ -329,15 +406,19 @@ async function playElevenLabsBuffered(options: SpeakOptions, generation: number,
       sessionId: options.sessionId ?? "",
       turnId: options.turnId ?? "",
       speechStyle: options.speechStyle ?? null,
+      correlationId: options.correlationId ?? "",
     }),
   });
   if (!response.ok) {
     logVoiceEvent("tts_http_failed", {
       caseId: options.caseId, status: response.status, path: "blob_recovery", category: "TTS_HTTP_ERROR",
+      correlationId: options.correlationId,
     });
     throw new VoiceStageError("tts_http", "TTS_HTTP_ERROR", `voice_synthesis_http_${response.status}`);
   }
-  logVoiceEvent("tts_http_success", { caseId: options.caseId, status: response.status, path: "blob_recovery" });
+  logVoiceEvent("tts_http_success", {
+    caseId: options.caseId, status: response.status, path: "blob_recovery", correlationId: options.correlationId,
+  });
   const pauseBeforeMs = clampPauseMs(
     response.headers.get("X-Pause-Before-Ms") ?? options.speechStyle?.pauseBeforeMs ?? 150,
   );
@@ -569,8 +650,85 @@ function playProgressive(
   });
 }
 
-/** Blob playback (MediaSource-unsupported browsers only). Full download, then
- * play - still using the overlapped pause. */
+type BufferedAttemptResult =
+  | { status: "ok" }
+  | { status: "failed"; category: VoiceFailureCategory }
+  | { status: "cancelled" };
+
+/**
+ * ONE playback attempt of an already-downloaded Blob: a fresh <audio>
+ * element + a fresh object URL minted from the SAME Blob object every call
+ * (the Blob itself is never revoked/consumed - only the string URL is, per
+ * attempt - so calling this twice on the same blob is always safe). Never
+ * throws; always resolves with the outcome. `path` labels the diagnostic
+ * event so a first attempt and a gesture-recovery replay are distinguishable
+ * in logs/telemetry without being different code paths.
+ */
+function attemptBufferedPlayback(
+  blob: Blob,
+  options: SpeakOptions,
+  path: string,
+  t0: number,
+): Promise<BufferedAttemptResult> {
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  activeObjectUrl = url;
+  activeAudio = audio;
+
+  return new Promise<BufferedAttemptResult>((resolve) => {
+    let settled = false;
+    const finish = (result: BufferedAttemptResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    // Interruption/new-turn while THIS attempt is in flight: neutral, not a
+    // failure - never offer recovery for a plain cancellation.
+    activeResolve = () => finish({ status: "cancelled" });
+    audio.onplay = () => {
+      speaking = true;
+      devLog("playback start", { caseId: options.caseId, progressive: false, path });
+      devTiming("patient response → playback start (blob path)", t0);
+      logVoiceEvent("audio_play_started", { caseId: options.caseId, path, correlationId: options.correlationId });
+      options.onStart?.();
+    };
+    audio.onended = () => {
+      devLog("playback end", { caseId: options.caseId, path });
+      logVoiceEvent("audio_play_success", { caseId: options.caseId, path, correlationId: options.correlationId });
+      releaseAudio();
+      finish({ status: "ok" });
+    };
+    audio.onerror = () => {
+      logVoiceEvent("audio_decode_failed", {
+        caseId: options.caseId, path, reason: "media_error", category: "AUDIO_DECODE_ERROR",
+        correlationId: options.correlationId, ...describeError(audio.error),
+      });
+      releaseAudio();
+      finish({ status: "failed", category: "AUDIO_DECODE_ERROR" });
+    };
+    audio.play().catch((err: unknown) => {
+      const category = classifyPlayRejection(err);
+      logVoiceEvent("audio_play_failed", {
+        caseId: options.caseId, path, category, correlationId: options.correlationId, ...describeError(err),
+      });
+      releaseAudio();
+      finish({ status: "failed", category });
+    });
+  });
+}
+
+/**
+ * Blob playback: full download, then play - still using the overlapped
+ * pause. Used as (a) the primary path on iOS (see isIOSDevice), (b) the
+ * MediaSource-unsupported fallback, and (c) the progressive-failure recovery
+ * path (via playElevenLabsBuffered). All three share this ONE implementation
+ * and its recovery behavior - no duplicated playback logic per caller.
+ *
+ * If the first attempt fails for a recoverable (playback-stage) reason and
+ * the caller offered options.onPlaybackRecoveryAvailable, the ALREADY
+ * downloaded Blob is retained (never re-fetched, never re-synthesized) and
+ * offered for a single user-gesture replay before this function ever throws.
+ */
 async function playBuffered(
   response: Response,
   options: SpeakOptions,
@@ -583,60 +741,74 @@ async function playBuffered(
   activeAbortController = null;
   if (!guard.isCurrent(generation)) return; // cancelled/superseded while downloading
   if (blob.size === 0) {
-    logVoiceEvent("tts_empty_audio", { caseId: options.caseId, path: "blob", category: "TTS_EMPTY_AUDIO" });
+    logVoiceEvent("tts_empty_audio", {
+      caseId: options.caseId, path: "blob", category: "TTS_EMPTY_AUDIO", correlationId: options.correlationId,
+    });
     throw new VoiceStageError("tts_http", "TTS_EMPTY_AUDIO", "voice_synthesis_empty_audio");
   }
-  logVoiceEvent("audio_blob_ready", { caseId: options.caseId, path: "blob" });
+  logVoiceEvent("audio_blob_ready", { caseId: options.caseId, path: "blob", correlationId: options.correlationId });
   devTiming("patient response → full audio downloaded (blob path)", t0);
 
   const wait = remainingPauseMs(pauseBeforeMs, performance.now() - requestStartedAt);
   await cancellableDelay(wait);
   if (!guard.isCurrent(generation)) return; // cancelled during the pause
 
-  const url = URL.createObjectURL(blob);
-  const audio = new Audio(url);
-  activeObjectUrl = url;
-  activeAudio = audio;
+  const first = await attemptBufferedPlayback(blob, options, "blob", t0);
+  if (first.status !== "failed") return; // played fine, or a plain cancellation - both terminal here
+  if (!guard.isCurrent(generation)) return; // superseded while the attempt was in flight
 
-  await new Promise<void>((resolve, reject) => {
+  if (options.onPlaybackRecoveryAvailable) {
+    const recovered = await offerPlaybackRecovery(blob, options, generation, first.category, t0);
+    if (recovered) return; // ElevenLabs voice heard via the fresh gesture
+    if (!guard.isCurrent(generation)) return; // superseded while waiting for the tap
+  }
+
+  throw new VoiceStageError("audio_play", first.category, "voice_play_rejected");
+}
+
+/**
+ * Wait for a user-gesture replay of `blob` (already downloaded, already
+ * failed to autoplay once) and resolve true/false with the outcome. Never
+ * calls OpenAI, never touches the transcript, never re-fetches /synthesize -
+ * this is purely a client-side replay of audio the backend already produced.
+ * A cancellation/new-turn while waiting for the tap resolves false via the
+ * SAME activeResolve mechanism every other cancellable wait in this module
+ * uses, so a stale turn's recovery affordance can never fire late.
+ */
+function offerPlaybackRecovery(
+  blob: Blob,
+  options: SpeakOptions,
+  generation: number,
+  failureCategory: VoiceFailureCategory,
+  t0: number,
+): Promise<boolean> {
+  logVoiceEvent("audio_user_gesture_recovery_offered", {
+    caseId: options.caseId, category: failureCategory, correlationId: options.correlationId,
+  });
+  return new Promise<boolean>((resolveRecovery) => {
     let settled = false;
-    const finish = (fn: () => void) => {
+    const settle = (ok: boolean) => {
       if (settled) return;
       settled = true;
-      fn();
+      activeResolve = null;
+      options.onPlaybackRecoveryResolved?.();
+      resolveRecovery(ok);
     };
-    activeResolve = () => finish(resolve); // cancellation resolves (not an error)
-    audio.onplay = () => {
-      speaking = true;
-      devLog("playback start", { caseId: options.caseId, progressive: false });
-      devTiming("patient response → playback start (blob path)", t0);
-      logVoiceEvent("audio_play_started", { caseId: options.caseId, path: "blob" });
-      options.onStart?.();
+    activeResolve = () => settle(false); // cancelled/superseded while waiting for the tap
+    const attemptRecovery = async (): Promise<boolean> => {
+      if (settled || !guard.isCurrent(generation)) return false; // stale turn: never replay old audio
+      logVoiceEvent("audio_user_gesture_recovery_clicked", { caseId: options.caseId, correlationId: options.correlationId });
+      const result = await attemptBufferedPlayback(blob, options, "blob_recovery_tap", t0);
+      const ok = result.status === "ok";
+      logVoiceEvent(
+        ok ? "audio_user_gesture_recovery_success" : "audio_user_gesture_recovery_failed",
+        { caseId: options.caseId, correlationId: options.correlationId },
+      );
+      settle(ok);
+      return ok;
     };
-    audio.onended = () => {
-      devLog("playback end", { caseId: options.caseId });
-      logVoiceEvent("audio_play_success", { caseId: options.caseId, path: "blob" });
-      releaseAudio();
-      finish(resolve);
-    };
-    audio.onerror = () => {
-      logVoiceEvent("audio_decode_failed", {
-        caseId: options.caseId, path: "blob", reason: "media_error", category: "AUDIO_DECODE_ERROR",
-        ...describeError(audio.error),
-      });
-      releaseAudio();
-      finish(() => reject(new VoiceStageError("audio_decode", "AUDIO_DECODE_ERROR", "voice_playback_failed")));
-    };
-    audio.play().catch((err: unknown) => {
-      const category = classifyPlayRejection(err);
-      logVoiceEvent("audio_play_failed", {
-        caseId: options.caseId, path: "blob", category, ...describeError(err),
-      });
-      releaseAudio();
-      finish(() => reject(new VoiceStageError("audio_play", category, "voice_play_rejected")));
-    });
+    options.onPlaybackRecoveryAvailable!(attemptRecovery);
   });
-  activeResolve = null;
 }
 
 async function playBrowser(options: SpeakOptions, fallbackRate: number): Promise<void> {
@@ -654,13 +826,20 @@ async function playBrowser(options: SpeakOptions, fallbackRate: number): Promise
  * or been cancelled. Never rejects: if every provider fails, it resolves so
  * the interview continues (the reply is already visible in the transcript).
  */
-export async function speakPatientResponse(options: SpeakOptions): Promise<void> {
+export async function speakPatientResponse(rawOptions: SpeakOptions): Promise<void> {
   const t0 = performance.now(); // ≈ patient response received (called right after)
   const generation = guard.begin();
   // Only one patient audio stream may exist: stop anything already playing.
   stopActivePlayback();
 
-  if (!options.text.trim()) return;
+  if (!rawOptions.text.trim()) return;
+
+  // Stable per-turn correlation id, reused as-is if the caller already has a
+  // real turnId (committed playback) so it lines up with the backend's own
+  // tts_request_start/complete logs for the SAME turn; never sensitive (it is
+  // already sent to the backend on every /synthesize call as-is).
+  const correlationId = rawOptions.turnId || `gen-${generation}`;
+  const options: SpeakOptions = { ...rawOptions, correlationId };
 
   const status = await getVoiceStatus(options.caseId);
   if (!guard.isCurrent(generation)) return; // a newer request or cancel won
@@ -673,21 +852,25 @@ export async function speakPatientResponse(options: SpeakOptions): Promise<void>
   if (shouldAttemptElevenLabs(status)) {
     try {
       await playElevenLabs(options, generation, t0);
-      logVoiceEvent("tts_succeeded", { caseId: options.caseId, path: "progressive" });
+      logVoiceEvent("tts_succeeded", { caseId: options.caseId, path: "progressive", correlationId });
       return;
     } catch (err) {
       if (!guard.isCurrent(generation)) return; // cancelled mid-flight: done
       releaseAudio();
-      // Recovery order (mobile-friendly): if PLAYBACK (progressive MediaSource
-      // decode, or an audio.play() rejection) failed but the ElevenLabs
-      // request itself was fine, try a standard Blob download of the same
-      // audio BEFORE dropping to the robotic browser voice. A confirmed
-      // tts_http-stage failure skips straight to browser TTS - re-fetching
-      // the identical request would just fail the same way again.
-      if (canUseMediaSource() && !isFetchLevelVoiceError(err)) {
+      // Recovery order: if PLAYBACK (progressive MediaSource decode, or an
+      // audio.play() rejection) failed but the ElevenLabs request itself was
+      // fine, try a standard Blob download of the same audio BEFORE dropping
+      // to the robotic browser voice. A confirmed tts_http-stage failure
+      // skips straight to browser TTS - re-fetching the identical request
+      // would just fail the same way again. On iOS the PRIMARY attempt was
+      // already buffered (see playElevenLabs) and already offered its own
+      // tap-to-play recovery internally before throwing - attempting this
+      // separate re-fetch-and-recover path again here would be a redundant
+      // THIRD attempt, so it is skipped there.
+      if (canUseMediaSource() && !isIOSDevice() && !isFetchLevelVoiceError(err)) {
         try {
           await playElevenLabsBuffered(options, generation, t0);
-          logVoiceEvent("tts_succeeded", { caseId: options.caseId, path: "blob_recovery" });
+          logVoiceEvent("tts_succeeded", { caseId: options.caseId, path: "blob_recovery", correlationId });
           return; // ElevenLabs voice preserved via Blob playback
         } catch (blobErr) {
           if (!guard.isCurrent(generation)) return;
@@ -710,6 +893,7 @@ export async function speakPatientResponse(options: SpeakOptions): Promise<void>
   try {
     logVoiceEvent("browser_fallback_started", {
       caseId: options.caseId, reason: browserFallbackReason ?? "elevenlabs_failed", category: "BROWSER_FALLBACK",
+      correlationId,
     });
     await playBrowser(options, status.fallbackRate);
   } catch (err) {

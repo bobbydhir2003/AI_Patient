@@ -154,6 +154,24 @@ export function InterviewPage() {
   const ttsAvailable = isTtsSupported();
   const [voiceEnabled, setVoiceEnabled] = useState(ttsAvailable);
 
+  // Mobile playback recovery: surfaced only when ElevenLabs generated valid
+  // audio but the browser could not autoplay it (see patientVoiceService's
+  // onPlaybackRecoveryAvailable docstring). Turn-scoped - the service itself
+  // clears this via onPlaybackRecoveryResolved on the next turn, cancellation,
+  // or once the tap settles, so no stale affordance can survive across turns.
+  const [recoveryAction, setRecoveryAction] = useState<(() => Promise<boolean>) | null>(null);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const handleRecoveryAvailable = (attempt: () => Promise<boolean>) => setRecoveryAction(() => attempt);
+  const handleRecoveryResolved = () => {
+    setRecoveryAction(null);
+    setRecoveryBusy(false);
+  };
+  async function handleRecoveryTap() {
+    if (!recoveryAction || recoveryBusy) return;
+    setRecoveryBusy(true);
+    await recoveryAction(); // resolves; onPlaybackRecoveryResolved clears the UI either way
+  }
+
   const sessionReady =
     connection === "connected" &&
     activeInterview !== null &&
@@ -360,6 +378,8 @@ export function InterviewPage() {
     sensitivity,
     onSubmitQuestion: performExchange,
     onInterim: setDraft,
+    onPlaybackRecoveryAvailable: handleRecoveryAvailable,
+    onPlaybackRecoveryResolved: handleRecoveryResolved,
   });
   const voiceRef = useRef(voice);
   voiceRef.current = voice;
@@ -486,6 +506,8 @@ export function InterviewPage() {
           sessionId: activeInterview?.sessionId,
           turnId: exchange.turnId,
           speechStyle: exchange.speech,
+          onPlaybackRecoveryAvailable: handleRecoveryAvailable,
+          onPlaybackRecoveryResolved: handleRecoveryResolved,
         });
       }
     } catch {
@@ -831,6 +853,15 @@ export function InterviewPage() {
               {badge.label}
             </span>
           </div>
+
+          {recoveryAction && (
+            <div className={styles.recoveryBanner} role="status">
+              <span>Patient audio needs your tap to play.</span>
+              <button type="button" className="btn btn-primary" onClick={() => void handleRecoveryTap()} disabled={recoveryBusy}>
+                {recoveryBusy ? "Playing…" : "Tap to hear patient"}
+              </button>
+            </div>
+          )}
 
           <ConversationPanel
             messages={messages}
