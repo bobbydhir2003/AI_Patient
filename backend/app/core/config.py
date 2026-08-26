@@ -143,6 +143,17 @@ class Settings(BaseSettings):
     # bug) - changing this requires updating both sides together.
     livekit_agent_name: str = "ptai-patient-agent"
 
+    # --- Voice engine selection (Phase A: flag + student-safe token endpoint
+    # only - the real InterviewPage does NOT read this yet; it still always
+    # uses the legacy patientVoiceService/api/voice path unconditionally).
+    # "legacy" (default) preserves today's production behavior exactly.
+    # "livekit" is validated below but has no student-facing effect until a
+    # later phase wires InterviewPage to branch on it. See
+    # student_livekit_enabled() in livekit_token_service.py, which ALSO
+    # requires this to be "livekit" before it will ever mint a student token
+    # - the flag has real teeth, not just documentation value.
+    voice_engine: str = "legacy"
+
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     log_level: str = "INFO"
@@ -359,6 +370,24 @@ class Settings(BaseSettings):
             info.field_name, value, default,
         )
         return default
+
+    @field_validator("voice_engine", mode="before")
+    @classmethod
+    def _validate_voice_engine(cls, value: object) -> object:
+        """Fail safe, never fail loud: an unrecognized VOICE_ENGINE value
+        (typo, stray whitespace, leftover placeholder) must never crash the
+        app AND must never silently activate an experimental engine - it
+        falls back to the safe default ('legacy') with a visible warning,
+        the same discipline _coerce_lenient_numeric already applies to
+        non-critical tuning knobs above."""
+        valid = ("legacy", "livekit")
+        normalized = str(value).strip().lower() if value is not None else "legacy"
+        if normalized in valid:
+            return normalized
+        logger.warning(
+            "Config VOICE_ENGINE=%r is not one of %s; falling back to 'legacy'.", value, valid,
+        )
+        return "legacy"
 
     @field_validator("access_token_expire_minutes")
     @classmethod

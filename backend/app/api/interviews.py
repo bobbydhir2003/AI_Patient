@@ -10,15 +10,21 @@ from app.dependencies.auth import (
     get_current_user,
     require_session_access,
 )
-from app.models import InterviewSession
+from app.models import InterviewSession, User
 from app.core.rate_limit import rate_limit
+from app.patient_engine import case_loader
 from app.patient_engine.openai_client import OpenAIPatientClient, get_openai_client
 from app.schemas.interview_schema import InterviewConfigOut, StudentMessageRequest, TurnResponse
-from app.services import interview_service, interview_stream_service
+from app.schemas.livekit_schema import LiveKitTokenOut
+from app.services import interview_service, interview_stream_service, livekit_token_service
 
 router = APIRouter(prefix="/interviews", tags=["interviews"])
 
 _interview_rate_limit = rate_limit("interview", lambda s: s.interview_rate_limit)
+# Isolated bucket (Phase A) - minting a LiveKit token must never share/exhaust
+# a student's real interview-message budget, mirroring how voice telemetry
+# has its own bucket separate from /voice/synthesize.
+_livekit_student_rate_limit = rate_limit("livekit_student_token", lambda s: s.voice_rate_limit)
 
 
 @router.get("/config", response_model=InterviewConfigOut, dependencies=[Depends(get_current_user)])
@@ -76,4 +82,46 @@ def send_message_stream(
             # Disable proxy buffering (nginx) so sentences are not held back.
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.post(
+    "/{session_id}/livekit-token",
+    response_model=LiveKitTokenOut,
+    dependencies=[Depends(_livekit_student_rate_limit)],
+)
+def issue_student_livekit_token(
+    session: InterviewSession = Depends(require_session_access),
+    current_user: User = Depends(get_current_user),
+) -> LiveKitTokenOut:
+    """Phase A: student-safe LiveKit token for the caller's OWN active
+    interview session - NOT part of the real interview flow yet (no page
+    calls this endpoint; VOICE_ENGINE defaults to "legacy" and
+    student_livekit_enabled() additionally gates this closed by default -
+    see livekit_token_service.py).
+
+    Security, mirroring every other session-scoped endpoint in this app:
+    - require_session_access: the SAME dependency /messages above uses for
+      paid-OpenAI-call authorization - admins may access any session; a
+      student may only access a session owned by their own linked Student
+      profile. An unowned or nonexistent session id gets the identical 404
+      (SessionNotFoundError) either way - no existence leak.
+    - Case/session consistency: the session's case must still be a real,
+      loadable case (case_loader.load_case raises CaseNotFoundError
+      otherwise) - a token is never minted for a room the LiveKit agent
+      could never actually generate a patient response for.
+    - The room name is derived from the verified session id SERVER-SIDE
+      (livekit_token_service.student_room_name) - the client never supplies
+      or influences it, and it uses a DIFFERENT prefix than the admin POC's
+      rooms (ptai-interview- vs ptai-poc-).
+    - The LiveKit API secret never leaves livekit_token_service; only the
+      signed, short-lived token is returned.
+    """
+    case_loader.load_case(session.case_id)  # raises CaseNotFoundError if stale/invalid
+    result = livekit_token_service.create_student_token(user=current_user, session=session)
+    return LiveKitTokenOut(
+        token=result.token,
+        url=result.url,
+        room_name=result.room_name,
+        participant_identity=result.participant_identity,
     )
