@@ -114,7 +114,20 @@ export type VoiceEvent =
   | "livekit_turn_ack_received"
   | "livekit_turn_ack_timeout"
   | "livekit_turn_auto_retry"
-  | "livekit_turn_delivery_failed";
+  | "livekit_turn_delivery_failed"
+  // --- Phase C2: mobile startup race fix (order-independent microphone +
+  // agent-ready coordination, bounded mic timeout/retry - see
+  // livekitPocEngine.ts's module docstring for the confirmed iOS incident
+  // this answers). Lets a future "stuck on Requesting microphone" report be
+  // diagnosed from logs alone: was the mic request ever started, did it
+  // resolve/fail/time out, did a retry happen, and did startup ever reconcile.
+  | "livekit_mic_request_started"
+  | "livekit_mic_request_resolved"
+  | "livekit_mic_request_failed"
+  | "livekit_mic_request_timeout"
+  | "livekit_mic_retry_started"
+  | "livekit_mic_ready"
+  | "livekit_startup_reconciled";
 
 /** Stage-level failure category. See file header for how these map to the
  * report categories STATUS_PROBE_TRANSIENT / STATUS_CONFIRMED_UNAVAILABLE /
@@ -163,8 +176,16 @@ export interface VoiceEventMeta {
   turnStatus?: string;
   /** Retry attempt number for the bounded automatic turn-delivery retry
    * (see livekitPocEngine.ts's armDeliveryWatchdog) - 0 for the first
-   * (non-retry) attempt. Never patient content. */
+   * (non-retry) attempt. Never patient content. Also reused for the Phase C2
+   * microphone-acquisition retry (attemptEnableMicrophone) - same meaning,
+   * different stage. */
   attempt?: number;
+  /** Phase C2: LiveKitPocEngine's internal startupGeneration counter at
+   * event time - lets a "stuck on Requesting microphone" report be
+   * correlated to exactly one start() attempt in logs, distinguishing a
+   * fresh session from a retried one. A plain incrementing integer, never
+   * patient content or anything session-identifying beyond an ordinal. */
+  startupGeneration?: number;
 }
 
 export interface VoiceCounters {
@@ -242,6 +263,9 @@ const WARN_EVENTS = new Set<VoiceEvent>([
   "livekit_turn_ack_timeout",
   "livekit_turn_auto_retry",
   "livekit_turn_delivery_failed",
+  "livekit_mic_request_failed",
+  "livekit_mic_request_timeout",
+  "livekit_mic_retry_started",
 ]);
 
 function isDev(): boolean {
@@ -295,6 +319,9 @@ const TELEMETRY_EVENTS = new Set<VoiceEvent>([
   "livekit_agent_ready_received", "livekit_turn_publish_started",
   "livekit_turn_publish_resolved", "livekit_turn_ack_received",
   "livekit_turn_ack_timeout", "livekit_turn_auto_retry", "livekit_turn_delivery_failed",
+  "livekit_mic_request_started", "livekit_mic_request_resolved",
+  "livekit_mic_request_failed", "livekit_mic_request_timeout",
+  "livekit_mic_retry_started", "livekit_mic_ready", "livekit_startup_reconciled",
 ]);
 
 /**
@@ -320,6 +347,7 @@ function sendTelemetry(event: VoiceEvent, meta: VoiceEventMeta): void {
       turnStatus: meta.turnStatus ?? "",
       attempt: meta.attempt ?? null,
       reason: meta.reason ?? "",
+      startupGeneration: meta.startupGeneration ?? null,
     });
     void fetch(`${API_BASE_URL}/api/voice/telemetry`, {
       method: "POST",

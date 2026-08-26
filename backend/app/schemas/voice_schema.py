@@ -108,6 +108,16 @@ VoiceTelemetryEventName = Literal[
     "livekit_turn_ack_timeout",
     "livekit_turn_auto_retry",
     "livekit_turn_delivery_failed",
+    # Phase C2: mobile startup race fix - order-independent microphone +
+    # agent-ready coordination, bounded mic timeout/retry (see
+    # livekitPocEngine.ts's module docstring for the confirmed iOS incident).
+    "livekit_mic_request_started",
+    "livekit_mic_request_resolved",
+    "livekit_mic_request_failed",
+    "livekit_mic_request_timeout",
+    "livekit_mic_retry_started",
+    "livekit_mic_ready",
+    "livekit_startup_reconciled",
 ]
 
 
@@ -147,3 +157,8 @@ class VoiceTelemetryEvent(CamelModel):
     # broken down by cause without a free-text field. Bounded operational
     # string only - never patient content.
     reason: str = Field(default="", max_length=64)
+    # Phase C2: LiveKitPocEngine's internal startupGeneration counter at
+    # event time - a plain incrementing ordinal, never anything
+    # session-identifying beyond that. Generously bounded, not tied to any
+    # real-world session-count expectation.
+    startup_generation: int | None = Field(default=None, ge=0, le=1_000_000)

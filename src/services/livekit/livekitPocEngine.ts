@@ -35,6 +35,28 @@
  * deliberately NO student-facing retry button, "Tap to hear patient", or
  * browser speechSynthesis fallback anywhere in this engine or its callers.
  *
+ * Phase C2 protocol (mobile startup race): a confirmed production incident
+ * showed room-connect -> await microphone -> wait-for-agent was wrongly
+ * SERIALIZED - on iOS, the un-timed-out setMicrophoneEnabled(true) call
+ * could hang indefinitely (leaving the UI stuck on "Requesting
+ * microphone..." forever), and a real agent_ready arriving during that hang
+ * was silently discarded (the old handler only accepted it while already
+ * WAITING_FOR_AGENT, a state the engine never reached). Microphone
+ * acquisition and the agent-ready wait now run INDEPENDENTLY after
+ * room.connect() (see runMicrophoneAcquisition/armAgentReadyWatchdog) -
+ * whichever finishes first is simply remembered (micReady/
+ * agentReadyReceived), and maybeEnterListening() is the single place that
+ * transitions to LISTENING once BOTH are true, order-independent:
+ *   Case A: agent_ready arrives first -> remembered -> mic finishes later -> LISTENING
+ *   Case B: mic finishes first -> remembered -> agent_ready arrives later -> LISTENING
+ *   Case C: both finish close together -> transitions exactly once
+ * Microphone acquisition is also now bounded (MIC_START_TIMEOUT_MS) with one
+ * automatic internal retry - never a user-facing button - before surfacing
+ * an explicit, distinctly-categorized ERROR. A startupGeneration counter
+ * (bumped on every start()/end()) guards every async continuation involved
+ * so a stale mic/agent-ready resolution from a previous attempt can never
+ * mutate a newer one.
+ *
  * NEVER logs patient text, transcript content, audio bytes, the LiveKit
  * token, or API secrets - only the same safe metadata voiceDiagnostics.ts
  * already restricts itself to.
@@ -104,6 +126,31 @@ const THINKING_TIMEOUT_MS = 20_000;
  * without this bound a lost "speaking_ended" status message would leave the
  * engine stuck in SPEAKING forever. */
 const SPEAKING_TIMEOUT_MS = 45_000;
+
+/** Phase C2: bounded wait for room.localParticipant.setMicrophoneEnabled(true)
+ * to settle before treating it as stuck and retrying. A confirmed production
+ * incident showed this call can hang indefinitely on iOS with no timeout at
+ * all (the underlying getUserMedia() promise neither resolved nor rejected).
+ * Deliberately short relative to AGENT_READY_TIMEOUT_MS (20s) so a hang is
+ * detected and retried well before the agent-ready wait itself would time
+ * out, while remaining generous enough that a real permission prompt or a
+ * normal getUserMedia() call on a loaded mobile page still completes well
+ * within it. Two attempts worst-case (this value x2) still finishes with
+ * room to spare before AGENT_READY_TIMEOUT_MS. */
+const MIC_START_TIMEOUT_MS = 7_000;
+
+/** One bounded automatic retry (never a user-facing button) if the first
+ * microphone attempt times out or rejects. Calling setMicrophoneEnabled(true)
+ * again cannot create a second, overlapping getUserMedia() request: the SDK
+ * (LocalParticipant.setTrackEnabled, inspected directly in
+ * node_modules/livekit-client) already de-dupes concurrent enable calls for
+ * the same source via its own pendingPublishing/pendingPublishPromises
+ * bookkeeping - a still-pending first attempt is awaited/reused rather than
+ * restarted, and a REJECTED first attempt is already fully cleaned up by the
+ * SDK itself (it stops any partial track and clears its own pending-state
+ * before rethrowing) - so no separate manual "unpublish partial track" step
+ * is needed before this retry in either case. */
+const MAX_MIC_RETRIES = 1;
 
 const STUDENT_TEXT_TOPIC = "student_text";
 const PATIENT_TURN_STATUS_TOPIC = "patient_turn_status";
@@ -216,6 +263,19 @@ export class LiveKitPocEngine {
   private deliveryWatchdog: number | null = null;
   private thinkingWatchdog: number | null = null;
   private speakingWatchdog: number | null = null;
+  private micTimeoutId: number | null = null;
+
+  // --- Phase C2: order-independent startup readiness. Bumped on every
+  // start()/end() call; every async continuation started during start()
+  // (token fetch, room.connect(), microphone acquisition/retry, and every
+  // room event handler registered inside start()) re-checks
+  // isCurrentGeneration() before mutating instance state, so a late
+  // resolution/event from a PREVIOUS attempt (a stale mic promise settling
+  // after end(), or an old room's event firing after a new start()) can
+  // never mutate the current engine. ---
+  private startupGeneration = 0;
+  private micReady = false;
+  private agentReadyReceived = false;
 
   private ended = false;
   private diagnostics: PocDiagnostics = { ...INITIAL_DIAGNOSTICS };
@@ -250,7 +310,8 @@ export class LiveKitPocEngine {
    * failure categories (agent_not_ready / turn_delivery_failed /
    * turn_processing_timeout / audio_transport_failed / agent_turn_failed /
    * token_fetch_failed / room_connect_failed / room_disconnected /
-   * recognition_unsupported) - the student-facing `message` stays simple. */
+   * recognition_unsupported / microphone_start_failed) - the student-facing
+   * `message` stays simple. */
   private emitError(message: string, reason: string): void {
     logVoiceEvent("livekit_engine_error", { reason, engineState: this.state });
     this.callbacks.onError(message);
@@ -291,12 +352,36 @@ export class LiveKitPocEngine {
     }
   }
 
+  private clearMicTimeout(): void {
+    if (this.micTimeoutId !== null) {
+      window.clearTimeout(this.micTimeoutId);
+      this.micTimeoutId = null;
+    }
+  }
+
+  /** True iff `generation` is still the CURRENT startup attempt and the
+   * engine has not been told to end - the single guard every async
+   * continuation started during start() must pass before mutating instance
+   * state (see the startupGeneration field's own comment). */
+  private isCurrentGeneration(generation: number): boolean {
+    return generation === this.startupGeneration && !this.ended;
+  }
+
   /**
-   * The Start Interview gesture: join the room and publish the microphone -
+   * The Start Interview gesture: join the room, then coordinate microphone
+   * readiness and agent readiness INDEPENDENTLY of each other (Phase C2) -
    * all inside this one call/gesture, exactly once for the whole session.
-   * Listening/recognition does NOT begin here anymore (see
-   * beginWaitingForAgent) - room-connected + mic-published alone is not
-   * sufficient proof the patient agent is ready to receive turns.
+   *
+   * A confirmed production incident showed these two used to be wrongly
+   * serialized (await mic BEFORE ever listening for agent_ready), which had
+   * two consequences on iOS: (1) a hung, un-timed-out
+   * setMicrophoneEnabled(true) left the UI stuck on "Requesting
+   * microphone..." forever, and (2) a real agent_ready arriving during that
+   * hang was silently discarded (the old handler only accepted it while
+   * state === "waiting_for_agent", which was never reached). Neither
+   * ordering is assumed correct anymore: both readiness signals are tracked
+   * independently (micReady/agentReadyReceived) and LISTENING is entered
+   * exactly once, by maybeEnterListening(), whichever signal finishes last.
    */
   async start(
     sessionId: string,
@@ -304,6 +389,9 @@ export class LiveKitPocEngine {
   ): Promise<void> {
     if (this.state !== "idle" && this.state !== "ended" && this.state !== "error") return;
     this.ended = false;
+    const generation = ++this.startupGeneration;
+    this.micReady = false;
+    this.agentReadyReceived = false;
     this.diagnostics = { ...INITIAL_DIAGNOSTICS };
     this.callbacks.onDiagnostics(this.diagnostics);
     this.setState("connecting");
@@ -313,16 +401,19 @@ export class LiveKitPocEngine {
     try {
       tokenInfo = await fetchToken(sessionId);
     } catch {
+      if (!this.isCurrentGeneration(generation)) return;
       this.emitError("Could not get a LiveKit connection token from the server.", "token_fetch_failed");
       this.setState("error");
       return;
     }
+    if (!this.isCurrentGeneration(generation)) return;
     this.callbacks.onRoomName(tokenInfo.roomName);
 
     const room = new Room();
     this.room = room;
 
     room.on(RoomEvent.Disconnected, () => {
+      if (!this.isCurrentGeneration(generation)) return;
       logVoiceEvent("livekit_room_disconnected", {});
       if (!this.ended) {
         this.emitError("The LiveKit room disconnected unexpectedly.", "room_disconnected");
@@ -330,14 +421,17 @@ export class LiveKitPocEngine {
       }
     });
     room.on(RoomEvent.Reconnecting, () => {
+      if (!this.isCurrentGeneration(generation)) return;
       logVoiceEvent("livekit_room_reconnecting", {});
       this.setState("reconnecting");
     });
     room.on(RoomEvent.Reconnected, () => {
+      if (!this.isCurrentGeneration(generation)) return;
       logVoiceEvent("livekit_room_reconnected", {});
       this.setState("listening");
     });
     room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
+      if (!this.isCurrentGeneration(generation)) return;
       if (track.kind !== Track.Kind.Audio) return;
       logVoiceEvent("livekit_patient_track_subscribed", {});
       // ONE persistent element for this remote track's ENTIRE lifetime - it
@@ -373,11 +467,13 @@ export class LiveKitPocEngine {
       }
     });
     room.on(RoomEvent.ParticipantConnected, (participant: RemoteParticipant) => {
+      if (!this.isCurrentGeneration(generation)) return;
       if (participant.identity !== AGENT_IDENTITY) return;
       logVoiceEvent("livekit_agent_started", {});
       this.patchDiagnostics({ agentConnected: true });
     });
     room.on(RoomEvent.DataReceived, (payload: Uint8Array, _participant, _kind, topic?: string) => {
+      if (!this.isCurrentGeneration(generation)) return;
       if (topic === PATIENT_TURN_STATUS_TOPIC) {
         // Logged BEFORE any parsing/correlation filtering, so "did a
         // patient_turn_status message arrive at all" is answerable from logs
@@ -389,45 +485,48 @@ export class LiveKitPocEngine {
         return;
       }
       if (topic === AGENT_CONTROL_TOPIC) {
-        this.handleAgentControl(payload);
+        this.handleAgentControl(payload, generation);
       }
     });
 
     try {
       await room.connect(tokenInfo.url, tokenInfo.token);
-      logVoiceEvent("livekit_room_connected", {});
-      this.patchDiagnostics({ roomConnected: true });
-      // The agent may already have joined before we did (or via ParticipantConnected above).
-      if (room.remoteParticipants.has(AGENT_IDENTITY)) {
-        logVoiceEvent("livekit_agent_started", {});
-        this.patchDiagnostics({ agentConnected: true });
-      }
-      await room.localParticipant.setMicrophoneEnabled(true);
-      logVoiceEvent("livekit_mic_published", {});
-      this.patchDiagnostics({ micPublished: true });
     } catch {
-      this.emitError(
-        "Could not connect to the LiveKit room or publish the microphone.",
-        "room_connect_failed",
-      );
+      if (!this.isCurrentGeneration(generation)) return;
+      this.emitError("Could not connect to the LiveKit room.", "room_connect_failed");
       this.setState("error");
       return;
     }
+    if (!this.isCurrentGeneration(generation)) return;
+    logVoiceEvent("livekit_room_connected", {});
+    this.patchDiagnostics({ roomConnected: true });
+    // The agent may already have joined before we did (or via ParticipantConnected above).
+    if (room.remoteParticipants.has(AGENT_IDENTITY)) {
+      logVoiceEvent("livekit_agent_started", {});
+      this.patchDiagnostics({ agentConnected: true });
+    }
 
-    this.beginWaitingForAgent();
+    // Independent coordination (Phase C2): from this point, microphone
+    // acquisition and the agent-ready wait race each other - neither blocks
+    // the other from being detected or recorded, and maybeEnterListening()
+    // transitions to LISTENING exactly once, whichever finishes last (Cases
+    // A/B/C in the module docstring).
+    this.setState("waiting_for_agent");
+    this.armAgentReadyWatchdog(generation);
+    void this.runMicrophoneAcquisition(generation, room);
   }
 
-  /** Room connected + mic published is NOT sufficient proof the patient
-   * agent can receive turns (see the module docstring's confirmed root
-   * cause) - wait for an explicit "agent_ready" control message, bounded by
-   * AGENT_READY_TIMEOUT_MS, before ever entering LISTENING. Recognition is
-   * deliberately not started until handleAgentControl's "agent_ready"
-   * branch runs. */
-  private beginWaitingForAgent(): void {
-    this.setState("waiting_for_agent");
+  /** Room connected is NOT sufficient proof the patient agent can receive
+   * turns (see the module docstring's confirmed root cause) - wait for an
+   * explicit "agent_ready" control message, bounded by
+   * AGENT_READY_TIMEOUT_MS. Runs independently of (in parallel with)
+   * microphone acquisition - see runMicrophoneAcquisition. */
+  private armAgentReadyWatchdog(generation: number): void {
     this.clearAgentReadyWatchdog();
     this.agentReadyWatchdog = window.setTimeout(() => {
       this.agentReadyWatchdog = null;
+      if (!this.isCurrentGeneration(generation)) return;
+      if (this.agentReadyReceived) return; // already resolved; this firing is stale/moot
       if (this.state === "waiting_for_agent") {
         this.emitError(
           "The patient connection could not be established in time.",
@@ -438,7 +537,24 @@ export class LiveKitPocEngine {
     }, AGENT_READY_TIMEOUT_MS);
   }
 
-  private handleAgentControl(payload: Uint8Array): void {
+  /**
+   * Phase C2 single reconciliation point (requirement 8): the ONLY place
+   * that transitions WAITING_FOR_AGENT -> LISTENING. Called from both the
+   * agent_ready handler and the microphone-acquisition success path,
+   * whichever runs last - the `this.state !== "waiting_for_agent"` guard
+   * below is what guarantees the transition (and startRecognition()) happen
+   * EXACTLY ONCE even if both signals resolve in the same tick (Case C).
+   */
+  private maybeEnterListening(generation: number): void {
+    if (!this.isCurrentGeneration(generation)) return;
+    if (this.state !== "waiting_for_agent") return; // already transitioned, or in error/ended
+    if (!this.micReady || !this.agentReadyReceived) return;
+    logVoiceEvent("livekit_startup_reconciled", { engineState: this.state, startupGeneration: generation });
+    this.setState("listening");
+    this.startRecognition();
+  }
+
+  private handleAgentControl(payload: Uint8Array, generation: number): void {
     let parsed: AgentControlPayload;
     try {
       parsed = JSON.parse(new TextDecoder().decode(payload)) as AgentControlPayload;
@@ -446,18 +562,112 @@ export class LiveKitPocEngine {
       return;
     }
     if (parsed.type === "agent_ready") {
-      // Ignore a late/duplicate agent_ready once we're already past waiting
-      // for it - the agent's own send is fire-and-forget too.
-      if (this.state !== "waiting_for_agent") return;
+      // Recorded UNCONDITIONALLY (as long as this is still the current
+      // startup generation) - NEVER gated on the engine's current state.
+      // This is the exact fix for the confirmed bug: a valid agent_ready
+      // arriving while still "connecting" (mic acquisition in flight) is
+      // now remembered instead of discarded, satisfying Case A.
+      if (this.agentReadyReceived) return; // duplicate/late resend - already recorded
+      this.agentReadyReceived = true;
       this.clearAgentReadyWatchdog();
-      logVoiceEvent("livekit_agent_ready_received", {});
-      this.setState("listening");
-      this.startRecognition();
+      logVoiceEvent("livekit_agent_ready_received", { startupGeneration: generation });
+      this.maybeEnterListening(generation);
       return;
     }
     if (parsed.type === "turn_ack") {
       this.handleTurnAck(parsed.clientTurnId);
     }
+  }
+
+  /** Runs microphone acquisition independently of the agent-ready wait
+   * (Phase C2). Bounded by MIC_START_TIMEOUT_MS per attempt, with one
+   * automatic internal retry (MAX_MIC_RETRIES) on a timeout or rejection -
+   * never a user-facing button, never more than the bounded attempt count.
+   * On success, records micReady and calls maybeEnterListening(); if every
+   * attempt is exhausted, transitions to an explicit ERROR distinct from
+   * every other failure category (never the generic "no response from the
+   * agent" message, never a silent fallback). */
+  private async runMicrophoneAcquisition(generation: number, room: Room): Promise<void> {
+    for (let attempt = 0; attempt <= MAX_MIC_RETRIES; attempt += 1) {
+      if (!this.isCurrentGeneration(generation)) return;
+      logVoiceEvent("livekit_mic_request_started", { attempt, engineState: this.state });
+      const startedAt = Date.now();
+      const outcome = await this.attemptEnableMicrophone(room, generation);
+      if (!this.isCurrentGeneration(generation)) return;
+      const elapsedMs = Date.now() - startedAt;
+
+      if (outcome.ok) {
+        logVoiceEvent("livekit_mic_request_resolved", { attempt, engineState: this.state, durationMs: elapsedMs });
+        logVoiceEvent("livekit_mic_published", {});
+        this.patchDiagnostics({ micPublished: true });
+        this.micReady = true;
+        logVoiceEvent("livekit_mic_ready", { engineState: this.state, durationMs: elapsedMs, startupGeneration: generation });
+        this.maybeEnterListening(generation);
+        return;
+      }
+
+      if (outcome.reason === "timeout") {
+        logVoiceEvent("livekit_mic_request_timeout", { attempt, engineState: this.state, durationMs: elapsedMs });
+      } else {
+        logVoiceEvent("livekit_mic_request_failed", {
+          attempt, engineState: this.state, durationMs: elapsedMs, ...describeError(outcome.error),
+        });
+      }
+
+      if (attempt < MAX_MIC_RETRIES) {
+        logVoiceEvent("livekit_mic_retry_started", { attempt: attempt + 1, engineState: this.state });
+      }
+    }
+
+    if (!this.isCurrentGeneration(generation)) return;
+    // Exhausted retries. The underlying getUserMedia()/publish call can
+    // never be forcibly cancelled - only asked to disable if/when it
+    // eventually settles - so this is fire-and-forget, never awaited, and
+    // never allowed to affect the ERROR transition below.
+    room.localParticipant.setMicrophoneEnabled(false).catch(() => undefined);
+    this.emitError("Could not access your microphone.", "microphone_start_failed");
+    this.setState("error");
+  }
+
+  /** One bounded microphone attempt: races setMicrophoneEnabled(true)
+   * against MIC_START_TIMEOUT_MS. Never rejects - always resolves with a
+   * discriminated outcome so the caller's retry loop stays simple.
+   *
+   * Every branch checks isCurrentGeneration(generation) BEFORE touching
+   * `this.micTimeoutId` - not just before acting on the outcome. Without
+   * this, a stale getUserMedia() promise from an ENDED attempt settling
+   * late could call clearMicTimeout() and wipe out the timer belonging to a
+   * BRAND NEW attempt started in the meantime (two different closures over
+   * two different `settled` flags, but ONE shared `this.micTimeoutId`
+   * field) - this is exactly the class of cross-generation bug this whole
+   * mechanism exists to prevent. */
+  private attemptEnableMicrophone(
+    room: Room,
+    generation: number,
+  ): Promise<{ ok: true } | { ok: false; reason: "timeout" | "error"; error?: unknown }> {
+    return new Promise((resolve) => {
+      let settled = false;
+      this.micTimeoutId = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        if (this.isCurrentGeneration(generation)) this.micTimeoutId = null;
+        resolve({ ok: false, reason: "timeout" });
+      }, MIC_START_TIMEOUT_MS);
+      room.localParticipant.setMicrophoneEnabled(true).then(
+        () => {
+          if (settled) return;
+          settled = true;
+          if (this.isCurrentGeneration(generation)) this.clearMicTimeout();
+          resolve({ ok: true });
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          if (this.isCurrentGeneration(generation)) this.clearMicTimeout();
+          resolve({ ok: false, reason: "error", error });
+        },
+      );
+    });
   }
 
   private handleTurnAck(clientTurnId: string | undefined): void {
@@ -758,6 +968,14 @@ export class LiveKitPocEngine {
    * recognizer or a stale "speaking" state). */
   async end(): Promise<void> {
     this.ended = true;
+    // Invalidate any outstanding startup work (Phase C2): a mic attempt or
+    // agent-ready watchdog still in flight from this (or an even earlier)
+    // start() call must never mutate state after end() - isCurrentGeneration()
+    // is what every such continuation checks before acting.
+    this.startupGeneration += 1;
+    this.micReady = false;
+    this.agentReadyReceived = false;
+    this.clearMicTimeout();
     this.clearAgentReadyWatchdog();
     this.clearDeliveryWatchdog();
     this.clearThinkingWatchdog("engine_end");

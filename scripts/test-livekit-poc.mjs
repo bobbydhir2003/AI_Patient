@@ -157,6 +157,16 @@ const RoomEvent = {
 const Track = { Kind: { Audio: "audio" } };
 
 const createdRooms = [];
+
+/** Phase C2: configurable microphone behavior for the NEXT constructed
+ * FakeRoom, consumed exactly once at construction time (so tests can arrange
+ * it BEFORE calling engine.start(), which is what actually constructs the
+ * room). Receives the 1-based call count so a test can behave differently on
+ * a retry (e.g. "fail once, then succeed") while still exercising the SAME
+ * room instance, matching Phase C2's requirement 5 ("same LiveKit room").
+ * Defaults to resolving immediately, matching pre-Phase-C2 test behavior. */
+let nextMicBehavior = null;
+
 class FakeRoom {
   constructor() {
     this._handlers = {};
@@ -164,8 +174,23 @@ class FakeRoom {
     this.connectCalls = [];
     this.disconnectCalls = 0;
     this.publishedData = [];
+    this.micCallCount = 0;
+    this.micDisableCallCount = 0;
+    const micBehavior = nextMicBehavior ?? (() => Promise.resolve());
+    nextMicBehavior = null;
     this.localParticipant = {
-      setMicrophoneEnabled: async () => {},
+      setMicrophoneEnabled: async (enabled) => {
+        // Only enable(true) calls count as acquisition "attempts" - the
+        // engine's own exhausted-retries cleanup fires a fire-and-forget
+        // setMicrophoneEnabled(false), which must NOT be mistaken for a
+        // third attempt.
+        if (enabled === false) {
+          this.micDisableCallCount += 1;
+          return undefined;
+        }
+        this.micCallCount += 1;
+        return micBehavior(this.micCallCount, enabled);
+      },
       publishData: async (payload, options) => {
         this.publishedData.push({ payload, options });
       },
@@ -289,6 +314,16 @@ function telemetryEvents() {
 function latestTimerId() {
   const keys = [...pendingTimers.keys()];
   return keys.at(-1);
+}
+
+/** The N most-recently-armed still-pending fake timer ids, oldest first.
+ * Phase C2's start() arms the agent-ready watchdog THEN the mic timeout
+ * (armAgentReadyWatchdog before runMicrophoneAcquisition, in that order) -
+ * used by tests that need to distinguish the two while BOTH are still
+ * pending (neither agent_ready nor mic has resolved yet). */
+function latestTimerIds(n) {
+  const keys = [...pendingTimers.keys()];
+  return keys.slice(-n);
 }
 
 function fireTimerById(id) {
@@ -1287,4 +1322,303 @@ test("PHASE C: STATIC - ConversationControl suppresses the retry action when ret
   for (const forbidden of ["Tap to hear", "tap-to-hear", "tapToHear"]) {
     assert.ok(!source.includes(forbidden), `ConversationControl.tsx must never introduce "${forbidden}"`);
   }
+});
+
+// ===========================================================================
+// PHASE C2: mobile startup race fix - order-independent microphone + agent
+// readiness coordination, bounded mic timeout/retry, and startup-generation
+// protection against stale async work. See livekitPocEngine.ts's module
+// docstring for the confirmed production incident (iOS stuck indefinitely
+// on "Requesting microphone...", with a real agent_ready silently discarded
+// because the engine never reached WAITING_FOR_AGENT) this phase answers.
+// ===========================================================================
+
+test("PHASE C2 A: agent_ready arrives before mic resolves - remembered, then LISTENING once mic finishes", async () => {
+  resetFixtures();
+  let resolveMic;
+  nextMicBehavior = () => new Promise((resolve) => { resolveMic = resolve; });
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-caseA");
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  assert.equal(engine.getState(), "waiting_for_agent");
+
+  sendAgentReady(room);
+  assert.equal(engine.getState(), "waiting_for_agent", "must not enter LISTENING until mic is also ready");
+  assert.ok(telemetryEvents().some((e) => e.event === "livekit_agent_ready_received"));
+  assert.equal(FakeSpeechRecognition.instances.length, 0, "recognition must not start on agent_ready alone");
+
+  resolveMic();
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "listening");
+  assert.equal(FakeSpeechRecognition.instances.length, 1, "recognition starts once BOTH signals are in");
+
+  await engine.end();
+});
+
+test("PHASE C2 B: mic resolves before agent_ready - waits, then LISTENING once agent_ready arrives", async () => {
+  resetFixtures();
+  // Default nextMicBehavior (resolves immediately) - deliberately not overridden.
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-caseB");
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  assert.equal(engine.getState(), "waiting_for_agent", "mic readiness alone must not be enough to enter LISTENING");
+  assert.equal(FakeSpeechRecognition.instances.length, 0);
+  assert.ok(telemetryEvents().some((e) => e.event === "livekit_mic_ready"));
+
+  sendAgentReady(room);
+  assert.equal(engine.getState(), "listening");
+  assert.equal(FakeSpeechRecognition.instances.length, 1);
+
+  await engine.end();
+});
+
+test("PHASE C2 C: an early agent_ready survives a full microphone retry cycle - never discarded, never needs resending", async () => {
+  resetFixtures();
+  let resolveSecondAttempt;
+  nextMicBehavior = (callCount) => {
+    if (callCount === 1) return new Promise(() => {}); // first attempt hangs
+    return new Promise((resolve) => { resolveSecondAttempt = resolve; });
+  };
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-caseC");
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+
+  // agent_ready arrives WHILE the (hanging) first mic attempt is still pending.
+  sendAgentReady(room);
+  assert.equal(engine.getState(), "waiting_for_agent");
+
+  // Time out the first mic attempt -> automatic retry (SAME room).
+  fireTimerById(latestTimerId());
+  await flushMicrotasks();
+  assert.equal(room.micCallCount, 2, "the retry must reuse the SAME room/localParticipant");
+
+  // The retried attempt finally succeeds - LISTENING must follow IMMEDIATELY,
+  // without any second agent_ready ever being sent.
+  resolveSecondAttempt();
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "listening", "the early agent_ready must still count after the mic retry cycle");
+
+  await engine.end();
+});
+
+test("PHASE C2 D: mic promise times out - automatic retry occurs", async () => {
+  resetFixtures();
+  nextMicBehavior = (callCount) => (callCount === 1 ? new Promise(() => {}) : Promise.resolve());
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-caseD");
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  assert.equal(room.micCallCount, 1);
+
+  fireTimerById(latestTimerId()); // mic timeout - armed AFTER the agent-ready watchdog, so it is the latest
+  await flushMicrotasks();
+
+  assert.equal(room.micCallCount, 2, "exactly one automatic retry");
+  const events = telemetryEvents().map((e) => e.event);
+  assert.ok(events.includes("livekit_mic_request_timeout"));
+  assert.ok(events.includes("livekit_mic_retry_started"));
+  assert.ok(events.includes("livekit_mic_ready"), "the retried attempt succeeded");
+  assert.equal(rec.errors.length, 0, "a successful retry must never surface a user-facing error");
+
+  await engine.end();
+});
+
+test("PHASE C2 E: first mic attempt rejects - automatic retry occurs", async () => {
+  resetFixtures();
+  nextMicBehavior = (callCount) =>
+    callCount === 1
+      ? Promise.reject(Object.assign(new Error("mic busy"), { name: "NotReadableError" }))
+      : Promise.resolve();
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-caseE");
+  await flushMicrotasks();
+  await flushMicrotasks(); // two sequential immediate settlements need extra ticks
+
+  const room = createdRooms.at(-1);
+  assert.equal(room.micCallCount, 2, "the rejection must trigger an immediate automatic retry");
+  const events = telemetryEvents().map((e) => e.event);
+  assert.ok(events.includes("livekit_mic_request_failed"));
+  assert.ok(events.includes("livekit_mic_retry_started"));
+
+  await engine.end();
+});
+
+test("PHASE C2 F: after a failed first attempt, a successful second attempt reaches LISTENING normally", async () => {
+  resetFixtures();
+  nextMicBehavior = (callCount) => (callCount === 1 ? Promise.reject(new Error("boom")) : Promise.resolve());
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-caseF");
+  await flushMicrotasks();
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  assert.equal(room.micCallCount, 2);
+  assert.equal(engine.getState(), "waiting_for_agent");
+
+  sendAgentReady(room);
+  assert.equal(engine.getState(), "listening");
+
+  await engine.end();
+});
+
+test("PHASE C2 G: both microphone attempts failing produces an explicit, distinct ERROR - never the generic agent-timeout message", async () => {
+  resetFixtures();
+  nextMicBehavior = () => Promise.reject(Object.assign(new Error("denied"), { name: "NotAllowedError" }));
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-caseG");
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  const room = createdRooms.at(-1);
+  assert.equal(room.micCallCount, 2, "exactly the bounded attempt count (1 + MAX_MIC_RETRIES)");
+  assert.equal(engine.getState(), "error");
+  assert.equal(rec.errors.length, 1);
+  assert.match(rec.errors[0], /microphone/i);
+  assert.doesNotMatch(rec.errors[0], /no response from the agent/i);
+
+  const errorEvents = telemetryEvents().filter((e) => e.event === "livekit_engine_error");
+  assert.ok(errorEvents.some((e) => e.reason === "microphone_start_failed"));
+  await flushMicrotasks();
+  assert.equal(room.micDisableCallCount, 1, "must ask the SDK to disable the mic once retries are exhausted");
+
+  await engine.end();
+});
+
+test("PHASE C2 H: microphone attempts never overlap - a retry starts only after the prior attempt's outcome is known", async () => {
+  resetFixtures();
+  nextMicBehavior = (callCount) => (callCount === 1 ? new Promise(() => {}) : Promise.resolve());
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-caseH");
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  assert.equal(room.micCallCount, 1, "only ONE attempt while the first is still pending - no overlap");
+
+  fireTimerById(latestTimerId());
+  await flushMicrotasks();
+  assert.equal(room.micCallCount, 2, "the retry starts only after the first attempt's timeout was resolved");
+
+  await engine.end();
+});
+
+test("PHASE C2 I: a stale mic completion after end() is ignored (never resurrects/mutates the ended engine)", async () => {
+  resetFixtures();
+  let resolveMic;
+  nextMicBehavior = () => new Promise((resolve) => { resolveMic = resolve; });
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-caseI");
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "waiting_for_agent");
+
+  await engine.end();
+  assert.equal(engine.getState(), "ended");
+
+  // The "real" getUserMedia()-equivalent finally settles AFTER end().
+  resolveMic();
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "ended", "a stale mic resolution must never move the engine out of ended");
+
+  await engine.end(); // must remain idempotent, must not throw
+});
+
+test("PHASE C2 J: a stale agent_ready from a previous startup generation/room is ignored", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+
+  await engine.start("session-caseJ-1");
+  await flushMicrotasks();
+  const oldRoom = createdRooms.at(-1);
+  await engine.end();
+
+  await engine.start("session-caseJ-2");
+  await flushMicrotasks();
+  const newRoom = createdRooms.at(-1);
+  assert.notEqual(oldRoom, newRoom);
+  assert.equal(engine.getState(), "waiting_for_agent");
+
+  // A late agent_ready arriving on the OLD room (e.g. a message its
+  // WebSocket hadn't finished delivering before teardown) must never affect
+  // the NEW engine/generation.
+  sendAgentReady(oldRoom);
+  assert.equal(engine.getState(), "waiting_for_agent", "a stale agent_ready from an old generation must be ignored");
+
+  sendAgentReady(newRoom);
+  assert.equal(engine.getState(), "listening", "the CURRENT room's agent_ready must still work normally");
+
+  await engine.end();
+});
+
+test("PHASE C2 K: the LISTENING transition happens exactly once even with a duplicate agent_ready right after", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-caseK");
+  await flushMicrotasks(); // mic ready (default behavior)
+  const room = createdRooms.at(-1);
+
+  const listeningCountBefore = rec.states.filter((s) => s === "listening").length;
+  sendAgentReady(room);
+  sendAgentReady(room); // duplicate/late resend - must be a no-op
+  const listeningCountAfter = rec.states.filter((s) => s === "listening").length;
+  assert.equal(listeningCountAfter, listeningCountBefore + 1, "must transition to listening exactly once");
+
+  await engine.end();
+});
+
+test("PHASE C2 L: recognition starts only once BOTH readiness conditions are met, never on either alone", async () => {
+  resetFixtures();
+  let resolveMic;
+  nextMicBehavior = () => new Promise((resolve) => { resolveMic = resolve; });
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-caseL");
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  assert.equal(FakeSpeechRecognition.instances.length, 0, "neither signal has arrived yet");
+
+  sendAgentReady(room);
+  assert.equal(FakeSpeechRecognition.instances.length, 0, "agent_ready alone must not start recognition");
+
+  resolveMic();
+  await flushMicrotasks();
+  assert.equal(FakeSpeechRecognition.instances.length, 1, "recognition starts once both are satisfied");
+
+  await engine.end();
+});
+
+test("PHASE C2: mic acquisition never touches the legacy playback stack (no new Audio/MediaSource/speechSynthesis)", () => {
+  const rawSource = fs.readFileSync(
+    path.join(repoRoot, "src", "services", "livekit", "livekitPocEngine.ts"),
+    "utf8",
+  );
+  const source = rawSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  for (const forbidden of [
+    "new MediaSource(", "new Audio(", "new Blob(", "createObjectURL(", "speechSynthesis.",
+    "SpeechSynthesisUtterance", "patientVoiceService",
+  ]) {
+    assert.ok(!source.includes(forbidden), `livekitPocEngine.ts must never use "${forbidden}"`);
+  }
+  // Positive control: microphone acquisition still goes through the SAME
+  // persistent Room/localParticipant, never a second/parallel media path.
+  assert.ok(source.includes("room.localParticipant.setMicrophoneEnabled(true)"));
 });

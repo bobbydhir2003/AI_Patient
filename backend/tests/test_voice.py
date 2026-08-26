@@ -823,6 +823,13 @@ def test_telemetry_accepts_livekit_reliability_event_names(engine, caplog):
         "livekit_turn_ack_timeout",
         "livekit_turn_auto_retry",
         "livekit_turn_delivery_failed",
+        "livekit_mic_request_started",
+        "livekit_mic_request_resolved",
+        "livekit_mic_request_failed",
+        "livekit_mic_request_timeout",
+        "livekit_mic_retry_started",
+        "livekit_mic_ready",
+        "livekit_startup_reconciled",
     ]
     with caplog.at_level(logging.INFO, logger="app.api.voice"):
         for event in livekit_events:
@@ -901,6 +908,29 @@ def test_telemetry_attempt_field_is_bounded(engine, caplog):
     resp = client.post(
         "/api/voice/telemetry",
         json={"event": "livekit_turn_auto_retry", "attempt": 11},
+    )
+    assert resp.status_code == 422
+
+
+def test_telemetry_startup_generation_field_is_bounded(engine, caplog):
+    """Phase C2: startupGeneration is a plain incrementing ordinal from
+    LiveKitPocEngine - accepts a plausible value and rejects a wildly
+    out-of-range one (the generous ge=0/le=1_000_000 bound is not meant to
+    reflect any real session-count expectation, just catch garbage)."""
+    import logging
+
+    client = make_voice_client(engine)
+    with caplog.at_level(logging.INFO, logger="app.api.voice"):
+        resp = client.post(
+            "/api/voice/telemetry",
+            json={"event": "livekit_startup_reconciled", "startupGeneration": 2},
+        )
+    assert resp.status_code == 200
+    assert any("startup_generation=2" in r.message for r in caplog.records)
+
+    resp = client.post(
+        "/api/voice/telemetry",
+        json={"event": "livekit_startup_reconciled", "startupGeneration": -1},
     )
     assert resp.status_code == 422
 
