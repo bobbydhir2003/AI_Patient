@@ -132,6 +132,50 @@ def test_matching_interrupt_cancels_task_clears_queue_and_reports_interrupted(mo
     assert session._shutdown_called is False
 
 
+def _wire_happy_generation_camden(monkeypatch, *, text="He's been sleeping more than usual.", frames: int = 5):
+    """Camden variant of _wire_happy_generation: Camden's checked-in case
+    file already ships a real (non-placeholder) caregiver voice id, so no
+    give_*_a_voice_id override is needed - proves the caregiver voice path
+    (fixed by the Camden speaker/voice-key routing change) is just as
+    interruptible as the plain single-speaker ("patient") path."""
+    fake_openai = FakeOpenAIClient(text=text)
+    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
+    fake_el = FakeElevenLabsClient(chunks=(b"\x00\x01" * (_FRAME_BYTES * frames // 2),))
+    monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
+    return fake_openai, fake_el
+
+
+def test_camden_interrupt_still_cancels_task_and_clears_queue(monkeypatch, engine):
+    """Regression for the Camden caregiver-voice routing fix: D2's
+    interrupt/cancellation mechanics operate purely on the audio-publish
+    phase (_speaking_client_turn_id/_active_turn_task), never on which
+    participant's voice is speaking - proves Camden's caregiver-voiced turns
+    can be interrupted exactly like any other case's, post-fix."""
+    with _fake_rtc_for_worker():
+        session, room, _sid = _make_ready_session(engine, monkeypatch, case_id="camden")
+        _wire_happy_generation_camden(monkeypatch, frames=5)
+
+        async def _drive():
+            block_event = await _drive_until_speaking(
+                session, room, "What's been going on?", "camden-turn-b"
+            )
+            assert session._audio_source.captured_frames == 1
+            room.emit("data_received", _InterruptPacket("camden-turn-b"))
+            await _run_until_idle()
+            return block_event
+
+        asyncio.run(_drive())
+
+    assert _turn_statuses(room) == [
+        {"clientTurnId": "camden-turn-b", "status": "speaking_started"},
+        {"clientTurnId": "camden-turn-b", "status": "interrupted"},
+    ]
+    assert session._audio_source.clear_queue_calls == 1
+    assert session._audio_source.captured_frames == 1
+    assert session._speaking_client_turn_id is None
+    assert session._shutdown_called is False
+
+
 # =================================================================
 # C: a mismatched clientTurnId never cancels the active turn
 # =================================================================

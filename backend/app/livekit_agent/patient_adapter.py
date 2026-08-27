@@ -5,6 +5,7 @@ client, no bypass of either distributed concurrency semaphore.
 Every function here calls the SAME modules app/services/interview_service.py
 and app/api/voice.py already call:
     generate_patient_response   app/patient_engine/__init__.py
+    speaker_router              app/patient_engine/speaker_router.py
     interview_slot / tts_slot   app/core/concurrency.py (Redis-backed)
     ElevenLabsClient            app/voice/elevenlabs_client.py
     load_voice_profile          app/voice/voice_profile_loader.py
@@ -17,6 +18,17 @@ consumes raw PCM samples directly - this avoids adding any audio-decoding
 dependency (no ffmpeg/pydub/av) for the POC. This does not change the
 production default (settings.elevenlabs_output_format is untouched; this
 module passes its own explicit output_format on each call).
+
+Speaker/voice routing parity: this module resolves the SAME
+speaker_router.resolve_for_case() decision interview_service.py's
+send_student_message() uses, and the SAME speaker_router.participant_meta()
+voice_key lookup - not a second, Camden-specific branch. A caregiver-primary
+case (Camden today; any future case with the same case-file flag
+automatically) resolves to its caregiver's voice_key ("caregiver"), and a
+plain single-speaker case resolves to "patient" exactly as before this fix.
+The LiveKit audio pipeline still only ever publishes ONE speaker's audio for
+a given turn (no dual-track "both" support - see generate_and_persist_turn),
+matching the persistent worker's existing single-speaker-per-turn design.
 """
 from __future__ import annotations
 
@@ -28,7 +40,7 @@ from sqlalchemy.orm import Session
 from app.core.concurrency import interview_slot, tts_slot
 from app.core.constants import PROMPT_VERSION, ROLE_PATIENT, ROLE_STUDENT
 from app.core.logging import get_logger
-from app.patient_engine import generate_patient_response
+from app.patient_engine import case_loader, generate_patient_response, speaker_router
 from app.repositories.session_repository import SessionRepository
 from app.repositories.transcript_repository import TranscriptRepository
 from app.voice.elevenlabs_client import get_elevenlabs_client
@@ -58,6 +70,11 @@ class PocTurnResult:
     student_turn_id: str
     patient_turn_id: str
     patient_text: str
+    # The resolved participant's voice_key ("patient" or "caregiver" today -
+    # see speaker_router.participant_meta) - carried forward so the caller
+    # (worker.py) can pass it to synthesize_patient_audio_pcm without
+    # re-deriving speaker routing from the original question a second time.
+    voice_key: str
     replayed: bool  # True if this was an idempotent replay, not a fresh generation
 
 
@@ -70,12 +87,19 @@ def generate_and_persist_turn(
     client_turn_id: str,
     on_stage: StageCallback | None = None,
 ) -> PocTurnResult:
-    """Single-speaker reuse of interview_service.send_student_message's core
-    steps. Deliberately does NOT reimplement multi-participant speaker
-    routing (Camden/mother) - the POC targets one case with a single primary
-    speaker (see worker.py). Idempotent on client_turn_id, identically to
-    production: a duplicate/retried call for the same logical turn replays
-    the existing turn instead of generating (and billing) a second time.
+    """Reuses interview_service.send_student_message's core steps, INCLUDING
+    its speaker_router.resolve_for_case() routing decision - so a
+    caregiver-primary case (Camden today) generates the caregiver's response
+    here exactly as it does in legacy mode, not the case-agnostic default.
+    The one deliberate scope limit kept from the original POC: this module
+    only ever publishes ONE speaker's audio per turn, so a (currently
+    unreachable - see below) SPEAKER_BOTH resolution degrades to the case's
+    primary/default speaker rather than generating two responses - LiveKit's
+    single continuous AudioSource has no dual-track model, and adding one
+    is out of scope for this fix (see worker.py's PocAgentSession docstring).
+    Idempotent on client_turn_id, identically to production: a
+    duplicate/retried call for the same logical turn replays the existing
+    turn instead of generating (and billing) a second time.
     """
     session_repo = SessionRepository(db)
     transcript_repo = TranscriptRepository(db)
@@ -84,6 +108,8 @@ def generate_and_persist_turn(
     if session is None:
         raise LiveKitPocSessionNotFoundError(session_id)
 
+    case = case_loader.load_case(case_id)
+
     existing_student = transcript_repo.get_by_client_turn_id(session_id, client_turn_id)
     if existing_student is not None:
         existing_patient = transcript_repo.get_by_index(session_id, existing_student.turn_index + 1)
@@ -91,14 +117,45 @@ def generate_and_persist_turn(
             logger.info(
                 "livekit_poc_turn_replayed session_id=%s client_turn_id=%s", session_id, client_turn_id,
             )
+            # Reuse the ALREADY-persisted speaker decision (not a fresh
+            # routing call) - the authoritative record of who spoke this turn
+            # is the saved turn itself, not a re-derivation from the original
+            # question text.
+            _, _, voice_key = speaker_router.participant_meta(
+                case, existing_patient.speaker_id or "patient"
+            )
             return PocTurnResult(
                 student_turn_id=existing_student.id,
                 patient_turn_id=existing_patient.id,
                 patient_text=existing_patient.content,
+                voice_key=voice_key,
                 replayed=True,
             )
 
     prior_turns = transcript_repo.list_turns(session_id)
+
+    # SAME deterministic routing decision send_student_message() makes,
+    # BEFORE any model call (see speaker_router.py's module docstring) - a
+    # single-speaker case always resolves to "patient" (no behavior change),
+    # a caregiver-primary case (Camden) always resolves to its locked primary
+    # (the mother), and the generic dynamic router is preserved unchanged for
+    # any future multi-participant case that isn't caregiver-locked.
+    routing = speaker_router.resolve_for_case(case, question, prior_turns)
+    resolved_speaker = routing.speaker
+    if resolved_speaker == speaker_router.SPEAKER_BOTH:
+        resolved_speaker = (
+            getattr(case, "primary_speaker", "")
+            or getattr(case, "default_speaker", "")
+            or speaker_router.SPEAKER_MOTHER
+        )
+        logger.warning(
+            "livekit_poc_speaker_both_unsupported case_id=%s resolved_to=%s",
+            case_id, resolved_speaker,
+        )
+
+    # None for single-speaker cases -> identical prompt/behavior to before
+    # this fix (parity with interview_service.py's send_student_message).
+    engine_speaker = resolved_speaker if speaker_router.is_multi_participant(case) else None
 
     # SAME distributed OpenAI semaphore production uses (core/concurrency.py,
     # Redis-backed) - a fleet-wide cap, not a per-process one, so this agent
@@ -119,9 +176,12 @@ def generate_and_persist_turn(
             turns=prior_turns,
             disclosed_fact_ids=session_repo.get_disclosed_fact_ids(session),
             active_topic=session.active_topic,
+            speaker_id=engine_speaker,
         )
         if on_stage:
             on_stage("openai_response_complete")
+
+    eff_speaker_id, speaker_label, voice_key = speaker_router.participant_meta(case, resolved_speaker)
 
     student_turn = transcript_repo.append_turn(
         session_id, ROLE_STUDENT, question,
@@ -133,25 +193,27 @@ def generate_and_persist_turn(
         model_name=result.model_name, prompt_version=PROMPT_VERSION,
         facts_used=result.used_fact_ids, response_type=result.response_type,
         validation_status=result.validation_status,
+        speaker_id=eff_speaker_id, speaker_label=speaker_label,
     )
     session_repo.add_disclosed_fact_ids(session, result.newly_disclosed_fact_ids)
     session_repo.set_active_topic(session, result.active_topic)
     db.commit()
 
     logger.info(
-        "livekit_poc_turn_completed session_id=%s client_turn_id=%s case_id=%s",
-        session_id, client_turn_id, case_id,
+        "livekit_poc_turn_completed session_id=%s client_turn_id=%s case_id=%s speaker_id=%s voice_key=%s",
+        session_id, client_turn_id, case_id, eff_speaker_id, voice_key,
     )
     return PocTurnResult(
         student_turn_id=student_turn.id,
         patient_turn_id=patient_turn.id,
         patient_text=result.text,
+        voice_key=voice_key,
         replayed=False,
     )
 
 
 def synthesize_patient_audio_pcm(
-    *, case_id: str, text: str, on_stage: StageCallback | None = None
+    *, case_id: str, text: str, voice_key: str = "patient", on_stage: StageCallback | None = None
 ) -> bytes | None:
     """SAME ElevenLabs client + SAME distributed TTS semaphore
     (app/core/concurrency.py tts_slot, Redis-backed) production's
@@ -162,10 +224,26 @@ def synthesize_patient_audio_pcm(
     trigger conditions in api/voice.py. The caller (worker.py) decides what
     to do with None; this module never falls back to browser TTS itself -
     that would defeat the POC's purpose (see the mobile/LiveKit audits).
+
+    `voice_key` is the resolved participant's voice key ("patient" or
+    "caregiver" today - see speaker_router.participant_meta), NOT the
+    conversational speaker_id ("mother") - they are deliberately kept
+    distinct (see generate_and_persist_turn, the caller's only caller via
+    PocTurnResult.voice_key). Defaults to "patient" for any caller that
+    doesn't yet resolve a speaker (kept only as a safety default; both real
+    call sites in this codebase now always pass an explicit voice_key).
+    load_voice_profile's own case-file-speaker gate (see
+    voice_profile_loader.py) is what actually enforces that a caregiver-
+    primary case's child voice_key can never be requested - passing the
+    wrong voice_key here simply reports "unavailable", exactly as it did
+    before this function accepted the parameter.
     """
-    resolved = load_voice_profile(case_id)
+    resolved = load_voice_profile(case_id, speaker_id=voice_key)
     if not resolved.available:
-        logger.warning("livekit_poc_voice_unavailable case_id=%s reason=%s", case_id, resolved.reason)
+        logger.warning(
+            "livekit_poc_voice_unavailable case_id=%s voice_key=%s reason=%s",
+            case_id, voice_key, resolved.reason,
+        )
         return None
 
     mapped = map_speech_style(resolved.profile, None)
@@ -197,8 +275,8 @@ def synthesize_patient_audio_pcm(
         if on_stage:
             on_stage("tts_response_complete")
         logger.info(
-            "livekit_poc_tts_complete case_id=%s bytes=%d format=%s",
-            case_id, len(pcm), LIVEKIT_PCM_OUTPUT_FORMAT,
+            "livekit_poc_tts_complete case_id=%s voice_key=%s bytes=%d format=%s",
+            case_id, voice_key, len(pcm), LIVEKIT_PCM_OUTPUT_FORMAT,
         )
         return pcm
     finally:

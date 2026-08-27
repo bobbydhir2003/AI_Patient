@@ -345,6 +345,178 @@ def test_synthesize_patient_audio_pcm_returns_none_when_tts_at_capacity(monkeypa
 
 
 # =================================================================
+# Camden caregiver-primary case: speaker/voice-key routing regression.
+#
+# Root cause this section guards against: the LiveKit adapter used to call
+# load_voice_profile(case_id) with NO speaker_id, defaulting to "patient" -
+# but Camden's case file (caregiver_primary_only=true) only registers a
+# voice under "caregiver", so the loader's speaker-match safety gate (see
+# voice_profile_loader.py) always reported "unavailable" and ElevenLabs was
+# never reached, for every single Camden turn. See patient_adapter.py's
+# module docstring ("Speaker/voice routing parity") for the fix.
+# =================================================================
+
+def test_generate_and_persist_turn_resolves_camden_to_mother_and_caregiver_voice_key(
+    monkeypatch, engine, db_session
+):
+    """TEST A/B: Camden's caregiver-primary lock resolves the conversational
+    speaker to 'mother' (speaker_router.resolve_for_case's deterministic
+    rule, same as legacy mode) and the TTS voice_key to 'caregiver'
+    (speaker_router.participant_meta's voice_key for the mother participant)
+    - not the 'patient' default that caused every Camden LiveKit turn to
+    fail before ever reaching ElevenLabs."""
+    from tests.conftest import FakeOpenAIClient
+
+    fake_openai = FakeOpenAIClient(text="He's been much more tired lately.")
+    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
+
+    _user, session_id = seed_owned_session(db_session, case_id="camden")
+
+    result = patient_adapter.generate_and_persist_turn(
+        db_session, session_id=session_id, case_id="camden",
+        question="Can you tell me what's been going on?", client_turn_id="camden-turn-1",
+    )
+
+    assert result.replayed is False
+    assert result.voice_key == "caregiver"
+
+    from app.repositories.transcript_repository import TranscriptRepository
+
+    patient_turn = TranscriptRepository(db_session).get_by_index(session_id, 1)
+    assert patient_turn.speaker_id == "mother"
+    assert patient_turn.speaker_label == "Camden's Mother"
+
+
+def test_generate_and_persist_turn_camden_routes_to_mother_even_when_child_is_addressed(
+    monkeypatch, engine, db_session
+):
+    """The caregiver-primary lock overrides even a direct, child-addressed
+    question (matches speaker_router.resolve_for_case's documented rule and
+    test_camden_participants.py's legacy-mode assertion of the same rule) -
+    proves the LiveKit path doesn't have its own, divergent routing."""
+    from tests.conftest import FakeOpenAIClient
+
+    fake_openai = FakeOpenAIClient(text="He usually tells me his legs hurt.")
+    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
+
+    _user, session_id = seed_owned_session(db_session, case_id="camden")
+
+    result = patient_adapter.generate_and_persist_turn(
+        db_session, session_id=session_id, case_id="camden",
+        question="Camden, where does it hurt?", client_turn_id="camden-turn-2",
+    )
+
+    assert result.voice_key == "caregiver"
+
+
+def test_generate_and_persist_turn_carly_still_resolves_patient_voice_key(monkeypatch, engine, db_session):
+    """Regression: a plain single-speaker case must keep resolving to the
+    'patient' voice_key exactly as before this fix - no accidental caregiver
+    routing for cases that never set caregiver_primary_only."""
+    from tests.conftest import FakeOpenAIClient
+
+    fake_openai = FakeOpenAIClient(text="I've had this pain for about a week.")
+    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
+
+    _user, session_id = seed_owned_session(db_session, case_id="carly")
+
+    result = patient_adapter.generate_and_persist_turn(
+        db_session, session_id=session_id, case_id="carly",
+        question="How long have you had this pain?", client_turn_id="carly-turn-1",
+    )
+
+    assert result.voice_key == "patient"
+
+    from app.repositories.transcript_repository import TranscriptRepository
+
+    patient_turn = TranscriptRepository(db_session).get_by_index(session_id, 1)
+    assert patient_turn.speaker_id == "patient"
+
+
+def test_generate_and_persist_turn_camden_replay_preserves_caregiver_voice_key(monkeypatch, engine, db_session):
+    """A duplicate/retried clientTurnId replays the saved turn (no second
+    OpenAI call) but must still report the SAME resolved voice_key - derived
+    from the persisted turn's own speaker_id, not re-routed from scratch."""
+    from tests.conftest import FakeOpenAIClient
+
+    fake_openai = FakeOpenAIClient(text="Same answer every time.")
+    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
+
+    _user, session_id = seed_owned_session(db_session, case_id="camden")
+
+    first = patient_adapter.generate_and_persist_turn(
+        db_session, session_id=session_id, case_id="camden",
+        question="What's been going on?", client_turn_id="camden-dup",
+    )
+    second = patient_adapter.generate_and_persist_turn(
+        db_session, session_id=session_id, case_id="camden",
+        question="What's been going on?", client_turn_id="camden-dup",
+    )
+
+    assert len(fake_openai.calls) == 1  # NOT called twice
+    assert first.voice_key == "caregiver"
+    assert second.replayed is True
+    assert second.voice_key == "caregiver"
+
+
+def test_synthesize_patient_audio_pcm_resolves_camden_caregiver_voice(monkeypatch, engine):
+    """TEST C/D/G (the core fix): requesting voice_key='caregiver' for Camden
+    resolves the case file's real, already-configured caregiver voice id and
+    genuinely reaches ElevenLabs - proving the bug (which always requested
+    the default 'patient' key and never got this far) is fixed. Camden's
+    checked-in case file already ships a real voice id, so no test override
+    is needed (unlike Carly's placeholder-by-default fixture)."""
+    fake_el = FakeElevenLabsClient(chunks=(b"\x01\x02", b"\x03\x04"))
+    monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
+
+    pcm = patient_adapter.synthesize_patient_audio_pcm(
+        case_id="camden", text="He's been sleeping more than usual.", voice_key="caregiver",
+    )
+
+    assert pcm == b"\x01\x02\x03\x04"
+    assert len(fake_el.calls) == 1
+    assert fake_el.calls[0]["voice_id"] == "GP1bgf0sjoFuuHkyrg8E"  # camden.json's caregiver voice_id
+
+
+def test_synthesize_patient_audio_pcm_still_refuses_camden_patient_voice_key(monkeypatch, engine):
+    """Requirement: the fix must NOT weaken the loader's speaker-match safety
+    gate. Requesting the CHILD's ('patient') voice_key for Camden - exactly
+    the old, buggy default the LiveKit adapter used to pass - must still be
+    refused, since Camden's case file only ever configures a voice under
+    'caregiver'. Proves TTS success is achieved by resolving the RIGHT key,
+    not by loosening this rule."""
+    fake_el = FakeElevenLabsClient()
+    monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
+
+    pcm = patient_adapter.synthesize_patient_audio_pcm(
+        case_id="camden", text="irrelevant", voice_key="patient",
+    )
+
+    assert pcm is None
+    assert fake_el.calls == []  # ElevenLabs never even attempted
+
+
+def test_synthesize_patient_audio_pcm_camden_missing_caregiver_voice_fails_closed(monkeypatch, engine):
+    """A genuine configuration failure (no caregiver voice configured at all)
+    must still produce an explicit None (-> "failed" status upstream), never
+    a silent fallback - distinguishes a config-gate failure from a real
+    ElevenLabs provider failure, both of which must fail closed."""
+    from app.patient_engine import case_loader
+
+    case = case_loader.load_case("camden")
+    monkeypatch.setattr(case.voice_profile, "voice_id", "PASTE_CAMDEN_VOICE_ID_HERE")
+    fake_el = FakeElevenLabsClient()
+    monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
+
+    pcm = patient_adapter.synthesize_patient_audio_pcm(
+        case_id="camden", text="irrelevant", voice_key="caregiver",
+    )
+
+    assert pcm is None
+    assert fake_el.calls == []
+
+
+# =================================================================
 # Phase 2 persistent worker (app/livekit_agent/worker.py) - WorkerOptions /
 # JobContext based, replaces the Phase 1 --room/--session-id/--case-id CLI
 # script.

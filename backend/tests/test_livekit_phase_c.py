@@ -218,6 +218,39 @@ def test_full_turn_happy_path_acks_then_speaks_targeted_at_the_student(monkeypat
     assert all(dest == ["student-1"] for dest in all_destinations)
 
 
+def test_full_turn_happy_path_for_camden_reaches_tts_via_caregiver_voice(monkeypatch, engine):
+    """Regression for the Camden-only LiveKit voice-routing bug: end-to-end
+    through the REAL worker/PocAgentSession pipeline (not just the adapter
+    unit tests in test_livekit_poc.py), proving Camden's first turn now
+    reaches speaking_started/speaking_ended instead of "failed", and that
+    ElevenLabs was called with Camden's configured CAREGIVER voice id - the
+    old default ("patient" voice_key, for which Camden has no configured
+    voice) would have short-circuited the whole turn to "failed" before ever
+    reaching this call."""
+    with _fake_rtc_for_worker():
+        session, room, _sid = _make_ready_session(
+            engine, monkeypatch, remote_identities={"student-1": object()}, case_id="camden",
+        )
+        fake_openai = FakeOpenAIClient(text="He's been much more tired than before.")
+        monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
+        fake_el = FakeElevenLabsClient(chunks=(b"\x01\x02", b"\x03\x04"))
+        monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
+
+        async def _drive():
+            await session.start()
+            room.emit("data_received", _StudentTextPacket("What's been going on?", "camden-turn-happy"))
+            await _run_until_idle()
+
+        asyncio.run(_drive())
+
+    assert _turn_statuses(room) == [
+        {"clientTurnId": "camden-turn-happy", "status": "speaking_started"},
+        {"clientTurnId": "camden-turn-happy", "status": "speaking_ended"},
+    ]
+    assert len(fake_el.calls) == 1
+    assert fake_el.calls[0]["voice_id"] == "GP1bgf0sjoFuuHkyrg8E"  # camden.json's caregiver voice_id
+
+
 # =================================================================
 # Part 3: turn-ACK protocol
 # =================================================================

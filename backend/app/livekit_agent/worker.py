@@ -519,8 +519,14 @@ class PocAgentSession:
 
             pcm = await loop.run_in_executor(
                 None,
+                # voice_key was resolved once, alongside speaker/response
+                # generation, in generate_and_persist_turn (see
+                # patient_adapter.py's speaker-routing parity note) - passed
+                # through here rather than re-derived, so TTS always
+                # synthesizes the SAME participant's voice that answered.
                 lambda: patient_adapter.synthesize_patient_audio_pcm(
-                    case_id=self.case_id, text=result.patient_text, on_stage=on_stage
+                    case_id=self.case_id, text=result.patient_text,
+                    voice_key=result.voice_key, on_stage=on_stage,
                 ),
             )
             if pcm is None:
