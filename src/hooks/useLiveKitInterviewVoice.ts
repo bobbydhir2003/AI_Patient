@@ -113,19 +113,47 @@ export function useLiveKitInterviewVoice(
   const engineRef = useRef<LiveKitPocEngine | null>(null);
   const supported = isSpeechRecognitionSupported();
 
+  /**
+   * Phase D1: every callback below first checks that `engine` (the specific
+   * instance this closure was built for) is STILL `engineRef.current` before
+   * touching any hook state. Without this, a stale async completion from a
+   * PREVIOUS engine - most notably LiveKitPocEngine.end()'s own delayed
+   * setState("ended") firing well after room.disconnect() resolves - could
+   * silently overwrite state a NEWER action (Stop, reset, or an unmounting
+   * component) already set correctly. This was the confirmed cause of Stop
+   * Voice Conversation flashing "Conversation finished": stopConversation()
+   * synchronously set "IDLE", but the OLD engine's in-flight end() call
+   * would still land moments later and stomp it with "FINISHED" - the guard
+   * below is what makes stopConversation()/reset()/retry()/unmount all safe
+   * with NO changes needed to any of them individually, since they all
+   * already null out engineRef.current before (or as part of) tearing down.
+   * Deliberately NOT a delay/timeout-based fix - identity comparison is
+   * exact and instantaneous, whichever order the async work resolves in.
+   */
   const buildEngine = useCallback((): LiveKitPocEngine => {
-    return new LiveKitPocEngine({
-      onStateChange: (pocState) => setState(mapPocState(pocState)),
+    const engine: LiveKitPocEngine = new LiveKitPocEngine({
+      onStateChange: (pocState) => {
+        if (engineRef.current !== engine) return;
+        setState(mapPocState(pocState));
+      },
       onStudentTranscript: (text, isFinal) => {
+        if (engineRef.current !== engine) return;
         optionsRef.current.onInterim(isFinal ? "" : text);
       },
-      onError: (message) => setErrorMessage(message),
-      onTurnCompleted: () => optionsRef.current.onTurnCompleted(),
+      onError: (message) => {
+        if (engineRef.current !== engine) return;
+        setErrorMessage(message);
+      },
+      onTurnCompleted: () => {
+        if (engineRef.current !== engine) return;
+        optionsRef.current.onTurnCompleted();
+      },
       // POC-only diagnostics/room-name surfacing - the real InterviewPage
       // has no admin diagnostic panel and never displays a room name.
       onDiagnostics: () => {},
       onRoomName: () => {},
     });
+    return engine;
   }, []);
 
   const startConversation = useCallback(() => {
@@ -142,11 +170,15 @@ export function useLiveKitInterviewVoice(
    * track are all torn down by LiveKitPocEngine.end() itself (see its own
    * cleanup discipline) - this hook only needs to drop its reference and
    * reset local UI state. Unlike the legacy hook's stopConversation (which
-   * only pauses, resumably), the LiveKit engine has no pause/resume concept
-   * yet - stopping fully ends the room; starting again mints a fresh token
-   * and rejoins the SAME room (same session id), which is safe/idempotent
-   * but does re-dispatch a new agent job. Documented as a known Phase B
-   * limitation, not silently pretended away. */
+   * only pauses, resumably), the LiveKit engine has no pause/resume concept -
+   * stopping fully ends the room. Resuming (calling startConversation again)
+   * mints a fresh token and joins a brand-NEW room (see Phase C3's
+   * connection_id-suffixed student_room_name) rather than rejoining the one
+   * just left, which is what makes Stop -> Resume safe even if the old
+   * room is still tearing down on LiveKit's side. IDLE here (rather than a
+   * dedicated "stopped" state) is intentional: ConversationControl already
+   * derives "Resume" vs "Start" label/aria from hasConversation while IDLE,
+   * so no new UI state is needed for Stop to read correctly. */
   const stopConversation = useCallback(() => {
     void engineRef.current?.end();
     engineRef.current = null;

@@ -36,6 +36,34 @@ const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.join(scriptDir, "..");
 const buildDir = path.join(repoRoot, ".test-build", "livekit", "services");
 
+/**
+ * Phase D1: once useLiveKitInterviewVoice.ts (which imports "react") joins
+ * this compile, tsc stops appending ".js" to ALL relative import specifiers
+ * in the whole compilation unit - including livekitPocEngine.js's own
+ * ("../api", "../voiceDiagnostics", etc), which otherwise resolve fine
+ * without the hook present. Plain Node ESM cannot resolve an extensionless
+ * relative specifier, so this walks the compiled output and appends ".js"
+ * to any relative import/export lacking one - a test-build-only fixup, not
+ * a change to any production source file or its authored import style.
+ */
+function fixRelativeImportExtensions(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      fixRelativeImportExtensions(full);
+      continue;
+    }
+    if (!entry.name.endsWith(".js")) continue;
+    const original = fs.readFileSync(full, "utf8");
+    const fixed = original.replace(
+      /(from\s+"|import\s*\(\s*")(\.\.?\/[^".]+)(")/g,
+      (match, prefix, spec, suffix) => `${prefix}${spec}.js${suffix}`,
+    );
+    if (fixed !== original) fs.writeFileSync(full, fixed);
+  }
+}
+fixRelativeImportExtensions(path.join(repoRoot, ".test-build", "livekit"));
+
 // ---------------------------------------------------------------------------
 // STATIC: source-level proof the engine never references the legacy
 // MediaSource/Blob/Audio/speechSynthesis playback primitives.
@@ -217,6 +245,117 @@ mock.module("livekit-client", {
 });
 
 // ---------------------------------------------------------------------------
+// Phase D1: a minimal fake React runtime, just enough to drive
+// useLiveKitInterviewVoice.ts's own hook body directly (useState/useRef/
+// useCallback/useEffect only - no JSX, no concurrent scheduling, no
+// batching). This repo has no React rendering/hook-testing harness (no
+// react-test-renderer/@testing-library, see package.json), so this proves
+// the Phase D1 stale-callback fix BEHAVIORALLY - not just via source-scan -
+// using the SAME real LiveKitPocEngine + FakeRoom already set up above.
+// ---------------------------------------------------------------------------
+function createHookTester(hookFn) {
+  const stateValues = [];
+  const stateSetters = [];
+  const refs = [];
+  const callbackSlots = [];
+  const effectSlots = [];
+  let pendingEffects = [];
+  let cursor = 0;
+  let latest;
+  let currentProps;
+
+  function depsChanged(prev, next) {
+    if (!prev) return true;
+    if (prev.length !== next.length) return true;
+    return prev.some((v, i) => !Object.is(v, next[i]));
+  }
+
+  function useState(initial) {
+    const i = cursor++;
+    if (i >= stateValues.length) {
+      stateValues[i] = typeof initial === "function" ? initial() : initial;
+    }
+    if (!stateSetters[i]) {
+      stateSetters[i] = (next) => {
+        const value = typeof next === "function" ? next(stateValues[i]) : next;
+        if (!Object.is(value, stateValues[i])) {
+          stateValues[i] = value;
+          rerender();
+        }
+      };
+    }
+    return [stateValues[i], stateSetters[i]];
+  }
+
+  function useRef(initial) {
+    const i = cursor++;
+    if (i >= refs.length) refs[i] = { current: initial };
+    return refs[i];
+  }
+
+  function useCallback(fn, deps) {
+    const i = cursor++;
+    const prev = callbackSlots[i];
+    if (prev && !depsChanged(prev.deps, deps)) return prev.fn;
+    callbackSlots[i] = { fn, deps };
+    return fn;
+  }
+
+  function useEffect(create, deps) {
+    const i = cursor++;
+    const prev = effectSlots[i];
+    if (!prev || depsChanged(prev.deps, deps)) {
+      pendingEffects.push(i);
+      effectSlots[i] = { deps, cleanup: prev ? prev.cleanup : undefined };
+    }
+    effectSlots[i]._pendingCreate = create;
+  }
+
+  function flushEffects() {
+    const queue = pendingEffects;
+    pendingEffects = [];
+    for (const i of queue) {
+      const slot = effectSlots[i];
+      if (slot.cleanup) slot.cleanup();
+      const cleanup = slot._pendingCreate();
+      slot.cleanup = typeof cleanup === "function" ? cleanup : undefined;
+    }
+  }
+
+  function render(props) {
+    currentProps = props;
+    cursor = 0;
+    globalThis.__fakeReactHooks = { useState, useRef, useCallback, useEffect };
+    latest = hookFn(props);
+    flushEffects();
+    return latest;
+  }
+
+  function rerender() {
+    render(currentProps);
+  }
+
+  return {
+    render,
+    getResult: () => latest,
+    unmount: () => {
+      for (const slot of effectSlots) {
+        if (slot && slot.cleanup) slot.cleanup();
+      }
+    },
+  };
+}
+
+mock.module("react", {
+  exports: {
+    useState: (...args) => globalThis.__fakeReactHooks.useState(...args),
+    useRef: (...args) => globalThis.__fakeReactHooks.useRef(...args),
+    useCallback: (...args) => globalThis.__fakeReactHooks.useCallback(...args),
+    useEffect: (...args) => globalThis.__fakeReactHooks.useEffect(...args),
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Fake token endpoint.
 // ---------------------------------------------------------------------------
 const fetchCalls = [];
@@ -251,6 +390,15 @@ globalThis.fetch = async (url, init) => {
 
 const { LiveKitPocEngine, fetchAdminPocLiveKitToken, fetchStudentLiveKitToken } = await import(
   path.join(buildDir, "livekit", "livekitPocEngine.js")
+);
+
+// Phase D1: the REAL hook, compiled alongside the engine (see
+// package.json's test:livekitpoc tsc entry) - exercised through
+// createHookTester() above against the SAME FakeRoom/fetch mocks the engine
+// tests already use, so the stale-callback fix is proven against real async
+// timing, not a stubbed engine.
+const { useLiveKitInterviewVoice } = await import(
+  path.join(repoRoot, ".test-build", "livekit", "hooks", "useLiveKitInterviewVoice.js")
 );
 
 function makeCallbackRecorder() {
@@ -1873,4 +2021,179 @@ test("PHASE C3: a stale agent_ready delivered to an OLD (ended) engine's room ne
   assert.equal(engine2.getState(), "listening", "engine2's OWN room's agent_ready still works normally");
 
   await engine2.end();
+});
+
+// ---------------------------------------------------------------------------
+// PHASE D1: useLiveKitInterviewVoice.ts's stale-callback guard (fixes the
+// confirmed "Conversation finished" bug after pressing Stop) and the
+// Stop -> Resume lifecycle. Driven through the REAL hook via
+// createHookTester() above - not a stub - against the SAME FakeRoom/fetch
+// mocks the engine tests use, so these prove the fix against real async
+// completion order, not an idealized one.
+// ---------------------------------------------------------------------------
+function hookOptions(overrides = {}) {
+  return {
+    sessionId: "session-d1-1",
+    enabled: true,
+    onInterim: () => {},
+    onTurnCompleted: () => {},
+    ...overrides,
+  };
+}
+
+test("PHASE D1 A: Stop sets IDLE, and the old engine's own delayed ended-state callback (the confirmed root cause) never overwrites it", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions());
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room1 = createdRooms.at(-1);
+  sendAgentReady(room1);
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "LISTENING");
+
+  tester.getResult().stopConversation();
+  assert.equal(tester.getResult().state, "IDLE", "Stop must synchronously read as IDLE, never FINISHED");
+
+  // Let engine1's own end() chain (await room.disconnect() -> setState("ended"))
+  // resolve - this delayed onStateChange("ended") is the exact call that used
+  // to silently clobber the IDLE just set above.
+  await flushMicrotasks();
+  assert.equal(room1.disconnectCalls, 1);
+  assert.equal(tester.getResult().state, "IDLE", "a late 'ended' callback from the stopped engine must be ignored");
+});
+
+test("PHASE D1 B: reset() (used by End Interview) also reads as IDLE immediately and is protected from the same old-engine late callback", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-d1-2" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room1 = createdRooms.at(-1);
+  sendAgentReady(room1);
+  await flushMicrotasks();
+
+  tester.getResult().reset();
+  assert.equal(tester.getResult().state, "IDLE");
+  assert.equal(tester.getResult().errorMessage, null);
+
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "IDLE", "a late 'ended' callback after reset() must be ignored");
+});
+
+test("PHASE D1 C: Resume (Start again after Stop) mints a fresh token, joins a brand-new room, and reaches LISTENING again", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-d1-3" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room1 = createdRooms.at(-1);
+  sendAgentReady(room1);
+  await flushMicrotasks();
+  tester.getResult().stopConversation();
+  await flushMicrotasks();
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room2 = createdRooms.at(-1);
+  assert.notEqual(room2, room1, "Resume must join a brand-new room, never rejoin the one just left");
+  sendAgentReady(room2);
+  await flushMicrotasks();
+
+  assert.equal(tester.getResult().state, "LISTENING");
+  assert.equal(tokenMintCalls().length, 2, "Resume mints a fresh token, same as any other Start");
+  const bodies = tokenMintCalls().map((c) => JSON.parse(c.init.body));
+  assert.ok(bodies.every((b) => b.sessionId === "session-d1-3"), "same session id across Stop -> Resume");
+});
+
+test("PHASE D1 D: retry() after an engine error builds a new engine, unaffected by the old (errored) engine's late completions", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-d1-4" }));
+
+  tester.getResult().startConversation();
+  // The mic-timeout watchdog clears itself a few microtask hops after
+  // setMicrophoneEnabled(true) resolves (see attemptEnableMicrophone's
+  // .then chain) - extra rounds beyond the shared flushMicrotasks() budget
+  // are needed here specifically because the fake-React harness's own
+  // setState-triggered re-render adds hops before that chain settles.
+  // Flushing generously just ensures ONLY the agent-ready watchdog remains
+  // pending, matching the direct-engine "agent_ready never arriving" test.
+  await flushMicrotasks();
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "REQUESTING_PERMISSION");
+  fireTimerById(latestTimerId()); // the agent-ready watchdog never resolves
+  assert.equal(tester.getResult().state, "ERROR");
+  const room1 = createdRooms.at(-1);
+
+  tester.getResult().retry();
+  await flushMicrotasks();
+  const room2 = createdRooms.at(-1);
+  assert.notEqual(room2, room1, "retry() must build a new engine/room, not reuse the errored one");
+  sendAgentReady(room2);
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "LISTENING", "retry succeeds normally in the new engine");
+
+  // A late message on the OLD (errored, abandoned) room must never reach the
+  // hook's now-current (engine2-backed) state.
+  sendAgentReady(room1);
+  assert.equal(tester.getResult().state, "LISTENING", "a stale signal from the abandoned engine must be ignored");
+});
+
+test("PHASE D1 E: while an engine is still the active one, its own Reconnecting/Reconnected updates reach the hook normally (guard does not block the CURRENT engine)", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-d1-5" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReady(room);
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "LISTENING");
+
+  room.emit(RoomEvent.Reconnecting);
+  assert.equal(tester.getResult().state, "PROCESSING", "the still-current engine's own reconnecting must still update hook state");
+  room.emit(RoomEvent.Reconnected);
+  assert.equal(tester.getResult().state, "LISTENING", "and recovers normally once reconnected");
+});
+
+test("PHASE D1 F: unmounting the hook fully ends the engine, and any later callback from that engine is ignored", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-d1-6" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReady(room);
+  await flushMicrotasks();
+
+  tester.unmount();
+  await flushMicrotasks();
+  assert.equal(room.disconnectCalls, 1, "unmount must fully end the engine, same as Stop");
+
+  // Nothing to assert on hook state post-unmount (no component reads it),
+  // but the guard must not throw when engineRef.current is already null.
+  assert.doesNotThrow(() => room.emit(RoomEvent.Reconnecting));
+});
+
+test("PHASE D1 G: a fresh mount (never started) reads IDLE - identical to post-Stop IDLE, so ConversationControl's existing hasConversation check is what distinguishes Resume from Start, with no new state needed", () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-d1-7" }));
+  assert.equal(tester.getResult().state, "IDLE");
+  assert.equal(tester.getResult().active, false);
+});
+
+test("PHASE D1: STATIC - stopConversation/reset never call completeSession, navigate, or any assessment/session-status API - Stop and End Interview remain fully separate", () => {
+  const rawSource = fs
+    .readFileSync(path.join(repoRoot, "src", "hooks", "useLiveKitInterviewVoice.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+  assert.ok(!/completeSession|navigate\(|assessment/i.test(rawSource),
+    "useLiveKitInterviewVoice.ts must stay unaware of session-completion/assessment/navigation concerns - those belong to InterviewPage.tsx's separate End Interview flow");
 });
