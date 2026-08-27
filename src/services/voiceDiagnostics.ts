@@ -127,7 +127,14 @@ export type VoiceEvent =
   | "livekit_mic_request_timeout"
   | "livekit_mic_retry_started"
   | "livekit_mic_ready"
-  | "livekit_startup_reconciled";
+  | "livekit_startup_reconciled"
+  // --- Phase C3: unique LiveKit room per intentional voice connection (see
+  // livekit_token_service.py's student_room_name for the confirmed
+  // Stop/refresh restart race this answers). Lets a lifecycle report be
+  // correlated to exactly one voice connection attempt, distinct from the
+  // persistent interview session.
+  | "livekit_voice_connection_created"
+  | "livekit_voice_connection_ended";
 
 /** Stage-level failure category. See file header for how these map to the
  * report categories STATUS_PROBE_TRANSIENT / STATUS_CONFIRMED_UNAVAILABLE /
@@ -186,6 +193,12 @@ export interface VoiceEventMeta {
    * fresh session from a retried one. A plain incrementing integer, never
    * patient content or anything session-identifying beyond an ordinal. */
   startupGeneration?: number;
+  /** Phase C3: the server-generated UUID4 identifying the CURRENT LiveKit
+   * voice connection (see backend LiveKitTokenResponse.connectionId) -
+   * distinct from the persistent interview session_id/caseId, this changes
+   * every time Start is pressed after a Stop/refresh/leave-return. An opaque
+   * identifier only - never patient content, never a secret. */
+  connectionId?: string;
 }
 
 export interface VoiceCounters {
@@ -322,6 +335,7 @@ const TELEMETRY_EVENTS = new Set<VoiceEvent>([
   "livekit_mic_request_started", "livekit_mic_request_resolved",
   "livekit_mic_request_failed", "livekit_mic_request_timeout",
   "livekit_mic_retry_started", "livekit_mic_ready", "livekit_startup_reconciled",
+  "livekit_voice_connection_created", "livekit_voice_connection_ended",
 ]);
 
 /**
@@ -348,6 +362,7 @@ function sendTelemetry(event: VoiceEvent, meta: VoiceEventMeta): void {
       attempt: meta.attempt ?? null,
       reason: meta.reason ?? "",
       startupGeneration: meta.startupGeneration ?? null,
+      connectionId: meta.connectionId ?? "",
     });
     void fetch(`${API_BASE_URL}/api/voice/telemetry`, {
       method: "POST",

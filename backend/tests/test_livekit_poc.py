@@ -132,7 +132,11 @@ def test_token_response_never_contains_api_secret(engine, monkeypatch):
     r = client.post("/api/livekit/token", json={"sessionId": session_id})
     assert r.status_code == 200
     body = r.json()
-    assert set(body.keys()) == {"token", "url", "roomName", "participantIdentity"}
+    # Phase C3: connectionId is now part of the shared LiveKitTokenOut shape,
+    # but the admin POC room stays deterministic (per-session, not
+    # per-connection) - confirmed empty here, unlike the student path.
+    assert set(body.keys()) == {"token", "url", "roomName", "participantIdentity", "connectionId"}
+    assert body["connectionId"] == ""
     serialized = r.text
     assert LIVEKIT_API_SECRET not in serialized
 

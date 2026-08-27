@@ -115,6 +115,13 @@ def issue_student_livekit_token(
       (livekit_token_service.student_room_name) - the client never supplies
       or influences it, and it uses a DIFFERENT prefix than the admin POC's
       rooms (ptai-interview- vs ptai-poc-).
+    - Phase C3: every call also mints a fresh, server-generated connection_id
+      (UUID4) baked into the room name, so every call gets its OWN brand-new
+      LiveKit room - the frontend never has to decide "is this a restart" or
+      manage room names itself; a new room is simply what every token
+      request produces. This is what makes Stop-then-Start, refresh, and
+      leave/return safe: none of them can ever reconnect to a room that
+      might still be shutting down from a previous voice connection.
     - The LiveKit API secret never leaves livekit_token_service; only the
       signed, short-lived token is returned.
     """
@@ -125,4 +132,5 @@ def issue_student_livekit_token(
         url=result.url,
         room_name=result.room_name,
         participant_identity=result.participant_identity,
+        connection_id=result.connection_id,
     )

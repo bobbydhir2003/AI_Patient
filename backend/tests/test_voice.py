@@ -830,6 +830,8 @@ def test_telemetry_accepts_livekit_reliability_event_names(engine, caplog):
         "livekit_mic_retry_started",
         "livekit_mic_ready",
         "livekit_startup_reconciled",
+        "livekit_voice_connection_created",
+        "livekit_voice_connection_ended",
     ]
     with caplog.at_level(logging.INFO, logger="app.api.voice"):
         for event in livekit_events:
@@ -931,6 +933,28 @@ def test_telemetry_startup_generation_field_is_bounded(engine, caplog):
     resp = client.post(
         "/api/voice/telemetry",
         json={"event": "livekit_startup_reconciled", "startupGeneration": -1},
+    )
+    assert resp.status_code == 422
+
+
+def test_telemetry_connection_id_field_is_bounded(engine, caplog):
+    """Phase C3: connectionId is the server-generated UUID4 identifying the
+    current LiveKit voice connection - accepts a plausible value, rejects an
+    oversized one (bounded well above a UUID4's 36 chars)."""
+    import logging
+
+    client = make_voice_client(engine)
+    with caplog.at_level(logging.INFO, logger="app.api.voice"):
+        resp = client.post(
+            "/api/voice/telemetry",
+            json={"event": "livekit_voice_connection_created", "connectionId": "conn-abc-123"},
+        )
+    assert resp.status_code == 200
+    assert any("connection_id=conn-abc-123" in r.message for r in caplog.records)
+
+    resp = client.post(
+        "/api/voice/telemetry",
+        json={"event": "livekit_voice_connection_created", "connectionId": "x" * 65},
     )
     assert resp.status_code == 422
 

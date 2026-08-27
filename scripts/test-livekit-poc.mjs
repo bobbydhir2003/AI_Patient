@@ -220,16 +220,31 @@ mock.module("livekit-client", {
 // Fake token endpoint.
 // ---------------------------------------------------------------------------
 const fetchCalls = [];
+// Phase C3: counts only ACTUAL token-mint requests (never telemetry pings,
+// which flow through this SAME fetch mock) so tests can prove "every Start
+// gets a fresh room" - the first mint keeps the EXACT pre-Phase-C3 room name
+// (existing tests assert this literal value), every subsequent mint for the
+// SAME default token gets a distinct roomName/connectionId, mirroring the
+// real backend's student_room_name(session_id, connection_id) behavior.
+let tokenMintCount = 0;
 globalThis.fetch = async (url, init) => {
-  fetchCalls.push({ url: String(url), init });
+  const urlStr = String(url);
+  fetchCalls.push({ url: urlStr, init });
+  const isTokenRequest = urlStr.includes("/livekit/token") || urlStr.includes("livekit-token");
+  if (!isTokenRequest) {
+    return { ok: true, status: 200, json: async () => ({}) };
+  }
+  tokenMintCount += 1;
+  const connectionId = `conn-${tokenMintCount}`;
   return {
     ok: true,
     status: 200,
     json: async () => ({
       token: "fake.jwt.token",
       url: "wss://fake-project.livekit.cloud",
-      roomName: "ptai-poc-session-1",
+      roomName: tokenMintCount === 1 ? "ptai-poc-session-1" : `ptai-poc-session-1-${connectionId}`,
       participantIdentity: "user-1",
+      connectionId,
     }),
   };
 };
@@ -357,6 +372,14 @@ function resetFixtures() {
   createdRooms.length = 0;
   FakeSpeechRecognition.instances.length = 0;
   fetchCalls.length = 0;
+  tokenMintCount = 0;
+}
+
+/** Count of fetch calls that were actual token-mint requests (never
+ * telemetry pings) - Phase C3 restart/lifecycle tests use this to prove
+ * exactly how many fresh tokens were requested. */
+function tokenMintCalls() {
+  return fetchCalls.filter((c) => c.url.includes("/livekit/token") || c.url.includes("livekit-token"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1621,4 +1644,233 @@ test("PHASE C2: mic acquisition never touches the legacy playback stack (no new 
   // Positive control: microphone acquisition still goes through the SAME
   // persistent Room/localParticipant, never a second/parallel media path.
   assert.ok(source.includes("room.localParticipant.setMicrophoneEnabled(true)"));
+});
+
+// ===========================================================================
+// PHASE C3: unique LiveKit room per intentional voice connection - fixes the
+// confirmed Stop/refresh/leave-return restart race (a deterministic room
+// name could reconnect to a room still shutting down in LiveKit Cloud,
+// silently skipping a fresh worker dispatch/agent_ready). See
+// livekit_token_service.py's student_room_name for the backend half; here
+// the engine simply threads through whatever connectionId/roomName a fresh
+// token response provides, for every Start, with no special-casing of
+// "is this a restart" anywhere in this file's code under test.
+// ===========================================================================
+
+test("PHASE C3: the engine threads the server-provided connectionId into connection telemetry, never invents it", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await startReady(engine, "session-connid-1");
+
+  const createdEvent = telemetryEvents().find((e) => e.event === "livekit_voice_connection_created");
+  assert.ok(createdEvent, "expected a livekit_voice_connection_created telemetry event");
+  assert.equal(createdEvent.connectionId, "conn-1");
+
+  const readyEvent = telemetryEvents().find((e) => e.event === "livekit_agent_ready_received");
+  assert.equal(readyEvent.connectionId, "conn-1", "connectionId must also appear on other lifecycle events");
+
+  fetchCalls.length = 0;
+  await engine.end();
+  const endedEvent = telemetryEvents().find((e) => e.event === "livekit_voice_connection_ended");
+  assert.ok(endedEvent, "expected a livekit_voice_connection_ended telemetry event");
+  assert.equal(endedEvent.connectionId, "conn-1");
+});
+
+test("PHASE C3: the frontend never sends anything beyond sessionId when requesting a token - no client-chosen room/connection", () => {
+  const rawSource = fs.readFileSync(
+    path.join(repoRoot, "src", "services", "livekit", "livekitPocEngine.ts"),
+    "utf8",
+  );
+  const source = rawSource.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  // postForToken's request body is exactly `{ sessionId }` - proven
+  // textually since this is the ONLY place a token request is constructed;
+  // there is no code path anywhere in this file that builds a request body
+  // containing a room name or connection id.
+  assert.ok(source.includes("body: JSON.stringify({ sessionId })"));
+});
+
+test("PHASE C3 D: first Start still reaches LISTENING (unaffected by connectionId plumbing)", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-first-start");
+  assert.equal(engine.getState(), "listening");
+  assert.equal(tokenMintCalls().length, 1);
+  assert.equal(room.micCallCount, 1);
+  await engine.end();
+});
+
+test("PHASE C3 E: Stop then immediate Start again requests a fresh token, gets a NEW room, and reaches LISTENING again", async () => {
+  resetFixtures();
+  const rec1 = makeCallbackRecorder();
+  const engine1 = new LiveKitPocEngine(rec1.callbacks);
+  await startReady(engine1, "session-restart-1");
+  assert.equal(engine1.getState(), "listening");
+  const firstRoomName = rec1.roomNames[0];
+
+  await engine1.end();
+  assert.equal(engine1.getState(), "ended");
+
+  // Start #2: a BRAND-NEW engine instance, exactly matching
+  // useLiveKitInterviewVoice.ts's buildEngine() pattern (the hook never
+  // reuses an engine across Stop -> Start).
+  const rec2 = makeCallbackRecorder();
+  const engine2 = new LiveKitPocEngine(rec2.callbacks);
+  await startReady(engine2, "session-restart-1");
+  assert.equal(engine2.getState(), "listening");
+  const secondRoomName = rec2.roomNames[0];
+
+  assert.equal(tokenMintCalls().length, 2, "a fresh token must be requested for every Start");
+  assert.notEqual(firstRoomName, secondRoomName, "Start #2 must get a DIFFERENT room than Start #1");
+  assert.equal(createdRooms.length, 2, "two separate Room objects were constructed - no room reuse");
+
+  const readyEvents = telemetryEvents().filter((e) => e.event === "livekit_agent_ready_received");
+  assert.equal(readyEvents.length, 2);
+  assert.notEqual(readyEvents[0].connectionId, readyEvents[1].connectionId, "each Start's agent_ready has its own connectionId");
+
+  await engine2.end();
+});
+
+test("PHASE C3 F: Stop then immediate Start again, then 5 turns, all succeed in the NEW connection", async () => {
+  resetFixtures();
+  const engine1 = new LiveKitPocEngine(makeCallbackRecorder().callbacks);
+  await startReady(engine1, "session-restart-turns");
+  await engine1.end();
+
+  const rec2 = makeCallbackRecorder();
+  const engine2 = new LiveKitPocEngine(rec2.callbacks);
+  const room2 = await startReady(engine2, "session-restart-turns");
+
+  for (let turn = 1; turn <= 5; turn += 1) {
+    assert.equal(engine2.getState(), "listening", `turn ${turn}: must be listening before speaking`);
+    FakeSpeechRecognition.instances.at(-1).emitFinal(`Question ${turn}`);
+    await flushMicrotasks();
+    const clientTurnId = latestStudentTurnId(room2);
+    sendTurnAck(room2, clientTurnId);
+    sendTurnStatus(room2, clientTurnId, "speaking_started");
+    sendTurnStatus(room2, clientTurnId, "speaking_ended");
+    assert.equal(engine2.getState(), "listening", `turn ${turn}: must return to listening`);
+  }
+
+  assert.equal(engine2.getTurnCount(), 5);
+  assert.equal(rec2.errors.length, 0, "no errors across 5 turns in the restarted connection");
+
+  await engine2.end();
+});
+
+test("PHASE C3 H: refresh simulation - a fresh engine instance for the SAME session gets its own fresh room", async () => {
+  resetFixtures();
+  // Simulates a full browser refresh: no reference to any prior engine
+  // exists at all (unlike Stop, there is no engine1.end() call here) - the
+  // new engine/hook mount is the FIRST thing this "page load" ever does.
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await startReady(engine, "session-refresh-1");
+
+  assert.equal(engine.getState(), "listening");
+  assert.equal(tokenMintCalls().length, 1, "post-refresh Start still requests exactly one fresh token");
+  assert.ok(rec.roomNames[0], "a room name was assigned by the (simulated) fresh token response");
+
+  await engine.end();
+});
+
+test("PHASE C3 I: leave-and-return simulation - Start after a fresh engine mount gets a fresh room, same sessionId", async () => {
+  resetFixtures();
+  const sessionId = "session-leave-return-1";
+
+  const engineBeforeLeaving = new LiveKitPocEngine(makeCallbackRecorder().callbacks);
+  await startReady(engineBeforeLeaving, sessionId);
+  // Leaving the page: useLiveKitInterviewVoice.ts's unmount effect calls
+  // end() exactly like Stop does.
+  await engineBeforeLeaving.end();
+
+  // Returning and pressing Start: a brand-new engine/hook instance, SAME
+  // sessionId (the interview session itself never changed).
+  const recAfterReturn = makeCallbackRecorder();
+  const engineAfterReturn = new LiveKitPocEngine(recAfterReturn.callbacks);
+  await startReady(engineAfterReturn, sessionId);
+
+  assert.equal(engineAfterReturn.getState(), "listening");
+  const tokenRequests = tokenMintCalls();
+  assert.equal(tokenRequests.length, 2);
+  assert.equal(
+    JSON.parse(tokenRequests[0].init.body).sessionId,
+    JSON.parse(tokenRequests[1].init.body).sessionId,
+    "the SAME interview session id is used for every token request across leave/return",
+  );
+  assert.notEqual(recAfterReturn.roomNames[0], undefined);
+
+  await engineAfterReturn.end();
+});
+
+test("PHASE C3 J: LiveKit's own Reconnecting/Reconnected during an active call never requests a new token, connectionId, or room", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-reconnect-1");
+  assert.equal(engine.getState(), "listening");
+
+  const tokenCallsBefore = tokenMintCalls().length;
+  const roomsBefore = createdRooms.length;
+
+  room.emit(RoomEvent.Reconnecting);
+  assert.equal(engine.getState(), "reconnecting");
+  room.emit(RoomEvent.Reconnected);
+  assert.equal(engine.getState(), "listening");
+
+  assert.equal(tokenMintCalls().length, tokenCallsBefore, "no new token request during an active-call reconnect");
+  assert.equal(createdRooms.length, roomsBefore, "no new Room object constructed during an active-call reconnect");
+  assert.equal(createdRooms[createdRooms.length - 1], room, "still the SAME room instance throughout");
+
+  await engine.end();
+});
+
+test("PHASE C3 N: microphone publishes again in the SECOND engine/room after Stop-then-Start", async () => {
+  resetFixtures();
+  const engine1 = new LiveKitPocEngine(makeCallbackRecorder().callbacks);
+  await startReady(engine1, "session-mic-restart");
+  const room1 = createdRooms[0];
+  assert.equal(room1.micCallCount, 1);
+  await engine1.end();
+
+  const rec2 = makeCallbackRecorder();
+  const engine2 = new LiveKitPocEngine(rec2.callbacks);
+  await startReady(engine2, "session-mic-restart");
+  const room2 = createdRooms[1];
+
+  assert.notEqual(room1, room2, "a brand-new Room object for the second connection");
+  assert.equal(room2.micCallCount, 1, "the NEW room/connection independently publishes its own mic");
+  assert.ok(telemetryEvents().some((e) => e.event === "livekit_mic_ready"));
+
+  await engine2.end();
+});
+
+test("PHASE C3: a stale agent_ready delivered to an OLD (ended) engine's room never affects a NEW engine for the same session", async () => {
+  resetFixtures();
+  const engine1 = new LiveKitPocEngine(makeCallbackRecorder().callbacks);
+  await engine1.start("session-stale-restart");
+  await flushMicrotasks();
+  const oldRoom = createdRooms.at(-1);
+  await engine1.end();
+
+  const rec2 = makeCallbackRecorder();
+  const engine2 = new LiveKitPocEngine(rec2.callbacks);
+  await engine2.start("session-stale-restart");
+  await flushMicrotasks();
+  const newRoom = createdRooms.at(-1);
+  assert.notEqual(oldRoom, newRoom);
+
+  // A late agent_ready for the OLD (now-torn-down) connection/room must
+  // never reach or mutate the NEW engine - proven by emitting it on the OLD
+  // room object (which engine1's own generation guard already renders inert
+  // for engine1) and confirming engine2 is COMPLETELY unaffected, since it
+  // never even registered a listener on oldRoom in the first place.
+  sendAgentReady(oldRoom);
+  assert.equal(engine2.getState(), "waiting_for_agent", "engine2 must be unaffected by a message on a different room object");
+
+  sendAgentReady(newRoom);
+  assert.equal(engine2.getState(), "listening", "engine2's OWN room's agent_ready still works normally");
+
+  await engine2.end();
 });

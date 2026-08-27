@@ -94,9 +94,13 @@ def test_student_can_get_livekit_token_for_own_session(engine, monkeypatch):
     r = client.post(f"/api/interviews/{session_id}/livekit-token")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert set(body.keys()) == {"token", "url", "roomName", "participantIdentity"}
+    assert set(body.keys()) == {"token", "url", "roomName", "participantIdentity", "connectionId"}
     assert body["url"] == LIVEKIT_URL
-    assert body["roomName"] == f"ptai-interview-{session_id}"
+    # Phase C3: room name now carries a fresh, server-generated connection_id
+    # suffix - session_id stays visible for log correlation, but the room is
+    # never just "ptai-interview-{session_id}" anymore (see student_room_name).
+    assert body["connectionId"], "connectionId must be present and non-empty"
+    assert body["roomName"] == f"ptai-interview-{session_id}-{body['connectionId']}"
     assert isinstance(body["token"], str) and body["token"].count(".") == 2  # JWT shape
 
 
@@ -155,10 +159,15 @@ def test_room_session_and_case_metadata_are_correct_and_server_derived(engine, m
 
     r = client.post(f"/api/interviews/{session_id}/livekit-token")
     assert r.status_code == 200, r.text
+    body = r.json()
     decoded = jwt.decode(
-        r.json()["token"], LIVEKIT_API_SECRET, algorithms=["HS256"], options={"verify_aud": False}
+        body["token"], LIVEKIT_API_SECRET, algorithms=["HS256"], options={"verify_aud": False}
     )
-    assert decoded["video"]["room"] == f"ptai-interview-{session_id}"
+    # Phase C3: the room name embeds the fresh connection_id, but the
+    # dispatch metadata below must be COMPLETELY unaffected by it - the
+    # worker must keep learning the real session_id/case_id from metadata,
+    # never from parsing the room-name string (see student_room_name).
+    assert decoded["video"]["room"] == f"ptai-interview-{session_id}-{body['connectionId']}"
     assert decoded["video"]["roomJoin"] is True
 
     agents = decoded["roomConfig"]["agents"]
@@ -239,8 +248,19 @@ def test_admin_poc_token_endpoint_still_works_and_uses_the_poc_room_prefix(engin
 
 def test_poc_and_student_room_names_use_distinct_prefixes():
     assert livekit_token_service.poc_room_name("abc") == "ptai-poc-abc"
-    assert livekit_token_service.student_room_name("abc") == "ptai-interview-abc"
-    assert livekit_token_service.poc_room_name("abc") != livekit_token_service.student_room_name("abc")
+    assert livekit_token_service.student_room_name("abc", "conn-1") == "ptai-interview-abc-conn-1"
+    assert livekit_token_service.poc_room_name("abc") != livekit_token_service.student_room_name("abc", "conn-1")
+
+
+def test_student_room_name_is_unique_per_connection_id():
+    """Phase C3: the whole point of student_room_name taking a connection_id
+    is that the SAME session_id produces a DIFFERENT room name per call -
+    this is what lets every intentional voice start get its own fresh room."""
+    first = livekit_token_service.student_room_name("abc", "conn-1")
+    second = livekit_token_service.student_room_name("abc", "conn-2")
+    assert first != second
+    assert first.startswith("ptai-interview-abc-")
+    assert second.startswith("ptai-interview-abc-")
 
 
 def test_student_livekit_enabled_requires_both_engine_flag_and_cloud_config(monkeypatch):

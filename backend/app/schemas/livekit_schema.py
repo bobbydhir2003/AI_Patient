@@ -20,3 +20,8 @@ class LiveKitTokenOut(CamelModel):
     url: str
     room_name: str
     participant_identity: str
+    # Phase C3: the server-generated UUID4 suffix baked into room_name for the
+    # student-safe path (see livekit_token_service.student_room_name) - "" for
+    # the admin POC path, whose room stays deterministic. Never used for
+    # interview identity; purely for client-side telemetry/log correlation.
+    connection_id: str = ""

@@ -118,6 +118,11 @@ VoiceTelemetryEventName = Literal[
     "livekit_mic_retry_started",
     "livekit_mic_ready",
     "livekit_startup_reconciled",
+    # Phase C3: unique LiveKit room per intentional voice connection (see
+    # livekit_token_service.py's student_room_name for the confirmed
+    # Stop/refresh restart race this answers).
+    "livekit_voice_connection_created",
+    "livekit_voice_connection_ended",
 ]
 
 
@@ -162,3 +167,9 @@ class VoiceTelemetryEvent(CamelModel):
     # session-identifying beyond that. Generously bounded, not tied to any
     # real-world session-count expectation.
     startup_generation: int | None = Field(default=None, ge=0, le=1_000_000)
+    # Phase C3: the server-generated UUID4 identifying the CURRENT LiveKit
+    # voice connection (see LiveKitTokenOut.connection_id) - distinct from
+    # session_id/caseId, changes every Start after a Stop/refresh/leave-
+    # return. An opaque identifier only - never patient content, never a
+    # secret. UUID4 is 36 chars; bounded generously above that.
+    connection_id: str = Field(default="", max_length=64)

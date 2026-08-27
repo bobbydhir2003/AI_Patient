@@ -82,6 +82,12 @@ export interface LiveKitTokenResponse {
   url: string;
   roomName: string;
   participantIdentity: string;
+  /** Phase C3: the server-generated UUID4 baked into the student room name
+   * (see backend livekit_token_service.student_room_name) - "" or absent for
+   * the admin POC path, whose room stays deterministic. Used ONLY for
+   * telemetry/log correlation, never for any protocol/state decision - the
+   * engine already treats `roomName` as fully opaque. */
+  connectionId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +283,13 @@ export class LiveKitPocEngine {
   private micReady = false;
   private agentReadyReceived = false;
 
+  /** Phase C3: the current voice connection's server-generated id (see
+   * LiveKitTokenResponse.connectionId) - telemetry-only, threaded through
+   * relevant logVoiceEvent() calls so a "stuck restart" report can be
+   * correlated to exactly one Start attempt in logs. Never used for any
+   * protocol/state decision. Reset to null in end(). */
+  private connectionId: string | null = null;
+
   private ended = false;
   private diagnostics: PocDiagnostics = { ...INITIAL_DIAGNOSTICS };
   private readonly callbacks: LiveKitPocCallbacks;
@@ -313,7 +326,9 @@ export class LiveKitPocEngine {
    * recognition_unsupported / microphone_start_failed) - the student-facing
    * `message` stays simple. */
   private emitError(message: string, reason: string): void {
-    logVoiceEvent("livekit_engine_error", { reason, engineState: this.state });
+    logVoiceEvent("livekit_engine_error", {
+      reason, engineState: this.state, connectionId: this.connectionId ?? undefined,
+    });
     this.callbacks.onError(message);
   }
 
@@ -407,6 +422,10 @@ export class LiveKitPocEngine {
       return;
     }
     if (!this.isCurrentGeneration(generation)) return;
+    this.connectionId = tokenInfo.connectionId ?? null;
+    logVoiceEvent("livekit_voice_connection_created", {
+      connectionId: this.connectionId ?? undefined, engineState: this.state,
+    });
     this.callbacks.onRoomName(tokenInfo.roomName);
 
     const room = new Room();
@@ -498,7 +517,7 @@ export class LiveKitPocEngine {
       return;
     }
     if (!this.isCurrentGeneration(generation)) return;
-    logVoiceEvent("livekit_room_connected", {});
+    logVoiceEvent("livekit_room_connected", { connectionId: this.connectionId ?? undefined });
     this.patchDiagnostics({ roomConnected: true });
     // The agent may already have joined before we did (or via ParticipantConnected above).
     if (room.remoteParticipants.has(AGENT_IDENTITY)) {
@@ -570,7 +589,9 @@ export class LiveKitPocEngine {
       if (this.agentReadyReceived) return; // duplicate/late resend - already recorded
       this.agentReadyReceived = true;
       this.clearAgentReadyWatchdog();
-      logVoiceEvent("livekit_agent_ready_received", { startupGeneration: generation });
+      logVoiceEvent("livekit_agent_ready_received", {
+        startupGeneration: generation, connectionId: this.connectionId ?? undefined,
+      });
       this.maybeEnterListening(generation);
       return;
     }
@@ -601,7 +622,10 @@ export class LiveKitPocEngine {
         logVoiceEvent("livekit_mic_published", {});
         this.patchDiagnostics({ micPublished: true });
         this.micReady = true;
-        logVoiceEvent("livekit_mic_ready", { engineState: this.state, durationMs: elapsedMs, startupGeneration: generation });
+        logVoiceEvent("livekit_mic_ready", {
+          engineState: this.state, durationMs: elapsedMs, startupGeneration: generation,
+          connectionId: this.connectionId ?? undefined,
+        });
         this.maybeEnterListening(generation);
         return;
       }
@@ -968,6 +992,15 @@ export class LiveKitPocEngine {
    * recognizer or a stale "speaking" state). */
   async end(): Promise<void> {
     this.ended = true;
+    if (this.connectionId) {
+      // Only fires if a connection was actually created (Start reached the
+      // token-fetch stage) - a no-op end() on a never-started engine stays
+      // silent, matching the existing "nothing to tear down" discipline
+      // below (this.room/this.audioEl guards).
+      logVoiceEvent("livekit_voice_connection_ended", {
+        connectionId: this.connectionId, engineState: this.state,
+      });
+    }
     // Invalidate any outstanding startup work (Phase C2): a mic attempt or
     // agent-ready watchdog still in flight from this (or an even earlier)
     // start() call must never mutate state after end() - isCurrentGeneration()
@@ -975,6 +1008,7 @@ export class LiveKitPocEngine {
     this.startupGeneration += 1;
     this.micReady = false;
     this.agentReadyReceived = false;
+    this.connectionId = null;
     this.clearMicTimeout();
     this.clearAgentReadyWatchdog();
     this.clearDeliveryWatchdog();
