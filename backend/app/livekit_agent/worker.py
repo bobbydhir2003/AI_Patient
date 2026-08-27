@@ -116,6 +116,13 @@ PATIENT_TURN_STATUS_TOPIC = "patient_turn_status"
 # the frontend's livekitPocEngine.ts AgentControlPayload/TurnStatusPayload.
 AGENT_CONTROL_TOPIC = "agent_control"
 
+# Phase D2: the browser sends this on AGENT_CONTROL_TOPIC (the SAME topic the
+# agent already uses for agent_ready/turn_ack) to request true SPEAKING-only
+# interruption ("barge-in"). See PocAgentSession._on_interrupt_patient for
+# the correlation/validation rules and the module docstring's "Barge-in" note
+# for why this is deliberately never honored before audio has started.
+INTERRUPT_PATIENT_TYPE = "interrupt_patient"
+
 # Fixed identity our worker always joins under - matches the constant the
 # frontend (livekitPocEngine.ts's AGENT_IDENTITY) already checks for, so the
 # "Agent connected" diagnostic keeps working with ZERO frontend changes. Set
@@ -160,13 +167,27 @@ class PocAgentSession:
     guard). A fresh instance is constructed per job (see entrypoint()) - no
     state here is ever shared across interviews.
 
-    Barge-in/interruption is explicitly OUT of scope for this voice path (see
-    the Phase 1 final report) - a student message that arrives while a
-    DIFFERENT patient turn is already in flight is dropped with a log line,
-    not queued or used to interrupt playback. A DUPLICATE of the SAME
-    in-flight or already-completed clientTurnId is a different case, handled
-    by the idempotency tracking below (_in_flight_turn_ids/
-    _completed_turn_ids) - it is always ack'd, but never reprocessed.
+    A student message arriving while a DIFFERENT patient turn is already in
+    flight is dropped with a log line, not queued (still no message-queueing
+    barge-in). A DUPLICATE of the SAME in-flight or already-completed
+    clientTurnId is a different case, handled by the idempotency tracking
+    below (_in_flight_turn_ids/_completed_turn_ids) - it is always ack'd, but
+    never reprocessed.
+
+    Phase D2: true SPEAKING-only interruption IS implemented (see
+    _on_interrupt_patient) - the student can stop the CURRENT turn's audio
+    mid-playback. Deliberately restricted to the audio-publish phase only:
+    _active_turn_task tracks the in-flight turn's asyncio.Task so it can be
+    cancelled, but the OpenAI/ElevenLabs calls inside it run via
+    loop.run_in_executor (a real OS thread) - cancelling the asyncio Task
+    while still awaiting the executor future stops the CALLER from waiting on
+    it, but does NOT stop the underlying thread/HTTP call, which keeps
+    running to completion with its result simply discarded. Interrupting
+    during that phase would be a FAKE cancellation (provider cost still
+    incurred, nothing actually stopped) - _speaking_client_turn_id is what
+    gates real cancellation to the phase where it is genuinely effective:
+    once audio frames are actively being published, cancelling stops further
+    frame publication immediately and for real.
     """
 
     def __init__(
@@ -203,6 +224,17 @@ class PocAgentSession:
         # allowed to run for real). Bounded via _MAX_COMPLETED_TURN_IDS.
         self._in_flight_turn_ids: set[str] = set()
         self._completed_turn_ids: "OrderedDict[str, None]" = OrderedDict()
+        # Phase D2: the CURRENTLY-RUNNING turn (set only once _turn_lock is
+        # actually held - never for a busy-dropped turn, see
+        # _handle_student_turn) and, separately, which clientTurnId (if any)
+        # has genuinely reached the audio-publish phase - see the class
+        # docstring for why interruption is gated on the LATTER, not just an
+        # active task existing. Both are job-local instance attributes, never
+        # shared across PocAgentSession instances/jobs (Phase D2 requirement:
+        # no global registries).
+        self._active_turn_task: "asyncio.Task[None] | None" = None
+        self._active_client_turn_id: str | None = None
+        self._speaking_client_turn_id: str | None = None
 
     def _log_agent_event(
         self, event: str, *, client_turn_id: str = "", elapsed_ms: float | None = None
@@ -240,6 +272,9 @@ class PocAgentSession:
 
         @room.on("data_received")
         def _on_data(packet: "rtc.DataPacket") -> None:
+            if packet.topic == AGENT_CONTROL_TOPIC:
+                self._handle_control_from_student(packet)
+                return
             if packet.topic != STUDENT_TEXT_TOPIC:
                 return
             try:
@@ -341,6 +376,67 @@ class PocAgentSession:
         self._log_agent_event("livekit_agent_turn_ack_sent", client_turn_id=client_turn_id)
         self._publish_control({"type": "turn_ack", "clientTurnId": client_turn_id})
 
+    def _handle_control_from_student(self, packet: "rtc.DataPacket") -> None:
+        """The only browser->agent message on AGENT_CONTROL_TOPIC today
+        (Phase D2) - everything else on this topic flows agent->browser
+        (agent_ready/turn_ack). Malformed/unknown payloads are silently
+        ignored, matching _on_data's own bad-payload discipline (never
+        crashes the handler, never surfaces to the student)."""
+        try:
+            payload = json.loads(packet.data.decode("utf-8"))
+        except Exception:
+            return
+        if payload.get("type") == INTERRUPT_PATIENT_TYPE:
+            self._on_interrupt_patient(str(payload.get("clientTurnId") or ""))
+
+    def _on_interrupt_patient(self, client_turn_id: str) -> None:
+        """Cancels the ACTIVE turn's task iff it is genuinely, currently
+        publishing audio for exactly this clientTurnId (see the class
+        docstring's THINKING-vs-SPEAKING rationale). Anything else - no id,
+        no active task, a mismatched/stale id, a turn not yet speaking, or a
+        turn already resolved - is a safe, idempotent no-op (Phase D2
+        requirement: double interrupt and a stale/late interrupt for an
+        old turn must never affect a newer one).
+
+        Acknowledges PROMPTLY and explicitly here (patient_turn_status
+        "interrupted") rather than relying solely on the cancelled task's own
+        cleanup - cancellation takes at least one more event-loop turn to
+        actually unwind through _run_turn/_handle_student_turn's finally
+        blocks, and the browser must not be left waiting on that.
+        """
+        if not client_turn_id:
+            return
+        if client_turn_id in self._completed_turn_ids:
+            # Already resolved (naturally finished, failed, or a previous
+            # interrupt already applied) - a duplicate/late resend is a
+            # no-op, never a second cancellation or a second status message.
+            self._log_agent_event("livekit_agent_interrupt_stale", client_turn_id=client_turn_id)
+            return
+        task = self._active_turn_task
+        if (
+            task is None
+            or task.done()
+            or self._active_client_turn_id != client_turn_id
+            or self._speaking_client_turn_id != client_turn_id
+        ):
+            self._log_agent_event("livekit_agent_interrupt_stale", client_turn_id=client_turn_id)
+            return
+
+        self._log_agent_event("livekit_agent_interrupt_received", client_turn_id=client_turn_id)
+        if self._audio_source is not None:
+            try:
+                self._audio_source.clear_queue()
+            except Exception:
+                logger.exception("livekit_agent_clear_queue_failed session_id=%s", self.session_id)
+        # Marked completed BEFORE cancelling: makes a second, near-simultaneous
+        # interrupt_patient for the SAME clientTurnId (or a resend of it)
+        # hit the _completed_turn_ids check above and no-op, without having
+        # to wait for the cancellation to actually propagate first.
+        self._mark_turn_completed(client_turn_id)
+        task.cancel()
+        self._send_turn_status(client_turn_id, "interrupted")
+        self._log_agent_event("livekit_agent_interrupt_applied", client_turn_id=client_turn_id)
+
     def _mark_turn_completed(self, client_turn_id: str) -> None:
         """Records a clientTurnId as fully processed (success OR failure) so
         a LATER duplicate (e.g. a browser-side ack-timeout retry that arrives
@@ -376,7 +472,25 @@ class PocAgentSession:
                 # is still allowed to process for real.
                 return
             async with self._turn_lock:
-                await self._run_turn(text, client_turn_id)
+                # Phase D2: recorded only once the lock is actually held (a
+                # busy-dropped turn above never reaches here) - asyncio.
+                # current_task() IS the Task asyncio.ensure_future() created
+                # for this coroutine in _on_data, so cancelling it here is
+                # exactly what _on_interrupt_patient's task.cancel() acts on.
+                self._active_turn_task = asyncio.current_task()
+                self._active_client_turn_id = client_turn_id
+                try:
+                    await self._run_turn(text, client_turn_id)
+                finally:
+                    # Only clear if still ours - guards against a later,
+                    # already-started turn's bookkeeping being wiped out by a
+                    # STILL-unwinding earlier turn's finally block (shouldn't
+                    # overlap given the lock, but cheap and exactly mirrors
+                    # the same discipline already used for
+                    # _speaking_client_turn_id/_completed_turn_ids).
+                    if self._active_client_turn_id == client_turn_id:
+                        self._active_turn_task = None
+                        self._active_client_turn_id = None
         finally:
             self._in_flight_turn_ids.discard(client_turn_id)
 
@@ -427,6 +541,11 @@ class PocAgentSession:
             # has an unambiguous source of truth.
             on_stage("first_audio_publish_start")
             self._send_turn_status(client_turn_id, "speaking_started")
+            # Phase D2: marks the ONLY window in which _on_interrupt_patient
+            # will actually cancel this task (see the class docstring) - set
+            # synchronously here, independent of whether the fire-and-forget
+            # "speaking_started" publish above has actually gone out yet.
+            self._speaking_client_turn_id = client_turn_id
             await self._publish_pcm(pcm)
             on_stage("speech_complete")
             self._send_turn_status(client_turn_id, "speaking_ended")
@@ -435,6 +554,24 @@ class PocAgentSession:
                 "livekit_agent_turn_audio_published session_id=%s client_turn_id=%s bytes=%d",
                 self.session_id, client_turn_id, len(pcm),
             )
+        except asyncio.CancelledError:
+            # Phase D2: an intentional interrupt (see _on_interrupt_patient,
+            # the ONLY caller that ever cancels this task). The "interrupted"
+            # patient_turn_status was already sent there, promptly, rather
+            # than here - this branch exists so cancellation cleanly logs and
+            # unwinds (releasing _turn_lock via the enclosing `async with`,
+            # then _handle_student_turn's finally) WITHOUT falling through to
+            # the generic `except Exception` below and wrongly emitting a
+            # "failed" status for what was actually a deliberate interrupt.
+            # Re-raised so the Task itself still completes as genuinely
+            # cancelled (never swallowed) - required for _turn_lock release
+            # and for asyncio's own bookkeeping to stay correct (this is what
+            # avoids a stray "Task exception was never retrieved" warning).
+            elapsed_ms = (time.monotonic() - stages[0][1]) * 1000
+            self._log_agent_event(
+                "livekit_agent_turn_interrupted", client_turn_id=client_turn_id, elapsed_ms=elapsed_ms,
+            )
+            raise
         except patient_adapter.LiveKitPocSessionNotFoundError:
             logger.error("livekit_agent_session_not_found session_id=%s client_turn_id=%s", self.session_id, client_turn_id)
             self._send_turn_status(client_turn_id, "failed")
@@ -449,11 +586,19 @@ class PocAgentSession:
             )
             self._send_turn_status(client_turn_id, "failed")
         finally:
-            # Marked completed (success OR failure) regardless of which
-            # branch above ran, EXCEPT when this method wasn't entered at
-            # all (busy-drop, handled in _handle_student_turn) - a duplicate
-            # of this clientTurnId must never trigger a second OpenAI/TTS
-            # call again after this point.
+            # Phase D2: cleared here (not just on the natural speaking_ended
+            # path above) so EVERY exit from this method - success, failure,
+            # or interrupt-cancellation - leaves no stale speaking-phase
+            # marker behind for a clientTurnId that is no longer actually
+            # speaking.
+            if self._speaking_client_turn_id == client_turn_id:
+                self._speaking_client_turn_id = None
+            # Marked completed (success, failure, OR interrupt) regardless of
+            # which branch above ran, EXCEPT when this method wasn't entered
+            # at all (busy-drop, handled in _handle_student_turn) - a
+            # duplicate of this clientTurnId must never trigger a second
+            # OpenAI/TTS call again after this point. Idempotent if
+            # _on_interrupt_patient already called this for the same id.
             self._mark_turn_completed(client_turn_id)
 
     @staticmethod

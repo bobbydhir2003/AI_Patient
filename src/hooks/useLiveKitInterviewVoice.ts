@@ -38,12 +38,21 @@ import { isConversationActive, type VoiceConversationState } from "./voiceStateM
 /** A subset of VoiceConversationState's own string literals - structurally
  * assignable anywhere the legacy type is expected (badgeFor,
  * ConversationControl) with ZERO changes to voiceStateMachine.ts or any
- * legacy consumer. LiveKit has no COOLDOWN/INTERRUPTING/PAUSED equivalent -
- * barge-in and pause/resume are explicitly out of scope (see
- * interruptPatient/stopConversation below). */
+ * legacy consumer. LiveKit has no COOLDOWN/PAUSED equivalent - pause/resume
+ * (as distinct from Stop -> Resume, see stopConversation below) stays out of
+ * scope. INTERRUPTING IS used (Phase D2: true SPEAKING-only interruption,
+ * see interruptPatient below) - ConversationControl.tsx already renders it
+ * correctly with zero changes needed there. */
 export type LiveKitVoiceUIState = Extract<
   VoiceConversationState,
-  "IDLE" | "REQUESTING_PERMISSION" | "LISTENING" | "PROCESSING" | "SPEAKING" | "ERROR" | "FINISHED"
+  | "IDLE"
+  | "REQUESTING_PERMISSION"
+  | "LISTENING"
+  | "PROCESSING"
+  | "SPEAKING"
+  | "INTERRUPTING"
+  | "ERROR"
+  | "FINISHED"
 >;
 
 function mapPocState(state: PocState): LiveKitVoiceUIState {
@@ -64,6 +73,8 @@ function mapPocState(state: PocState): LiveKitVoiceUIState {
       return "PROCESSING";
     case "speaking":
       return "SPEAKING";
+    case "interrupting":
+      return "INTERRUPTING";
     case "reconnecting":
       // Transient; resolves to listening/error shortly. Reusing PROCESSING
       // avoids adding a new badge/UI case for a brief, rare blip.
@@ -199,14 +210,21 @@ export function useLiveKitInterviewVoice(
     startConversation();
   }, [startConversation]);
 
-  /** Barge-in is explicitly OUT OF SCOPE for the LiveKit path (see
-   * worker.py's PocAgentSession docstring: a student message that arrives
-   * mid-turn is dropped, never used to interrupt playback). A no-op here,
-   * not faked as a real interruption. */
-  const interruptPatient = useCallback(() => {}, []);
+  /** Phase D2: true SPEAKING-only interruption - delegates entirely to the
+   * engine (see LiveKitPocEngine.interruptPatient's own docstring for the
+   * THINKING-vs-SPEAKING rationale and the bounded ack timeout that always
+   * returns to LISTENING). The D1 stale-callback guard already protects
+   * every state change this can trigger (onStateChange/onTurnCompleted are
+   * both wrapped in buildEngine() above), so no separate guard is needed
+   * here - this call is a no-op once engineRef.current is null (Stop/reset/
+   * unmount already happened). */
+  const interruptPatient = useCallback(() => {
+    engineRef.current?.interruptPatient();
+  }, []);
 
   /** No engine-level equivalent of "cancel the in-flight patient turn"
-   * exists (see interruptPatient) - a no-op, never a silent fallback. */
+   * exists beyond interruptPatient (SPEAKING-only, see above) - a no-op,
+   * never a silent fallback. */
   const cancelPatientSpeech = useCallback(() => {}, []);
 
   /** Typed input while LiveKit mode is active: sends through the SAME

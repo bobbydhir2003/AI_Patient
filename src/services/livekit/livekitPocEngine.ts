@@ -73,6 +73,7 @@ export type PocState =
   | "listening"
   | "thinking"
   | "speaking"
+  | "interrupting"
   | "reconnecting"
   | "error"
   | "ended";
@@ -132,6 +133,15 @@ const THINKING_TIMEOUT_MS = 20_000;
  * without this bound a lost "speaking_ended" status message would leave the
  * engine stuck in SPEAKING forever. */
 const SPEAKING_TIMEOUT_MS = 45_000;
+
+/** Phase D2: how long to wait for the worker's "interrupted" acknowledgment
+ * (patient_turn_status) after sending interrupt_patient before giving up and
+ * returning to LISTENING anyway. Comparable to TURN_ACK_TIMEOUT_MS - this is
+ * also a same-process, near-instant round trip once the agent is alive (no
+ * OpenAI/ElevenLabs call is on this path), so it stays short rather than
+ * stranding the student in INTERRUPTING. Never tears down the room/worker on
+ * timeout - see interruptPatient()'s own docstring. */
+const INTERRUPT_ACK_TIMEOUT_MS = 4_000;
 
 /** Phase C2: bounded wait for room.localParticipant.setMicrophoneEnabled(true)
  * to settle before treating it as stuck and retrying. A confirmed production
@@ -198,7 +208,12 @@ export function fetchStudentLiveKitToken(sessionId: string): Promise<LiveKitToke
 
 interface TurnStatusPayload {
   clientTurnId?: string;
-  status?: "speaking_started" | "speaking_ended" | "failed";
+  /** Phase D2: "interrupted" is the worker's explicit acknowledgment that a
+   * SPEAKING-only interrupt_patient request was honored (see worker.py's
+   * _on_interrupt_patient) - reuses this SAME channel/correlation-by-
+   * clientTurnId mechanism as speaking_started/speaking_ended/failed rather
+   * than inventing a second acknowledgment path. */
+  status?: "speaking_started" | "speaking_ended" | "failed" | "interrupted";
 }
 
 /** Control-plane messages the agent sends on AGENT_CONTROL_TOPIC - readiness
@@ -270,6 +285,9 @@ export class LiveKitPocEngine {
   private thinkingWatchdog: number | null = null;
   private speakingWatchdog: number | null = null;
   private micTimeoutId: number | null = null;
+  /** Phase D2: bounded wait for the worker's "interrupted" ack after
+   * interruptPatient() sends interrupt_patient - see armInterruptWatchdog. */
+  private interruptWatchdog: number | null = null;
 
   // --- Phase C2: order-independent startup readiness. Bumped on every
   // start()/end() call; every async continuation started during start()
@@ -371,6 +389,13 @@ export class LiveKitPocEngine {
     if (this.micTimeoutId !== null) {
       window.clearTimeout(this.micTimeoutId);
       this.micTimeoutId = null;
+    }
+  }
+
+  private clearInterruptWatchdog(): void {
+    if (this.interruptWatchdog !== null) {
+      window.clearTimeout(this.interruptWatchdog);
+      this.interruptWatchdog = null;
     }
   }
 
@@ -773,8 +798,10 @@ export class LiveKitPocEngine {
    * LiveKit mode is active - see useLiveKitInterviewVoice.ts). A no-op while
    * not "listening" (already waiting for the agent/thinking/speaking/etc.) -
    * the same guard the recognizer path relies on; this is also what
-   * guarantees a turn can never be sent while WAITING_FOR_AGENT. Barge-in is
-   * out of scope. */
+   * guarantees a turn can never be sent while WAITING_FOR_AGENT. See
+   * interruptPatient() below for the separate SPEAKING-only barge-in path -
+   * sending typed/spoken text is never itself how a patient turn is
+   * interrupted. */
   async sendText(text: string): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed || !this.room || this.state !== "listening") return;
@@ -891,6 +918,68 @@ export class LiveKitPocEngine {
     }, SPEAKING_TIMEOUT_MS);
   }
 
+  /**
+   * Phase D2: true SPEAKING-only interruption ("barge-in") - stops the
+   * patient's CURRENT turn mid-playback, on the SAME room/connectionId/
+   * worker job (never ends the room, never mints a new token - that
+   * distinction is what separates this from stopConversation()/end()).
+   *
+   * Deliberately a no-op outside "speaking": the worker's OpenAI/ElevenLabs
+   * calls run in a thread pool it cannot forcibly stop (see worker.py's
+   * PocAgentSession docstring) - offering "interrupt" during THINKING would
+   * only fake a cancellation while the provider call keeps running and
+   * billing/consuming time in the background. Once audio is actually
+   * publishing (SPEAKING), cancelling is genuinely effective: the worker
+   * stops publishing further frames and clears anything already queued.
+   *
+   * Never awaited by callers (mirrors stopConversation()'s fire-and-forget
+   * shape) - the bounded interrupt-ack watchdog below is what guarantees
+   * this always resolves back to LISTENING, whether or not the worker's
+   * acknowledgment ever arrives.
+   */
+  interruptPatient(): void {
+    if (this.state !== "speaking") return;
+    const clientTurnId = this.pendingProcessingTurnId;
+    if (!clientTurnId || !this.room) return;
+    this.clearSpeakingWatchdog();
+    this.setState("interrupting");
+    logVoiceEvent("livekit_interrupt_requested", { correlationId: clientTurnId, engineState: this.state });
+    const payload = new TextEncoder().encode(
+      JSON.stringify({ type: "interrupt_patient", clientTurnId }),
+    );
+    this.room.localParticipant
+      .publishData(payload, { reliable: true, topic: AGENT_CONTROL_TOPIC, destinationIdentities: [AGENT_IDENTITY] })
+      .catch((err: unknown) => {
+        // The local SDK couldn't even send it - logged for diagnostics only;
+        // the armed watchdog below still recovers to LISTENING on its own
+        // bounded timeout rather than needing a separate failure path here.
+        logVoiceEvent("livekit_interrupt_failed", {
+          correlationId: clientTurnId, engineState: this.state, reason: "publish_failed", ...describeError(err),
+        });
+      });
+    this.armInterruptWatchdog(clientTurnId);
+  }
+
+  /** Bounded wait for the worker's "interrupted" ack (see handleTurnStatus).
+   * On timeout: never strand the student in INTERRUPTING and never tear down
+   * the room/worker just because one acknowledgment was lost - fall back to
+   * LISTENING with a fresh recognizer, exactly like any other bounded
+   * recovery path in this engine. */
+  private armInterruptWatchdog(clientTurnId: string): void {
+    this.clearInterruptWatchdog();
+    this.interruptWatchdog = window.setTimeout(() => {
+      this.interruptWatchdog = null;
+      if (this.state !== "interrupting") return; // already resolved (ack, natural completion, Stop/reset)
+      logVoiceEvent("livekit_interrupt_failed", {
+        correlationId: clientTurnId, engineState: this.state, reason: "ack_timeout",
+      });
+      this.pendingProcessingTurnId = null;
+      this.turnSentAt = null;
+      this.setState("listening");
+      this.startRecognition();
+    }, INTERRUPT_ACK_TIMEOUT_MS);
+  }
+
   private handleTurnStatus(payload: Uint8Array): void {
     let parsed: TurnStatusPayload;
     try {
@@ -944,6 +1033,7 @@ export class LiveKitPocEngine {
     }
     if (parsed.status === "speaking_ended") {
       this.clearSpeakingWatchdog();
+      this.clearInterruptWatchdog();
       const totalTurnMs = this.turnSentAt ? Date.now() - this.turnSentAt : undefined;
       logVoiceEvent("livekit_patient_audio_completed", {
         correlationId: turnId,
@@ -960,9 +1050,33 @@ export class LiveKitPocEngine {
       this.startRecognition();
       return;
     }
+    if (parsed.status === "interrupted") {
+      // Phase D2: the worker's explicit ack that our interrupt_patient
+      // request was honored (see worker.py's _on_interrupt_patient). Reuses
+      // the SAME turn-terminal cleanup as speaking_ended (a text turn
+      // already exists in the transcript regardless of how much audio
+      // played - see generate_and_persist_turn, called before any audio
+      // publish begins) rather than inventing separate bookkeeping.
+      // Race-safe by construction: if speaking_ended instead won the race
+      // against our interrupt, pendingProcessingTurnId is already null by
+      // the time this arrives, so the earlier turnId-mismatch check above
+      // already rejected it before reaching here (requirement 17.A).
+      this.clearThinkingWatchdog("interrupted");
+      this.clearSpeakingWatchdog();
+      this.clearInterruptWatchdog();
+      logVoiceEvent("livekit_interrupt_completed", { correlationId: turnId, engineState: this.state });
+      this.turnSentAt = null;
+      this.turnCount += 1;
+      this.pendingProcessingTurnId = null;
+      this.callbacks.onTurnCompleted(this.turnCount);
+      this.setState("listening");
+      this.startRecognition();
+      return;
+    }
     if (parsed.status === "failed") {
       this.clearThinkingWatchdog("turn_failed");
       this.clearSpeakingWatchdog();
+      this.clearInterruptWatchdog();
       logVoiceEvent("livekit_patient_audio_failed", { correlationId: turnId, reason: "agent_failed" });
       this.pendingProcessingTurnId = null;
       this.turnSentAt = null;
@@ -1014,6 +1128,7 @@ export class LiveKitPocEngine {
     this.clearDeliveryWatchdog();
     this.clearThinkingWatchdog("engine_end");
     this.clearSpeakingWatchdog();
+    this.clearInterruptWatchdog();
     this.pendingDeliveryTurnId = null;
     this.pendingProcessingTurnId = null;
     this.stopRecognition();

@@ -456,6 +456,29 @@ function latestStudentTurnId(room) {
   return JSON.parse(new TextDecoder().decode(calls.at(-1).payload)).clientTurnId;
 }
 
+/** Phase D2: every interrupt_patient control message this room has
+ * received, decoded - reuses the SAME agent_control topic/targeting as
+ * agent_ready/turn_ack, never a new channel. */
+function interruptPublishes(room) {
+  return room.publishedData
+    .filter((p) => p.options.topic === "agent_control")
+    .map((p) => ({ ...p, body: JSON.parse(new TextDecoder().decode(p.payload)) }))
+    .filter((p) => p.body.type === "interrupt_patient");
+}
+
+/** Reaches SPEAKING the same way the STATE happy-path test does (agent
+ * ready -> student speaks -> ack -> speaking_started) - the baseline setup
+ * every Phase D2 interrupt test needs. */
+async function reachSpeaking(engine, sessionId, fetchToken) {
+  const room = await startReady(engine, sessionId, fetchToken);
+  FakeSpeechRecognition.instances.at(-1).emitFinal("How long has this been going on?");
+  await flushMicrotasks();
+  const clientTurnId = latestStudentTurnId(room);
+  sendTurnAck(room, clientTurnId);
+  sendTurnStatus(room, clientTurnId, "speaking_started");
+  return { room, clientTurnId };
+}
+
 /** Starts the engine AND completes the agent-ready handshake - the baseline
  * setup nearly every test below needs, since sendText()/recognition are
  * gated behind WAITING_FOR_AGENT until agent_ready arrives (Part 1). */
@@ -2196,4 +2219,250 @@ test("PHASE D1: STATIC - stopConversation/reset never call completeSession, navi
     .replace(/\/\/.*$/gm, "");
   assert.ok(!/completeSession|navigate\(|assessment/i.test(rawSource),
     "useLiveKitInterviewVoice.ts must stay unaware of session-completion/assessment/navigation concerns - those belong to InterviewPage.tsx's separate End Interview flow");
+});
+
+// ---------------------------------------------------------------------------
+// PHASE D2: true SPEAKING-only patient interruption ("barge-in"). Driven
+// directly against the engine (mirrors every other STATE/PHASE C test in
+// this file) plus one combined D1+D2 regression test via the hook harness
+// (createHookTester) proving Stop -> Resume still works even when Interrupt
+// was mid-flight. See worker.py's PocAgentSession class docstring for the
+// matching backend half (covered by test_livekit_phase_d2.py).
+// ---------------------------------------------------------------------------
+
+test("PHASE D2 A/B/C: interruptPatient() while SPEAKING sends ONE interrupt_patient, targeted at the agent, with the current clientTurnId", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const { room, clientTurnId } = await reachSpeaking(engine, "session-int-1");
+  assert.equal(engine.getState(), "speaking");
+
+  engine.interruptPatient();
+  await flushMicrotasks();
+
+  const sent = interruptPublishes(room);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].options.destinationIdentities, ["patient-agent"]);
+  assert.equal(sent[0].options.reliable, true);
+  assert.equal(sent[0].body.clientTurnId, clientTurnId);
+
+  await engine.end();
+});
+
+test("PHASE D2 D/E/F: interruptPatient() never ends the room, requests a new token, or creates a new Room", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const { room } = await reachSpeaking(engine, "session-int-2");
+  const roomCountBefore = createdRooms.length;
+  const tokenCallsBefore = tokenMintCalls().length;
+
+  engine.interruptPatient();
+  await flushMicrotasks();
+
+  assert.equal(createdRooms.length, roomCountBefore, "no new Room instance");
+  assert.equal(tokenMintCalls().length, tokenCallsBefore, "no new token request");
+  assert.equal(room.disconnectCalls, 0, "the SAME room stays connected");
+
+  await engine.end();
+});
+
+test("PHASE D2 G: interruptPatient() transitions SPEAKING -> INTERRUPTING", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await reachSpeaking(engine, "session-int-3");
+
+  engine.interruptPatient();
+  assert.equal(engine.getState(), "interrupting");
+
+  await engine.end();
+});
+
+test("PHASE D2 H/I: an 'interrupted' ack transitions INTERRUPTING -> LISTENING with a FRESH recognizer", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const { room, clientTurnId } = await reachSpeaking(engine, "session-int-4");
+  const recognizerCountBefore = FakeSpeechRecognition.instances.length;
+
+  engine.interruptPatient();
+  assert.equal(engine.getState(), "interrupting");
+  sendTurnStatus(room, clientTurnId, "interrupted");
+
+  assert.equal(engine.getState(), "listening");
+  assert.equal(FakeSpeechRecognition.instances.length, recognizerCountBefore + 1, "a fresh recognizer must start");
+  assert.deepEqual(rec.completedTurns, [1], "a turn already exists in the transcript regardless of audio length");
+
+  await engine.end();
+});
+
+test("PHASE D2 J: a lost interrupt ack times out back to LISTENING - never stuck in INTERRUPTING, never tears down the room", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const { room } = await reachSpeaking(engine, "session-int-5");
+
+  engine.interruptPatient();
+  assert.equal(engine.getState(), "interrupting");
+  fireTimerById(latestTimerId());
+  assert.equal(engine.getState(), "listening");
+  assert.equal(room.disconnectCalls, 0, "a lost ack must never tear down the room");
+
+  await engine.end();
+});
+
+test("PHASE D2 K: double interruptPatient() while already INTERRUPTING is a safe no-op (only one message ever sent)", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const { room } = await reachSpeaking(engine, "session-int-6");
+
+  engine.interruptPatient();
+  engine.interruptPatient();
+  engine.interruptPatient();
+  await flushMicrotasks();
+
+  assert.equal(interruptPublishes(room).length, 1);
+
+  await engine.end();
+});
+
+test("PHASE D2 L: a stale 'interrupted' ack for a DIFFERENT clientTurnId is ignored", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const { room } = await reachSpeaking(engine, "session-int-7");
+
+  engine.interruptPatient();
+  assert.equal(engine.getState(), "interrupting");
+  sendTurnStatus(room, "some-other-turn-id", "interrupted");
+  assert.equal(engine.getState(), "interrupting", "must stay interrupting - not a match for the current turn");
+
+  await engine.end();
+});
+
+test("PHASE D2 M: a late speaking_ended for an already-interrupted turn is harmless (never double-counted)", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const { room, clientTurnId } = await reachSpeaking(engine, "session-int-8");
+
+  engine.interruptPatient();
+  sendTurnStatus(room, clientTurnId, "interrupted");
+  assert.equal(engine.getState(), "listening");
+  assert.deepEqual(rec.completedTurns, [1]);
+
+  sendTurnStatus(room, clientTurnId, "speaking_ended");
+  assert.equal(engine.getState(), "listening", "must remain listening");
+  assert.deepEqual(rec.completedTurns, [1], "must not double-count the same turn");
+
+  await engine.end();
+});
+
+test("PHASE D2 N: interruptPatient() is a no-op outside SPEAKING - no interrupt_patient is ever sent while THINKING or LISTENING", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-int-9");
+
+  // LISTENING: no active turn at all.
+  engine.interruptPatient();
+  await flushMicrotasks();
+  assert.equal(interruptPublishes(room).length, 0);
+  assert.equal(engine.getState(), "listening");
+
+  // THINKING: a real turn is in flight, but audio has not started - this is
+  // the exact case Phase D2 deliberately never offers real cancellation for
+  // (see worker.py's class docstring: the OpenAI/ElevenLabs call cannot be
+  // forcibly stopped once started).
+  FakeSpeechRecognition.instances.at(-1).emitFinal("How long?");
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "thinking");
+
+  engine.interruptPatient();
+  await flushMicrotasks();
+
+  assert.equal(interruptPublishes(room).length, 0, "no interrupt_patient message must ever be sent while THINKING");
+  assert.equal(engine.getState(), "thinking", "must remain thinking - never a fake interruption");
+
+  await engine.end();
+});
+
+test("PHASE D2 O: Stop while INTERRUPTING still fully ends the room, and a late interrupted ack cannot resurrect the ended engine", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const { room } = await reachSpeaking(engine, "session-int-10");
+
+  engine.interruptPatient();
+  assert.equal(engine.getState(), "interrupting");
+  await engine.end();
+
+  assert.equal(room.disconnectCalls, 1);
+  assert.equal(engine.getState(), "ended");
+
+  sendTurnStatus(room, "whatever", "interrupted");
+  assert.equal(engine.getState(), "ended", "a late ack after end() must never resurrect the ended engine");
+});
+
+test("PHASE D2: race - if speaking_ended wins against a pending interrupt, both converge on LISTENING without double-counting", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const { room, clientTurnId } = await reachSpeaking(engine, "session-int-race");
+
+  engine.interruptPatient();
+  assert.equal(engine.getState(), "interrupting");
+  // The turn actually finished naturally before the interrupt could land.
+  sendTurnStatus(room, clientTurnId, "speaking_ended");
+  assert.equal(engine.getState(), "listening");
+  assert.deepEqual(rec.completedTurns, [1]);
+
+  // The worker's interrupt ack arrives anyway (lost the race) - must be a
+  // harmless no-op, never a second onTurnCompleted for the SAME turn.
+  sendTurnStatus(room, clientTurnId, "interrupted");
+  assert.equal(engine.getState(), "listening");
+  assert.deepEqual(rec.completedTurns, [1], "must not double-count the same turn");
+
+  await engine.end();
+});
+
+test("PHASE D1+D2 P: Interrupt mid-flight, then Stop, then Resume still works end-to-end (D1 regression under D2)", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-d1d2-1" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room1 = createdRooms.at(-1);
+  sendAgentReady(room1);
+  await flushMicrotasks();
+
+  FakeSpeechRecognition.instances.at(-1).emitFinal("How long?");
+  await flushMicrotasks();
+  const clientTurnId = latestStudentTurnId(room1);
+  sendTurnAck(room1, clientTurnId);
+  sendTurnStatus(room1, clientTurnId, "speaking_started");
+  assert.equal(tester.getResult().state, "SPEAKING");
+
+  tester.getResult().interruptPatient();
+  assert.equal(tester.getResult().state, "INTERRUPTING");
+
+  // Stop wins even with an interrupt still pending.
+  tester.getResult().stopConversation();
+  assert.equal(tester.getResult().state, "IDLE");
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "IDLE", "must remain IDLE - never resurrected by a late interrupt/ended callback");
+
+  // Resume: fresh token, fresh room, reaches LISTENING again - unaffected by
+  // the interrupt that was in flight before Stop.
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room2 = createdRooms.at(-1);
+  assert.notEqual(room2, room1, "Resume must join a brand-new room");
+  sendAgentReady(room2);
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "LISTENING");
+  assert.equal(tokenMintCalls().length, 2);
 });

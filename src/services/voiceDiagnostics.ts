@@ -134,7 +134,13 @@ export type VoiceEvent =
   // correlated to exactly one voice connection attempt, distinct from the
   // persistent interview session.
   | "livekit_voice_connection_created"
-  | "livekit_voice_connection_ended";
+  | "livekit_voice_connection_ended"
+  // --- Phase D2: true SPEAKING-only patient interruption ("barge-in") - see
+  // livekitPocEngine.ts's interruptPatient()/handleTurnStatus for the
+  // request/ack/timeout lifecycle these correspond to.
+  | "livekit_interrupt_requested"
+  | "livekit_interrupt_completed"
+  | "livekit_interrupt_failed";
 
 /** Stage-level failure category. See file header for how these map to the
  * report categories STATUS_PROBE_TRANSIENT / STATUS_CONFIRMED_UNAVAILABLE /
@@ -279,6 +285,7 @@ const WARN_EVENTS = new Set<VoiceEvent>([
   "livekit_mic_request_failed",
   "livekit_mic_request_timeout",
   "livekit_mic_retry_started",
+  "livekit_interrupt_failed",
 ]);
 
 function isDev(): boolean {
@@ -336,6 +343,7 @@ const TELEMETRY_EVENTS = new Set<VoiceEvent>([
   "livekit_mic_request_failed", "livekit_mic_request_timeout",
   "livekit_mic_retry_started", "livekit_mic_ready", "livekit_startup_reconciled",
   "livekit_voice_connection_created", "livekit_voice_connection_ended",
+  "livekit_interrupt_requested", "livekit_interrupt_completed", "livekit_interrupt_failed",
 ]);
 
 /**

@@ -123,6 +123,11 @@ VoiceTelemetryEventName = Literal[
     # Stop/refresh restart race this answers).
     "livekit_voice_connection_created",
     "livekit_voice_connection_ended",
+    # Phase D2: true SPEAKING-only patient interruption ("barge-in") - see
+    # livekitPocEngine.ts's interruptPatient()/handleTurnStatus.
+    "livekit_interrupt_requested",
+    "livekit_interrupt_completed",
+    "livekit_interrupt_failed",
 ]
 
 

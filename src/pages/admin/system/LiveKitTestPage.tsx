@@ -28,6 +28,7 @@ const STATE_LABELS: Record<PocState, string> = {
   listening: "Listening",
   thinking: "Thinking…",
   speaking: "Speaking",
+  interrupting: "Interrupting…",
   reconnecting: "Reconnecting…",
   error: "Error",
   ended: "Ended",

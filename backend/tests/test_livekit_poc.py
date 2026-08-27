@@ -459,9 +459,28 @@ def _fake_rtc_for_worker():
         def __init__(self, sample_rate, num_channels):
             self.sample_rate = sample_rate
             self.num_channels = num_channels
+            # Phase D2: observable so interrupt tests can prove clear_queue()
+            # was actually called, and captured_frames so a test can assert
+            # publication genuinely stopped (not just that the task ended).
+            self.clear_queue_calls = 0
+            self.captured_frames = 0
+            # Optional test hook: an asyncio.Event to await on a specific
+            # (1-based) frame number, letting a test suspend _publish_pcm
+            # mid-stream (simulating "currently speaking") so it can then
+            # send interrupt_patient and observe a REAL cancellation, not
+            # just one that happens to race a fast in-memory fake. Never set
+            # by production code - assigned directly onto the instance by
+            # tests that need it (see test_livekit_phase_d2.py).
+            self.block_on_frame: int | None = None
+            self.block_event: "asyncio.Event | None" = None
 
         async def capture_frame(self, frame):
-            pass
+            self.captured_frames += 1
+            if self.block_on_frame == self.captured_frames and self.block_event is not None:
+                await self.block_event.wait()
+
+        def clear_queue(self):
+            self.clear_queue_calls += 1
 
     class _LocalAudioTrack:
         @staticmethod
