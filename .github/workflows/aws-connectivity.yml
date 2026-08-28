@@ -1,0 +1,106 @@
+name: AWS OIDC + SSM Connectivity Check
+
+# Manual-only, read-only verification that GitHub Actions can authenticate to
+# AWS via OIDC (no stored AWS credentials of any kind) and reach the
+# production EC2 instance through SSM Run Command. This workflow proves the
+# ACCESS PATH only - it never deploys application code, never touches Git
+# state on the server, never restarts a service, and never modifies any
+# application/server configuration. The one command it runs is a harmless,
+# hardcoded echo.
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # required to request the OIDC token from GitHub
+  contents: read     # required for actions/checkout, nothing broader
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ROLE_ARN: arn:aws:iam::050916357757:role/PTAI-GitHub-Deploy-Role
+  TARGET_INSTANCE_ID: i-068f92824b0375c5f
+
+jobs:
+  aws-oidc-ssm-check:
+    name: aws-oidc-ssm-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # No access key, no secret, no PEM anywhere - GitHub's own OIDC token is
+      # exchanged for short-lived STS credentials scoped to this one role,
+      # which in turn only trusts this exact repo+branch (see the role's
+      # trust policy: repo:bobbydhir2003/AI_Patient:ref:refs/heads/main).
+      - name: Configure AWS credentials via GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ptai-connectivity-check
+
+      - name: Verify assumed identity (account + role)
+        run: |
+          set -euo pipefail
+          IDENTITY=$(aws sts get-caller-identity --output json)
+          echo "$IDENTITY"
+          ACCOUNT=$(echo "$IDENTITY" | jq -r '.Account')
+          ARN=$(echo "$IDENTITY" | jq -r '.Arn')
+          if [ "$ACCOUNT" != "050916357757" ]; then
+            echo "::error::Unexpected AWS account: $ACCOUNT"
+            exit 1
+          fi
+          case "$ARN" in
+            *"PTAI-GitHub-Deploy-Role"*) ;;
+            *) echo "::error::Unexpected assumed role ARN: $ARN"; exit 1 ;;
+          esac
+          echo "Confirmed: account 050916357757, role PTAI-GitHub-Deploy-Role"
+
+      - name: Send harmless SSM command
+        id: send
+        run: |
+          set -euo pipefail
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$TARGET_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["echo ptai-github-oidc-ok"]' \
+            --region "$AWS_REGION" \
+            --query "Command.CommandId" --output text)
+          echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
+          echo "Dispatched command $COMMAND_ID to $TARGET_INSTANCE_ID"
+
+      - name: Wait for command completion
+        run: |
+          set -euo pipefail
+          aws ssm wait command-executed \
+            --command-id "${{ steps.send.outputs.command_id }}" \
+            --instance-id "$TARGET_INSTANCE_ID" \
+            --region "$AWS_REGION"
+
+      - name: Retrieve and verify result
+        run: |
+          set -euo pipefail
+          RESULT=$(aws ssm get-command-invocation \
+            --command-id "${{ steps.send.outputs.command_id }}" \
+            --instance-id "$TARGET_INSTANCE_ID" \
+            --region "$AWS_REGION" \
+            --output json)
+          echo "$RESULT"
+
+          STATUS=$(echo "$RESULT" | jq -r '.Status')
+          INSTANCE=$(echo "$RESULT" | jq -r '.InstanceId')
+          OUTPUT=$(echo "$RESULT" | jq -r '.StandardOutputContent' | tr -d '\n')
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::SSM command did not succeed: $STATUS"
+            exit 1
+          fi
+          if [ "$INSTANCE" != "$TARGET_INSTANCE_ID" ]; then
+            echo "::error::Unexpected instance responded: $INSTANCE"
+            exit 1
+          fi
+          if [ "$OUTPUT" != "ptai-github-oidc-ok" ]; then
+            echo "::error::Unexpected command output: $OUTPUT"
+            exit 1
+          fi
+          echo "SUCCESS: GitHub OIDC -> PTAI-GitHub-Deploy-Role -> SSM -> $TARGET_INSTANCE_ID confirmed."
