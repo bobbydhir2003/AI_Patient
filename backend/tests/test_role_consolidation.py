@@ -82,9 +82,36 @@ def test_admin_can_access_all_admin_endpoints(engine):
             assert r.status_code == 200, f"{path} should be 200 for an admin, got {r.status_code}: {r.text}"
 
 
-def test_old_super_admin_requirement_no_longer_blocks_admin(engine):
+def test_old_super_admin_requirement_no_longer_blocks_admin(engine, monkeypatch):
     """Endpoints that historically required super_admin (credential replace, load
-    test create) now accept a normal admin."""
+    test create) now accept a normal admin.
+
+    This is an authorization-only check - it has no business spawning a REAL
+    load-test subprocess/background thread. Un-patched, load_test_service.
+    create_job() does both for real (see _launch_worker/_monitor): the spawned
+    daemon thread outlives this test (and its per-test `engine` fixture, torn
+    down as soon as this function returns) and its eventual _finalize() call
+    lands on the production app.database.connection.get_session_factory() - a
+    process-global, lazily-created in-memory SQLite engine that is a DIFFERENT
+    object from this test's `engine` and is never initialized with
+    Base.metadata.create_all(). That raises an uncaught "no such table:
+    load_test_jobs" inside the background thread well after this test has
+    already passed, which pytest then attributes to whatever OTHER test
+    happens to be running at that moment - confirmed by direct reproduction
+    (the spawned thread was still alive 15s after the request returned, and
+    querying get_session_factory()'s engine directly reproduces the exact
+    error). Patched here exactly like test_priority_j.py's `patched` fixture
+    already does for the same subsystem, so no real subprocess/thread/DB
+    access can outlive this test.
+    """
+    from app.services import load_test_service as lts
+
+    class _FakePopen:
+        pid = 4242
+
+    monkeypatch.setattr(lts, "_launch_worker", lambda job, creds_file: _FakePopen())
+    monkeypatch.setattr(lts, "_monitor", lambda job_id: None)
+
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
         ah = _admin(c, engine)
         # Load-test create (was super-admin-only).

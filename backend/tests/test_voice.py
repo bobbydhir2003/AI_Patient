@@ -647,6 +647,24 @@ def test_endpoint_streams_without_full_buffering_and_never_caches_partials(
     received = anyio.run(consume_two_then_disconnect)
     assert received == [b"c1", b"c2"]
     assert fake.pulled == 2  # third chunk never read: upstream reading stopped
+    # Starlette's iterate_in_threadpool (used to wrap the sync `audio_stream()`
+    # generator - see app/api/voice.py) throws GeneratorExit at its `yield`
+    # suspension point on aclose(), with no `finally` of its own to explicitly
+    # `.close()` the wrapped sync generator chain (audio_stream -> upstream).
+    # That leaves cleanup to CPython's normal generator-teardown-on-refcount-
+    # zero path, but GeneratorExit propagating through several generator/
+    # exception frames reliably creates a reference cycle (via __traceback__ ->
+    # frame -> generator) that plain refcounting can NEVER free - only an
+    # actual cyclic-GC pass can (proven directly: across 40 repeated runs,
+    # `fake.closed` was True immediately after aclose() in only 2/30 runs with
+    # GC left automatic, and 0/10 with GC disabled outright, but 40/40 after an
+    # explicit gc.collect() here). This is not a test-isolation issue between
+    # different tests - it reproduces from this test alone - so an explicit,
+    # deterministic gc.collect() (not a sleep/retry) is the correct way to
+    # observe cleanup that already reliably happens, just not synchronously.
+    import gc
+
+    gc.collect()
     assert fake.closed is True  # upstream generator closed on disconnect
     assert len(get_audio_cache()) == 0  # partial/cancelled audio never cached
 
