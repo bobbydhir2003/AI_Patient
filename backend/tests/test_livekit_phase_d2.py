@@ -214,6 +214,15 @@ def test_mismatched_client_turn_id_does_not_cancel(monkeypatch, engine):
 def test_interrupt_before_speaking_started_is_a_stale_noop(monkeypatch, engine, caplog):
     with _fake_rtc_for_worker():
         session, room, _sid = _make_ready_session(engine, monkeypatch)
+        # This test's final assertion expects the turn to reach a real
+        # "speaking_ended" (the interrupt arrives too early to cancel
+        # anything - see the module docstring) - mock ElevenLabs exactly like
+        # every sibling test in this file (_wire_happy_generation) so that
+        # happens deterministically, with no dependency on a real provider
+        # key/network call.
+        give_carly_a_voice_id(monkeypatch)
+        fake_el = FakeElevenLabsClient(chunks=(b"\x00\x01",))
+        monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
 
         # Block INSIDE generate_and_persist_turn (the THINKING phase, running
         # in the executor thread pool) using plain threading primitives -

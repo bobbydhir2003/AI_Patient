@@ -3,6 +3,16 @@ import os
 os.environ.setdefault("ENVIRONMENT", "development")  # tests run in dev (non-strict) mode
 os.environ.setdefault("DATABASE_URL", "sqlite://")  # in-memory; set before app imports
 os.environ.setdefault("OPENAI_API_KEY", "")
+# Non-secret placeholder, NOT a real credential: several LiveKit worker/voice
+# tests (test_livekit_phase_c.py, test_livekit_phase_d2.py,
+# test_livekit_poc.py) mock the ElevenLabs CLIENT (get_elevenlabs_client),
+# but load_voice_profile()'s own config gate checks for a non-empty
+# elevenlabs_api_key BEFORE that mocked client is ever reached (see
+# voice_profile_loader.py) - real ElevenLabs network calls are never made in
+# this suite regardless. Without this, those tests only pass on a machine
+# whose untracked, gitignored backend/.env happens to set a real key -
+# exactly the local-vs-CI environment mismatch a clean checkout exposes.
+os.environ.setdefault("ELEVENLABS_API_KEY", "test-elevenlabs-key")
 os.environ.setdefault("AUTO_CREATE_TABLES", "false")
 os.environ.setdefault("OPENAI_MAX_RETRIES", "0")
 # Abuse guards are exercised by dedicated tests that enable them explicitly;
