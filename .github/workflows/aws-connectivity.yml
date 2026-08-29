@@ -111,10 +111,17 @@ jobs:
       - name: Wait for command completion
         run: |
           set -euo pipefail
+          # Deliberately not `set -e`-fatal here: the AWS CLI waiter itself
+          # exits non-zero the moment SSM reports a terminal "Failed" state,
+          # which would kill the job before the next step ever gets to show
+          # the actual command output/error. Let a failed command proceed to
+          # "Retrieve and verify result", which already checks Status
+          # explicitly and prints the full invocation (including stderr) on
+          # failure - a far more useful failure mode than a bare waiter error.
           aws ssm wait command-executed \
             --command-id "${{ steps.send.outputs.command_id }}" \
             --instance-id "$TARGET_INSTANCE_ID" \
-            --region "$AWS_REGION"
+            --region "$AWS_REGION" || true
 
       - name: Retrieve and verify result
         run: |
