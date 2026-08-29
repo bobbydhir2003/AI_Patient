@@ -17,6 +17,13 @@ name: AWS OIDC + SSM Connectivity Check
 # is only ever triggered manually via workflow_dispatch by a repo
 # collaborator - never by a PR, a fork, or an automatic trigger. When left
 # empty, behavior is identical to the original hardcoded-echo check.
+# The optional `s3_upload_*` inputs let this same OIDC-assumed role upload a
+# single object to the approved deployment-artifact bucket - used only for
+# validating the GitHub -> S3 artifact transport path (Phase 3B-4). The
+# content is passed as base64 workflow input (never a file checked into the
+# repo, never a secret), and the destination key must fall under the
+# already-approved `releases/` prefix the role's IAM policy actually grants -
+# this is not a general-purpose upload capability.
 on:
   workflow_dispatch:
     inputs:
@@ -24,6 +31,18 @@ on:
         description: 'Optional: newline-separated read-only diagnostic commands to run instead of the default echo (leave empty for the standard connectivity check)'
         required: false
         default: ''
+      s3_upload_key:
+        description: 'Optional: S3 object key to upload to (must start with releases/) - leave empty to skip'
+        required: false
+        default: ''
+      s3_upload_content_b64:
+        description: 'Optional: base64-encoded content to upload when s3_upload_key is set'
+        required: false
+        default: ''
+      s3_upload_bucket:
+        description: 'Optional: override the target bucket (defaults to the approved deployment-artifact bucket)'
+        required: false
+        default: 'ptai-deploy-artifacts-050916357757-use2'
 
 permissions:
   id-token: write   # required to request the OIDC token from GitHub
@@ -73,6 +92,30 @@ jobs:
             *) echo "::error::Unexpected assumed role ARN: $ARN"; exit 1 ;;
           esac
           echo "Confirmed: account 050916357757, role PTAI-GitHub-Deploy-Role"
+
+      - name: Upload S3 test object (optional)
+        if: ${{ github.event.inputs.s3_upload_key != '' }}
+        env:
+          S3_UPLOAD_KEY: ${{ github.event.inputs.s3_upload_key }}
+          S3_UPLOAD_CONTENT_B64: ${{ github.event.inputs.s3_upload_content_b64 }}
+          S3_UPLOAD_BUCKET: ${{ github.event.inputs.s3_upload_bucket }}
+        run: |
+          set -euo pipefail
+          case "$S3_UPLOAD_KEY" in
+            releases/*) ;;
+            *) echo "::error::Refusing to upload outside the approved releases/ prefix: $S3_UPLOAD_KEY"; exit 1 ;;
+          esac
+          TMP_FILE=$(mktemp)
+          echo "$S3_UPLOAD_CONTENT_B64" | base64 -d > "$TMP_FILE"
+          echo "Uploading $(wc -c < "$TMP_FILE") bytes to s3://$S3_UPLOAD_BUCKET/$S3_UPLOAD_KEY"
+          aws s3api put-object \
+            --bucket "$S3_UPLOAD_BUCKET" \
+            --key "$S3_UPLOAD_KEY" \
+            --body "$TMP_FILE" \
+            --region "$AWS_REGION" \
+            --output json
+          rm -f "$TMP_FILE"
+          echo "SUCCESS: uploaded via PTAI-GitHub-Deploy-Role OIDC session"
 
       - name: Send SSM command
         id: send
