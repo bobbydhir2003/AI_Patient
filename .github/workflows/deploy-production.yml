@@ -160,28 +160,69 @@ jobs:
       # any one release.
       # -----------------------------------------------------------------
       - name: Sync deploy scripts to EC2
-        timeout-minutes: 3
+        timeout-minutes: 5
         run: |
           set -euo pipefail
-          {
-            echo "sudo mkdir -p /opt/ptai/deploy-scripts"
-            echo "sudo chown ubuntu:ubuntu /opt/ptai/deploy-scripts"
-            for f in scripts/deploy/*.sh; do
-              name=$(basename "$f")
-              b64=$(base64 -w0 "$f" 2>/dev/null || base64 "$f" | tr -d '\n')
-              echo "echo ${b64} | base64 -d > /opt/ptai/deploy-scripts/${name}"
-            done
-            echo "chmod +x /opt/ptai/deploy-scripts/*.sh"
-          } > /tmp/sync_scripts_cmd.txt
+          # Only the scripts actually invoked ON the EC2 instance via SSM
+          # need to be synced here (classify-changes.sh and build-artifact.sh
+          # run locally on this runner instead, against the checked-out repo).
+          # AWS SSM Run Command hard-caps total document+parameter size at
+          # 97KB, and base64-embedding all of scripts/deploy/*.sh at once
+          # (~200KB) blew past that limit on the first real dry-run attempt -
+          # so this syncs only the required subset, split into small batches.
+          SCRIPTS_TO_SYNC="fetch-artifact.sh prepare-release.sh activate-release.sh livekit-activity-gate.sh rollback-release.sh health-check.sh"
+          REMOTE_DIR="/home/ubuntu/ptai-deploy-scripts"
+
           bash scripts/deploy/ssm-run.sh \
             --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
             --timeout-seconds 60 --poll-interval-seconds 5 \
-            --command-file /tmp/sync_scripts_cmd.txt \
-            > /tmp/sync_result.txt
-          cat /tmp/sync_result.txt
-          STATUS=$(grep '^status=' /tmp/sync_result.txt | cut -d= -f2-)
-          [ "$STATUS" = "Success" ] || { echo "::error::Failed to sync deploy scripts to EC2 (status=$STATUS)"; exit 1; }
-          echo "Deploy scripts synced to /opt/ptai/deploy-scripts on EC2"
+            --command "mkdir -p $REMOTE_DIR" \
+            > /tmp/sync_mkdir_result.txt
+          cat /tmp/sync_mkdir_result.txt
+          STATUS=$(grep '^status=' /tmp/sync_mkdir_result.txt | cut -d= -f2-)
+          [ "$STATUS" = "Success" ] || { echo "::error::Failed to create $REMOTE_DIR on EC2 (status=$STATUS)"; exit 1; }
+
+          BATCH_NUM=0
+          BATCH=""
+          BATCH_COUNT=0
+          sync_batch() {
+            [ -n "$BATCH" ] || return 0
+            BATCH_NUM=$((BATCH_NUM + 1))
+            printf '%s' "$BATCH" > "/tmp/sync_batch_${BATCH_NUM}_cmd.txt"
+            bash scripts/deploy/ssm-run.sh \
+              --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+              --timeout-seconds 60 --poll-interval-seconds 5 \
+              --command-file "/tmp/sync_batch_${BATCH_NUM}_cmd.txt" \
+              > "/tmp/sync_batch_${BATCH_NUM}_result.txt"
+            cat "/tmp/sync_batch_${BATCH_NUM}_result.txt"
+            local batch_status
+            batch_status=$(grep '^status=' "/tmp/sync_batch_${BATCH_NUM}_result.txt" | cut -d= -f2-)
+            [ "$batch_status" = "Success" ] || { echo "::error::Failed to sync deploy script batch $BATCH_NUM to EC2 (status=$batch_status)"; exit 1; }
+          }
+
+          for name in $SCRIPTS_TO_SYNC; do
+            f="scripts/deploy/$name"
+            [ -f "$f" ] || { echo "::error::required deploy script not found: $f"; exit 1; }
+            b64=$(base64 -w0 "$f" 2>/dev/null || base64 "$f" | tr -d '\n')
+            BATCH="${BATCH}echo ${b64} | base64 -d > ${REMOTE_DIR}/${name}"$'\n'
+            BATCH_COUNT=$((BATCH_COUNT + 1))
+            if [ "$BATCH_COUNT" -ge 2 ]; then
+              sync_batch
+              BATCH=""
+              BATCH_COUNT=0
+            fi
+          done
+          sync_batch
+
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 60 --poll-interval-seconds 5 \
+            --command "chmod +x ${REMOTE_DIR}/*.sh" \
+            > /tmp/sync_chmod_result.txt
+          cat /tmp/sync_chmod_result.txt
+          STATUS=$(grep '^status=' /tmp/sync_chmod_result.txt | cut -d= -f2-)
+          [ "$STATUS" = "Success" ] || { echo "::error::Failed to chmod synced deploy scripts on EC2 (status=$STATUS)"; exit 1; }
+          echo "Deploy scripts synced to $REMOTE_DIR on EC2 ($BATCH_NUM batch(es))"
 
       # -----------------------------------------------------------------
       # Determine the currently-active release SHA on production, to use
