@@ -5,10 +5,25 @@ name: AWS OIDC + SSM Connectivity Check
 # production EC2 instance through SSM Run Command. This workflow proves the
 # ACCESS PATH only - it never deploys application code, never touches Git
 # state on the server, never restarts a service, and never modifies any
-# application/server configuration. The one command it runs is a harmless,
+# application/server configuration. By default it runs one harmless,
 # hardcoded echo.
+#
+# The optional `read_only_commands` input lets this same verified path also
+# be used to run a small set of genuinely read-only diagnostic commands
+# (e.g. systemctl show, readlink, curl to localhost) - useful for capturing
+# production invariants when SSH is unavailable, without needing a separate
+# workflow. It is deliberately NOT free-form: this workflow always targets
+# the one already-approved instance via the one already-approved role, and
+# is only ever triggered manually via workflow_dispatch by a repo
+# collaborator - never by a PR, a fork, or an automatic trigger. When left
+# empty, behavior is identical to the original hardcoded-echo check.
 on:
   workflow_dispatch:
+    inputs:
+      read_only_commands:
+        description: 'Optional: newline-separated read-only diagnostic commands to run instead of the default echo (leave empty for the standard connectivity check)'
+        required: false
+        default: ''
 
 permissions:
   id-token: write   # required to request the OIDC token from GitHub
@@ -59,16 +74,37 @@ jobs:
           esac
           echo "Confirmed: account 050916357757, role PTAI-GitHub-Deploy-Role"
 
-      - name: Send harmless SSM command
+      - name: Send SSM command
         id: send
+        env:
+          READ_ONLY_COMMANDS: ${{ github.event.inputs.read_only_commands }}
         run: |
           set -euo pipefail
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "$TARGET_INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --parameters 'commands=["echo ptai-github-oidc-ok"]' \
-            --region "$AWS_REGION" \
-            --query "Command.CommandId" --output text)
+          if [ -n "$READ_ONLY_COMMANDS" ]; then
+            echo "is_custom=true" >> "$GITHUB_OUTPUT"
+            # Build the JSON commands array from the newline-separated input
+            # via jq (never via raw string interpolation), one array element
+            # per non-empty line.
+            PARAMS_FILE=$(mktemp)
+            jq -n --arg cmds "$READ_ONLY_COMMANDS" \
+              '{commands: ($cmds | split("\n") | map(select(length > 0)))}' \
+              > "$PARAMS_FILE"
+            COMMAND_ID=$(aws ssm send-command \
+              --instance-ids "$TARGET_INSTANCE_ID" \
+              --document-name "AWS-RunShellScript" \
+              --parameters "file://$PARAMS_FILE" \
+              --region "$AWS_REGION" \
+              --query "Command.CommandId" --output text)
+            rm -f "$PARAMS_FILE"
+          else
+            echo "is_custom=false" >> "$GITHUB_OUTPUT"
+            COMMAND_ID=$(aws ssm send-command \
+              --instance-ids "$TARGET_INSTANCE_ID" \
+              --document-name "AWS-RunShellScript" \
+              --parameters 'commands=["echo ptai-github-oidc-ok"]' \
+              --region "$AWS_REGION" \
+              --query "Command.CommandId" --output text)
+          fi
           echo "command_id=$COMMAND_ID" >> "$GITHUB_OUTPUT"
           echo "Dispatched command $COMMAND_ID to $TARGET_INSTANCE_ID"
 
@@ -88,22 +124,30 @@ jobs:
             --instance-id "$TARGET_INSTANCE_ID" \
             --region "$AWS_REGION" \
             --output json)
-          echo "$RESULT"
 
           STATUS=$(echo "$RESULT" | jq -r '.Status')
           INSTANCE=$(echo "$RESULT" | jq -r '.InstanceId')
-          OUTPUT=$(echo "$RESULT" | jq -r '.StandardOutputContent' | tr -d '\n')
+          OUTPUT=$(echo "$RESULT" | jq -r '.StandardOutputContent')
 
           if [ "$STATUS" != "Success" ]; then
             echo "::error::SSM command did not succeed: $STATUS"
+            echo "$RESULT"
             exit 1
           fi
           if [ "$INSTANCE" != "$TARGET_INSTANCE_ID" ]; then
             echo "::error::Unexpected instance responded: $INSTANCE"
             exit 1
           fi
-          if [ "$OUTPUT" != "ptai-github-oidc-ok" ]; then
-            echo "::error::Unexpected command output: $OUTPUT"
-            exit 1
+
+          if [ "${{ steps.send.outputs.is_custom }}" = "true" ]; then
+            echo "=== command output ==="
+            echo "$OUTPUT"
+            echo "SUCCESS: custom read-only command set completed on $TARGET_INSTANCE_ID."
+          else
+            TRIMMED_OUTPUT=$(echo "$OUTPUT" | tr -d '\n')
+            if [ "$TRIMMED_OUTPUT" != "ptai-github-oidc-ok" ]; then
+              echo "::error::Unexpected command output: $TRIMMED_OUTPUT"
+              exit 1
+            fi
+            echo "SUCCESS: GitHub OIDC -> PTAI-GitHub-Deploy-Role -> SSM -> $TARGET_INSTANCE_ID confirmed."
           fi
-          echo "SUCCESS: GitHub OIDC -> PTAI-GitHub-Deploy-Role -> SSM -> $TARGET_INSTANCE_ID confirmed."
