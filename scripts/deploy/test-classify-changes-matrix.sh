@@ -137,15 +137,16 @@ expect_json "migration" "$JSON" '.actions.restart_ptai' "true"
 expect_json "migration" "$JSON" '.categories.DATABASE_MIGRATION | length' "1"
 
 # ---------------------------------------------------------------------------
-echo "=== Case: deploy script change (no dedicated category - must default conservatively via UNKNOWN) ==="
+echo "=== Case: deploy script change (deployment tooling - explicitly NONE, never UNKNOWN, no restart) ==="
 BASE=$(git -C "$REPO" rev-parse HEAD)
-commit_files "deploy script" "scripts/deploy/prepare-release.sh"
+commit_files "deploy script" "scripts/deploy/prepare-release.sh" "scripts/production-preflight.sh"
 TARGET=$(git -C "$REPO" rev-parse HEAD)
 JSON=$(run_case deploy_script "$BASE" "$TARGET")
-expect_json "deploy-script-change" "$JSON" '.categories.UNKNOWN | length' "1"
-expect_json "deploy-script-change" "$JSON" '.actions.restart_ptai' "true"
-expect_json "deploy-script-change" "$JSON" '.actions.restart_livekit' "true"
-expect_json "deploy-script-change" "$JSON" '.actions.venv_rebuild' "true"
+expect_json "deploy-script-change" "$JSON" '.categories.UNKNOWN | length' "0"
+expect_json "deploy-script-change" "$JSON" '.categories.NONE | length' "2"
+expect_json "deploy-script-change" "$JSON" '.actions.restart_ptai' "false"
+expect_json "deploy-script-change" "$JSON" '.actions.restart_livekit' "false"
+expect_json "deploy-script-change" "$JSON" '.actions.venv_rebuild' "false"
 
 # ---------------------------------------------------------------------------
 echo "=== Case: infrastructure/nginx change ==="

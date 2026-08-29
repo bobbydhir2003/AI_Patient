@@ -86,7 +86,13 @@ classify_one() {
       CAT_FRONTEND+=("$f") ;;
     backend/app/*)
       CAT_SHARED_BACKEND+=("$f") ;;
-    backend/tests/*|docs/*|*.md|README*|.github/*|scripts/test-*)
+    backend/tests/*|docs/*|*.md|README*|.github/*|scripts/test-*|scripts/deploy/*|scripts/production-preflight.sh)
+      # Deployment tooling itself (this classifier, the release
+      # prepare/activate/rollback scripts, this workflow, its docs/tests) is
+      # never part of the running ptai/livekit-agent process and is invoked
+      # only as one-off tooling during a deployment - a change here requires
+      # no restart/venv-rebuild of the live service. Genuinely unrecognized
+      # paths still fall through to the UNKNOWN case below unchanged.
       CAT_NONE+=("$f") ;;
     *)
       CAT_UNKNOWN+=("$f") ;;
