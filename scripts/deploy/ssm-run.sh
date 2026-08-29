@@ -63,9 +63,8 @@ done
 
 if [ -n "$COMMAND_FILE" ]; then
   [ -f "$COMMAND_FILE" ] || die "--command-file not found: $COMMAND_FILE"
-  COMMAND_TEXT=$(cat "$COMMAND_FILE")
 elif [ -n "$COMMAND_LITERAL" ]; then
-  COMMAND_TEXT="$COMMAND_LITERAL"
+  : # handled below by writing into a temp file alongside the --command-file case
 else
   die "one of --command-file or --command is required"
 fi
@@ -74,8 +73,20 @@ command -v aws >/dev/null 2>&1 || die "aws CLI is required but not found on PATH
 command -v jq >/dev/null 2>&1 || die "jq is required but not found on PATH"
 
 PARAMS_FILE=$(mktemp)
-trap 'rm -f "$PARAMS_FILE"' EXIT
-jq -n --arg cmd "$COMMAND_TEXT" '{commands: [$cmd]}' > "$PARAMS_FILE"
+COMMAND_TEXT_FILE=$(mktemp)
+trap 'rm -f "$PARAMS_FILE" "$COMMAND_TEXT_FILE"' EXIT
+
+if [ -n "$COMMAND_FILE" ]; then
+  cat "$COMMAND_FILE" > "$COMMAND_TEXT_FILE"
+else
+  printf '%s' "$COMMAND_LITERAL" > "$COMMAND_TEXT_FILE"
+fi
+
+# --rawfile reads the command text directly from disk rather than via a
+# shell variable/argv (--arg), which would blow past the OS ARG_MAX limit
+# once command text grows into the hundreds of KB (e.g. base64-embedding
+# many scripts in one SSM command).
+jq -n --rawfile cmd "$COMMAND_TEXT_FILE" '{commands: [$cmd]}' > "$PARAMS_FILE"
 
 COMMAND_ID=$(aws ssm send-command \
   --instance-ids "$INSTANCE_ID" \
