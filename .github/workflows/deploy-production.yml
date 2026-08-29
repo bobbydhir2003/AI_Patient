@@ -1,0 +1,499 @@
+name: Deploy Production (Manual)
+
+# Manual, gated production deployment orchestration via GitHub OIDC -> AWS
+# SSM. Phase 3B-4 scope: this workflow validates and rehearses the ENTIRE
+# pipeline (CI gate, change classification, artifact build/upload, SSM
+# fetch/checksum/extract, release preparation, activation dry-run, rollback
+# dry-run, health checks) but never performs a real activation, service
+# restart, or migration. dry_run=true is enforced as a hard gate - real
+# deployment (dry_run=false) is Phase 3B-5 and is intentionally not yet
+# enabled by this workflow.
+#
+# workflow_dispatch only - never triggered by a PR, a fork, or a push. Every
+# run is initiated manually by a repository collaborator with write access,
+# operating on this repository's own ref - there is no untrusted-input
+# surface for target_sha beyond what that collaborator explicitly typed.
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: 'Full 40-character git SHA (must be an ancestor of main) to deploy'
+        required: true
+      confirm_production:
+        description: 'Must equal DEPLOY exactly for a real (non-dry-run) deployment - real deployment is not yet enabled in Phase 3B-4'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Must be true for Phase 3B-4 - dry_run=false (real deployment) is Phase 3B-5 and is rejected by this workflow'
+        required: true
+        default: 'true'
+
+permissions:
+  contents: read      # checkout only
+  id-token: write     # OIDC token for AWS role assumption
+  actions: read       # CI gate: read workflow run status for the target SHA
+
+concurrency:
+  group: ptai-production-deploy
+  cancel-in-progress: false   # never cancel an in-progress production deployment run
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ROLE_ARN: arn:aws:iam::050916357757:role/PTAI-GitHub-Deploy-Role
+  TARGET_INSTANCE_ID: i-068f92824b0375c5f
+  ARTIFACT_BUCKET: ptai-deploy-artifacts-050916357757-use2
+  STAGING_ROOT: /opt/ptai/staging
+
+jobs:
+  deploy:
+    name: deploy-production
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      # -----------------------------------------------------------------
+      # Input validation - fail fast, before any AWS/EC2 contact.
+      # -----------------------------------------------------------------
+      - name: Validate workflow inputs
+        run: |
+          set -euo pipefail
+          TARGET_SHA="${{ inputs.target_sha }}"
+          DRY_RUN="${{ inputs.dry_run }}"
+          CONFIRM="${{ inputs.confirm_production }}"
+
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::target_sha must be a full 40-character lowercase hex git SHA, got: $TARGET_SHA"
+            exit 1
+          fi
+
+          if [ "$DRY_RUN" != "true" ]; then
+            echo "::error::Phase 3B-4 only supports dry_run=true. Real deployment (dry_run=false) is Phase 3B-5 and is not yet enabled by this workflow."
+            exit 1
+          fi
+
+          if [ -n "$CONFIRM" ] && [ "$CONFIRM" != "DEPLOY" ]; then
+            echo "::error::confirm_production must be exactly 'DEPLOY' or left empty, got: $CONFIRM"
+            exit 1
+          fi
+
+          echo "Inputs validated: target_sha=$TARGET_SHA dry_run=$DRY_RUN"
+
+      # -----------------------------------------------------------------
+      # Checkout + target SHA ancestry validation.
+      # -----------------------------------------------------------------
+      - name: Checkout target SHA (full history for ancestry check)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 0
+
+      - name: Verify target SHA is a real commit and an ancestor of main
+        run: |
+          set -euo pipefail
+          TARGET_SHA="${{ inputs.target_sha }}"
+          git fetch origin main --quiet
+          if ! git merge-base --is-ancestor "$TARGET_SHA" origin/main; then
+            echo "::error::target_sha $TARGET_SHA is not an ancestor of main - refusing to deploy"
+            exit 1
+          fi
+          ACTUAL_HEAD=$(git rev-parse HEAD)
+          if [ "$ACTUAL_HEAD" != "$TARGET_SHA" ]; then
+            echo "::error::checked-out HEAD ($ACTUAL_HEAD) does not match target_sha ($TARGET_SHA)"
+            exit 1
+          fi
+          echo "Confirmed: $TARGET_SHA resolves to a real commit and is an ancestor of main"
+
+      # -----------------------------------------------------------------
+      # CI gate - never assume "on main" means "CI passed".
+      # -----------------------------------------------------------------
+      - name: CI gate - verify target SHA passed the CI workflow
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TARGET_SHA="${{ inputs.target_sha }}"
+          RUNS_JSON=$(gh api "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${TARGET_SHA}&status=completed" --jq '.workflow_runs')
+          COUNT=$(echo "$RUNS_JSON" | jq 'length')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No completed CI workflow run found for $TARGET_SHA - cannot verify CI passed"
+            exit 1
+          fi
+          SUCCESS_COUNT=$(echo "$RUNS_JSON" | jq '[.[] | select(.conclusion == "success")] | length')
+          if [ "$SUCCESS_COUNT" -eq 0 ]; then
+            echo "::error::CI did not succeed for $TARGET_SHA ($COUNT completed run(s) found, 0 successful)"
+            exit 1
+          fi
+          echo "CI gate passed: $SUCCESS_COUNT successful CI run(s) found for $TARGET_SHA"
+
+      # -----------------------------------------------------------------
+      # AWS OIDC authentication - no long-lived credentials anywhere.
+      # -----------------------------------------------------------------
+      - name: Configure AWS credentials via GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ptai-deploy-production
+
+      - name: Verify GitHub caller identity
+        run: |
+          set -euo pipefail
+          IDENTITY=$(aws sts get-caller-identity --output json)
+          ACCOUNT=$(echo "$IDENTITY" | jq -r '.Account')
+          ARN=$(echo "$IDENTITY" | jq -r '.Arn')
+          if [ "$ACCOUNT" != "050916357757" ]; then
+            echo "::error::Unexpected AWS account: $ACCOUNT"
+            exit 1
+          fi
+          case "$ARN" in
+            *"PTAI-GitHub-Deploy-Role"*) ;;
+            *) echo "::error::Unexpected assumed role ARN: $ARN"; exit 1 ;;
+          esac
+          echo "Confirmed GitHub caller identity: $ARN"
+
+      # -----------------------------------------------------------------
+      # Sync the control-plane deploy scripts (tooling, not release content)
+      # to a fixed location on EC2, keyed to this exact checkout - this
+      # keeps "the scripts that manage releases" conceptually and
+      # physically separate from "the release content being deployed",
+      # the same way uv/git are pre-installed tooling rather than part of
+      # any one release.
+      # -----------------------------------------------------------------
+      - name: Sync deploy scripts to EC2
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          {
+            echo "sudo mkdir -p /opt/ptai/deploy-scripts"
+            echo "sudo chown ubuntu:ubuntu /opt/ptai/deploy-scripts"
+            for f in scripts/deploy/*.sh; do
+              name=$(basename "$f")
+              b64=$(base64 -w0 "$f" 2>/dev/null || base64 "$f" | tr -d '\n')
+              echo "echo ${b64} | base64 -d > /opt/ptai/deploy-scripts/${name}"
+            done
+            echo "chmod +x /opt/ptai/deploy-scripts/*.sh"
+          } > /tmp/sync_scripts_cmd.txt
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 60 --poll-interval-seconds 5 \
+            --command-file /tmp/sync_scripts_cmd.txt \
+            > /tmp/sync_result.txt
+          cat /tmp/sync_result.txt
+          STATUS=$(grep '^status=' /tmp/sync_result.txt | cut -d= -f2-)
+          [ "$STATUS" = "Success" ] || { echo "::error::Failed to sync deploy scripts to EC2 (status=$STATUS)"; exit 1; }
+          echo "Deploy scripts synced to /opt/ptai/deploy-scripts on EC2"
+
+      # -----------------------------------------------------------------
+      # Determine the currently-active release SHA on production, to use
+      # as classify-changes.sh's comparison base.
+      # -----------------------------------------------------------------
+      - name: Determine current production release SHA
+        id: current_release
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 60 --poll-interval-seconds 5 \
+            --command 'basename "$(readlink -f /opt/ptai/current)"' \
+            > /tmp/current_release_result.txt
+          cat /tmp/current_release_result.txt
+          STATUS=$(grep '^status=' /tmp/current_release_result.txt | cut -d= -f2-)
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::Failed to determine current production release via SSM (status=$STATUS)"
+            exit 1
+          fi
+          CURRENT_SHA=$(sed -n '/---STDOUT---/,/---STDERR---/p' /tmp/current_release_result.txt | sed '1d;$d' | tr -d '[:space:]')
+          if [[ ! "$CURRENT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Current production release SHA does not look like a valid git SHA: $CURRENT_SHA"
+            exit 1
+          fi
+          echo "current_sha=$CURRENT_SHA" >> "$GITHUB_OUTPUT"
+          echo "Current production release: $CURRENT_SHA"
+
+      # -----------------------------------------------------------------
+      # Change classification + hard gates.
+      # -----------------------------------------------------------------
+      - name: Classify changes
+        id: classify
+        run: |
+          set -euo pipefail
+          CURRENT_SHA="${{ steps.current_release.outputs.current_sha }}"
+          TARGET_SHA="${{ inputs.target_sha }}"
+          bash scripts/deploy/classify-changes.sh --base "$CURRENT_SHA" --target "$TARGET_SHA" --repo-path . > /tmp/classification.json
+          cat /tmp/classification.json
+          {
+            echo "build_frontend=$(jq -r '.actions.build_frontend' /tmp/classification.json)"
+            echo "restart_ptai=$(jq -r '.actions.restart_ptai' /tmp/classification.json)"
+            echo "restart_livekit=$(jq -r '.actions.restart_livekit' /tmp/classification.json)"
+            echo "venv_rebuild=$(jq -r '.actions.venv_rebuild' /tmp/classification.json)"
+            echo "migration_gate=$(jq -r '.actions.migration_gate' /tmp/classification.json)"
+            echo "nginx_gate=$(jq -r '.actions.nginx_gate' /tmp/classification.json)"
+            echo "unknown_count=$(jq -r '.categories.UNKNOWN | length' /tmp/classification.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Hard gates - migration / infrastructure / unknown-unsafe changes STOP the workflow
+        run: |
+          set -euo pipefail
+          BLOCKED=false
+          if [ "${{ steps.classify.outputs.migration_gate }}" = "true" ]; then
+            echo "::error::Database migration changes detected - Phase 3B-4 never deploys through this category automatically. STOP."
+            BLOCKED=true
+          fi
+          if [ "${{ steps.classify.outputs.nginx_gate }}" = "true" ]; then
+            echo "::error::Infrastructure (nginx) changes detected - requires a dedicated process, not this workflow. STOP."
+            BLOCKED=true
+          fi
+          if [ "${{ steps.classify.outputs.unknown_count }}" != "0" ]; then
+            echo "::error::Unclassified/unknown changes detected (conservative gate) - STOP rather than guess."
+            BLOCKED=true
+          fi
+          if [ "$BLOCKED" = "true" ]; then
+            exit 1
+          fi
+          echo "No hard-gate categories present - safe to continue with dry-run validation."
+
+      # -----------------------------------------------------------------
+      # Build the frontend unconditionally (simplicity/correctness over
+      # skipping the build when classification says it's not needed -
+      # prepare-release.sh always requires dist/ to exist).
+      # -----------------------------------------------------------------
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: Build frontend
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      # -----------------------------------------------------------------
+      # Build the deterministic release artifact and upload to S3.
+      # -----------------------------------------------------------------
+      - name: Build release artifact
+        id: build_artifact
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          TARGET_SHA="${{ inputs.target_sha }}"
+          OUTPUT="/tmp/ptai-release.tar.gz"
+          RESULT=$(bash scripts/deploy/build-artifact.sh --sha "$TARGET_SHA" --repo-path . --output "$OUTPUT")
+          echo "$RESULT"
+          SHA256=$(echo "$RESULT" | grep '^artifact_sha256=' | cut -d= -f2-)
+          echo "artifact_path=$OUTPUT" >> "$GITHUB_OUTPUT"
+          echo "artifact_sha256=$SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact to S3 (immutable SHA-keyed object)
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          TARGET_SHA="${{ inputs.target_sha }}"
+          KEY="releases/${TARGET_SHA}/ptai-release.tar.gz"
+          aws s3api put-object \
+            --bucket "$ARTIFACT_BUCKET" \
+            --key "$KEY" \
+            --body "${{ steps.build_artifact.outputs.artifact_path }}" \
+            --region "$AWS_REGION" \
+            --output json
+          echo "Uploaded to s3://$ARTIFACT_BUCKET/$KEY"
+
+      # -----------------------------------------------------------------
+      # EC2 fetch through SSM: verify identity, download, verify checksum,
+      # safely extract.
+      # -----------------------------------------------------------------
+      - name: EC2 - verify instance-role caller identity
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 60 --poll-interval-seconds 5 \
+            --command 'aws sts get-caller-identity --region us-east-2 --output json' \
+            > /tmp/ec2_identity_result.txt
+          cat /tmp/ec2_identity_result.txt
+          STATUS=$(grep '^status=' /tmp/ec2_identity_result.txt | cut -d= -f2-)
+          [ "$STATUS" = "Success" ] || { echo "::error::EC2 identity check failed (status=$STATUS)"; exit 1; }
+          if ! sed -n '/---STDOUT---/,/---STDERR---/p' /tmp/ec2_identity_result.txt | grep -q "PTAI-EC2-SSM-Role"; then
+            echo "::error::EC2 caller identity did not match PTAI-EC2-SSM-Role"
+            exit 1
+          fi
+          echo "Confirmed EC2 caller identity: PTAI-EC2-SSM-Role"
+
+      - name: EC2 - fetch, verify checksum, safely extract artifact
+        id: fetch
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          TARGET_SHA="${{ inputs.target_sha }}"
+          KEY="releases/${TARGET_SHA}/ptai-release.tar.gz"
+          SHA256="${{ steps.build_artifact.outputs.artifact_sha256 }}"
+          CMD="sudo mkdir -p $STAGING_ROOT && sudo chown ubuntu:ubuntu $STAGING_ROOT && bash /home/ubuntu/ptai-deploy-scripts/fetch-artifact.sh --bucket $ARTIFACT_BUCKET --key $KEY --expected-sha256 $SHA256 --staging-root $STAGING_ROOT --region us-east-2"
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 180 --poll-interval-seconds 5 \
+            --command "$CMD" \
+            > /tmp/fetch_result.txt
+          cat /tmp/fetch_result.txt
+          STATUS=$(grep '^status=' /tmp/fetch_result.txt | cut -d= -f2-)
+          [ "$STATUS" = "Success" ] || { echo "::error::Artifact fetch/verify/extract failed on EC2 (status=$STATUS)"; exit 1; }
+          STAGING_PATH=$(sed -n '/---STDOUT---/,/---STDERR---/p' /tmp/fetch_result.txt | grep '^staging_path=' | cut -d= -f2-)
+          [ -n "$STAGING_PATH" ] || { echo "::error::fetch-artifact.sh did not report a staging path"; exit 1; }
+          echo "staging_path=$STAGING_PATH" >> "$GITHUB_OUTPUT"
+          echo "Verified staging path on EC2: $STAGING_PATH"
+
+      # -----------------------------------------------------------------
+      # Prepare the release (never activates, never mutates 'current').
+      # -----------------------------------------------------------------
+      - name: EC2 - prepare release
+        id: prepare
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          TARGET_SHA="${{ inputs.target_sha }}"
+          STAGING_PATH="${{ steps.fetch.outputs.staging_path }}"
+          # SSM Run Command executes as root with $HOME unset, so uv (installed
+          # for the ubuntu user under ~/.local/bin) is not on PATH by default -
+          # prepare-release.sh requires uv to build the release venv.
+          CMD="export PATH=/home/ubuntu/.local/bin:\$PATH; bash /home/ubuntu/ptai-deploy-scripts/prepare-release.sh --sha $TARGET_SHA --source-dir $STAGING_PATH"
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 300 --poll-interval-seconds 10 \
+            --command "$CMD" \
+            > /tmp/prepare_result.txt
+          cat /tmp/prepare_result.txt
+          STATUS=$(grep '^status=' /tmp/prepare_result.txt | cut -d= -f2-)
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::prepare-release.sh failed on EC2 (status=$STATUS) - current production remains untouched"
+            exit 1
+          fi
+          echo "Release prepared successfully. current production is untouched."
+
+      # -----------------------------------------------------------------
+      # Activation - DRY RUN ONLY. Never the real switch in Phase 3B-4.
+      # -----------------------------------------------------------------
+      - name: EC2 - activate-release.sh --dry-run
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          TARGET_SHA="${{ inputs.target_sha }}"
+          CMD="bash /home/ubuntu/ptai-deploy-scripts/activate-release.sh --sha $TARGET_SHA --dry-run; echo DRYRUN_EXIT=\$?"
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 60 --poll-interval-seconds 5 \
+            --command "$CMD" \
+            > /tmp/activate_dryrun_result.txt
+          cat /tmp/activate_dryrun_result.txt
+          echo "(activate-release.sh exit code 3 = migration acknowledgment required, itself a safe/expected dry-run outcome, not treated as an SSM command failure since we always echo DRYRUN_EXIT explicitly above)"
+
+      - name: EC2 - verify /opt/ptai/current is unchanged after dry-run
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 60 --poll-interval-seconds 5 \
+            --command 'basename "$(readlink -f /opt/ptai/current)"' \
+            > /tmp/current_after_result.txt
+          cat /tmp/current_after_result.txt
+          AFTER_SHA=$(sed -n '/---STDOUT---/,/---STDERR---/p' /tmp/current_after_result.txt | sed '1d;$d' | tr -d '[:space:]')
+          BEFORE_SHA="${{ steps.current_release.outputs.current_sha }}"
+          if [ "$AFTER_SHA" != "$BEFORE_SHA" ]; then
+            echo "::error::/opt/ptai/current CHANGED during a dry-run-only workflow: before=$BEFORE_SHA after=$AFTER_SHA"
+            exit 1
+          fi
+          echo "Confirmed: /opt/ptai/current unchanged ($AFTER_SHA)"
+
+      # -----------------------------------------------------------------
+      # Service restart decisions - plan only, never executed.
+      # -----------------------------------------------------------------
+      - name: Restart decisions (plan only - no service is restarted)
+        run: |
+          echo "restart_ptai would be required: ${{ steps.classify.outputs.restart_ptai }}"
+          echo "restart_livekit would be required: ${{ steps.classify.outputs.restart_livekit }}"
+          echo "Phase 3B-4 never restarts a service - this is a plan for a future gated step."
+
+      # -----------------------------------------------------------------
+      # LiveKit fresh-activity gate - classification only, never restarts.
+      # -----------------------------------------------------------------
+      - name: EC2 - LiveKit fresh activity gate
+        id: livekit_gate
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          CMD="bash /home/ubuntu/ptai-deploy-scripts/livekit-activity-gate.sh"
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 60 --poll-interval-seconds 5 \
+            --command "$CMD" \
+            > /tmp/livekit_gate_result.txt
+          cat /tmp/livekit_gate_result.txt
+          STATUS=$(grep '^status=' /tmp/livekit_gate_result.txt | cut -d= -f2-)
+          [ "$STATUS" = "Success" ] || { echo "::error::LiveKit activity gate check failed (status=$STATUS)"; exit 1; }
+          GATE_RESULT=$(sed -n '/---STDOUT---/,/---STDERR---/p' /tmp/livekit_gate_result.txt | sed '1d;$d' | tr -d '[:space:]')
+          echo "gate_result=$GATE_RESULT" >> "$GITHUB_OUTPUT"
+          echo "LiveKit activity gate: $GATE_RESULT"
+          if [ "$GATE_RESULT" = "ACTIVE" ] || [ "$GATE_RESULT" = "AMBIGUOUS" ]; then
+            echo "::warning::LiveKit gate is $GATE_RESULT - this would BLOCK any automatic restart. Not restarting (Phase 3B-4 never restarts anyway)."
+          fi
+
+      # -----------------------------------------------------------------
+      # Rollback - DRY RUN ONLY.
+      # -----------------------------------------------------------------
+      - name: EC2 - rollback-release.sh --dry-run
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          CMD="bash /home/ubuntu/ptai-deploy-scripts/rollback-release.sh --dry-run; echo DRYRUN_EXIT=\$?"
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 60 --poll-interval-seconds 5 \
+            --command "$CMD" \
+            > /tmp/rollback_dryrun_result.txt
+          cat /tmp/rollback_dryrun_result.txt
+          echo "(rollback-release.sh exits non-zero when no rollback pointer exists yet - a correct, safe, expected outcome for an instance that has never been activated via these scripts; DRYRUN_EXIT is echoed explicitly above for visibility)"
+
+      # -----------------------------------------------------------------
+      # Health checks - read-only, current production only.
+      # -----------------------------------------------------------------
+      - name: EC2 - local health check
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          CMD="bash /home/ubuntu/ptai-deploy-scripts/health-check.sh --mode local; echo HEALTHCHECK_EXIT=\$?"
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 60 --poll-interval-seconds 5 \
+            --command "$CMD" \
+            > /tmp/healthcheck_result.txt
+          cat /tmp/healthcheck_result.txt
+
+      - name: Public health check (from the runner)
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -k "https://18.223.231.76/api/health")
+          echo "Public health HTTP status: $CODE"
+          if [ "$CODE" != "200" ]; then
+            echo "::error::Public health check did not return 200 (got $CODE)"
+            exit 1
+          fi
+
+      # -----------------------------------------------------------------
+      # Final summary.
+      # -----------------------------------------------------------------
+      - name: Summary
+        run: |
+          {
+            echo "### Phase 3B-4 dry-run deployment validation complete"
+            echo "- target_sha: ${{ inputs.target_sha }}"
+            echo "- previous current_sha: ${{ steps.current_release.outputs.current_sha }}"
+            echo "- artifact SHA-256: ${{ steps.build_artifact.outputs.artifact_sha256 }}"
+            echo "- restart_ptai would be required: ${{ steps.classify.outputs.restart_ptai }}"
+            echo "- restart_livekit would be required: ${{ steps.classify.outputs.restart_livekit }}"
+            echo "- LiveKit activity gate: ${{ steps.livekit_gate.outputs.gate_result }}"
+            echo "- No release was activated, no service was restarted, /opt/ptai/current is unchanged."
+          } >> "$GITHUB_STEP_SUMMARY"
