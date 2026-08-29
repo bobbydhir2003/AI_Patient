@@ -20,11 +20,11 @@ on:
         description: 'Full 40-character git SHA (must be an ancestor of main) to deploy'
         required: true
       confirm_production:
-        description: 'Must equal DEPLOY exactly for a real (non-dry-run) deployment - real deployment is not yet enabled in Phase 3B-4'
+        description: 'Must equal DEPLOY exactly when dry_run=false (real deployment)'
         required: false
         default: ''
       dry_run:
-        description: 'Must be true for Phase 3B-4 - dry_run=false (real deployment) is Phase 3B-5 and is rejected by this workflow'
+        description: 'true = rehearse only (default, safe). false = real deployment; requires confirm_production=DEPLOY'
         required: true
         default: 'true'
 
@@ -65,13 +65,18 @@ jobs:
             exit 1
           fi
 
-          if [ "$DRY_RUN" != "true" ]; then
-            echo "::error::Phase 3B-4 only supports dry_run=true. Real deployment (dry_run=false) is Phase 3B-5 and is not yet enabled by this workflow."
+          if [ "$DRY_RUN" != "true" ] && [ "$DRY_RUN" != "false" ]; then
+            echo "::error::dry_run must be exactly 'true' or 'false', got: $DRY_RUN"
             exit 1
           fi
 
           if [ -n "$CONFIRM" ] && [ "$CONFIRM" != "DEPLOY" ]; then
             echo "::error::confirm_production must be exactly 'DEPLOY' or left empty, got: $CONFIRM"
+            exit 1
+          fi
+
+          if [ "$DRY_RUN" = "false" ] && [ "$CONFIRM" != "DEPLOY" ]; then
+            echo "::error::Real deployment (dry_run=false) requires confirm_production=DEPLOY exactly - refusing to proceed without explicit confirmation."
             exit 1
           fi
 
@@ -414,23 +419,47 @@ jobs:
           echo "Release prepared successfully. current production is untouched."
 
       # -----------------------------------------------------------------
-      # Activation - DRY RUN ONLY. Never the real switch in Phase 3B-4.
+      # Activation. dry_run=true: --dry-run rehearsal only (unchanged from
+      # Phase 3B-4). dry_run=false: the real, only-place-that-mutates-current
+      # switch. activate-release.sh only ever exits non-zero BEFORE it writes
+      # anything (all mutation happens after its last validation check), so
+      # any non-zero exit here means current is still untouched.
       # -----------------------------------------------------------------
-      - name: EC2 - activate-release.sh --dry-run
+      - name: EC2 - activate release
+        id: activate
         timeout-minutes: 3
         run: |
           set -euo pipefail
           TARGET_SHA="${{ inputs.target_sha }}"
-          CMD="bash /home/ubuntu/ptai-deploy-scripts/activate-release.sh --sha $TARGET_SHA --dry-run; echo DRYRUN_EXIT=\$?"
+          DRY_RUN="${{ inputs.dry_run }}"
+          if [ "$DRY_RUN" = "true" ]; then
+            CMD="bash /home/ubuntu/ptai-deploy-scripts/activate-release.sh --sha $TARGET_SHA --dry-run; echo ACTIVATE_EXIT=\$?"
+          else
+            CMD="bash /home/ubuntu/ptai-deploy-scripts/activate-release.sh --sha $TARGET_SHA; echo ACTIVATE_EXIT=\$?"
+          fi
           bash scripts/deploy/ssm-run.sh \
             --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
             --timeout-seconds 60 --poll-interval-seconds 5 \
             --command "$CMD" \
-            > /tmp/activate_dryrun_result.txt
-          cat /tmp/activate_dryrun_result.txt
-          echo "(activate-release.sh exit code 3 = migration acknowledgment required, itself a safe/expected dry-run outcome, not treated as an SSM command failure since we always echo DRYRUN_EXIT explicitly above)"
+            > /tmp/activate_result.txt
+          cat /tmp/activate_result.txt
+          STATUS=$(grep '^status=' /tmp/activate_result.txt | cut -d= -f2-)
+          [ "$STATUS" = "Success" ] || { echo "::error::SSM command to activate release failed outright (status=$STATUS) - current is untouched"; exit 1; }
+          ACTIVATE_EXIT=$(sed -n '/---STDOUT---/,/---STDERR---/p' /tmp/activate_result.txt | grep '^ACTIVATE_EXIT=' | tail -1 | cut -d= -f2-)
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "activate-release.sh --dry-run exit code: $ACTIVATE_EXIT (informational only, current is untouched either way)"
+          else
+            if [ "$ACTIVATE_EXIT" = "3" ]; then
+              echo "::error::activate-release.sh refused: unacknowledged migration file(s) detected on actual release content (exit 3). This should never happen given migration_gate=false from classification - STOPPING. current is untouched."
+              exit 1
+            elif [ "$ACTIVATE_EXIT" != "0" ]; then
+              echo "::error::activate-release.sh failed (exit $ACTIVATE_EXIT). current is untouched (this is a pre-mutation failure by design)."
+              exit 1
+            fi
+            echo "Activated: current -> release $TARGET_SHA"
+          fi
 
-      - name: EC2 - verify /opt/ptai/current is unchanged after dry-run
+      - name: EC2 - verify /opt/ptai/current matches expected post-activation state
         timeout-minutes: 3
         run: |
           set -euo pipefail
@@ -441,24 +470,28 @@ jobs:
             > /tmp/current_after_result.txt
           cat /tmp/current_after_result.txt
           AFTER_SHA=$(sed -n '/---STDOUT---/,/---STDERR---/p' /tmp/current_after_result.txt | sed '1d;$d' | tr -d '[:space:]')
-          BEFORE_SHA="${{ steps.current_release.outputs.current_sha }}"
-          if [ "$AFTER_SHA" != "$BEFORE_SHA" ]; then
-            echo "::error::/opt/ptai/current CHANGED during a dry-run-only workflow: before=$BEFORE_SHA after=$AFTER_SHA"
-            exit 1
+          DRY_RUN="${{ inputs.dry_run }}"
+          if [ "$DRY_RUN" = "true" ]; then
+            BEFORE_SHA="${{ steps.current_release.outputs.current_sha }}"
+            if [ "$AFTER_SHA" != "$BEFORE_SHA" ]; then
+              echo "::error::/opt/ptai/current CHANGED during a dry-run-only workflow: before=$BEFORE_SHA after=$AFTER_SHA"
+              exit 1
+            fi
+            echo "Confirmed: /opt/ptai/current unchanged ($AFTER_SHA)"
+          else
+            TARGET_SHA="${{ inputs.target_sha }}"
+            if [ "$AFTER_SHA" != "$TARGET_SHA" ]; then
+              echo "::error::/opt/ptai/current does not point to target_sha after activation: expected=$TARGET_SHA actual=$AFTER_SHA"
+              exit 1
+            fi
+            echo "Confirmed: /opt/ptai/current now points to $AFTER_SHA"
           fi
-          echo "Confirmed: /opt/ptai/current unchanged ($AFTER_SHA)"
 
       # -----------------------------------------------------------------
-      # Service restart decisions - plan only, never executed.
-      # -----------------------------------------------------------------
-      - name: Restart decisions (plan only - no service is restarted)
-        run: |
-          echo "restart_ptai would be required: ${{ steps.classify.outputs.restart_ptai }}"
-          echo "restart_livekit would be required: ${{ steps.classify.outputs.restart_livekit }}"
-          echo "Phase 3B-4 never restarts a service - this is a plan for a future gated step."
-
-      # -----------------------------------------------------------------
-      # LiveKit fresh-activity gate - classification only, never restarts.
+      # LiveKit fresh-activity gate - runs immediately before any restart
+      # decision below, always a fresh journalctl query (never cached).
+      # Classification only here; the actual restart-or-skip decision is
+      # made in the next step.
       # -----------------------------------------------------------------
       - name: EC2 - LiveKit fresh activity gate
         id: livekit_gate
@@ -477,17 +510,76 @@ jobs:
           GATE_RESULT=$(sed -n '/---STDOUT---/,/---STDERR---/p' /tmp/livekit_gate_result.txt | sed '1d;$d' | tr -d '[:space:]')
           echo "gate_result=$GATE_RESULT" >> "$GITHUB_OUTPUT"
           echo "LiveKit activity gate: $GATE_RESULT"
-          if [ "$GATE_RESULT" = "ACTIVE" ] || [ "$GATE_RESULT" = "AMBIGUOUS" ]; then
-            echo "::warning::LiveKit gate is $GATE_RESULT - this would BLOCK any automatic restart. Not restarting (Phase 3B-4 never restarts anyway)."
-          fi
 
       # -----------------------------------------------------------------
-      # Rollback - DRY RUN ONLY.
+      # Service restarts. dry_run=true: plan-only, unchanged from Phase
+      # 3B-4. dry_run=false: real restarts, gated on the classifier output
+      # AND the fresh LiveKit gate above - ACTIVE/AMBIGUOUS refuses to
+      # restart livekit-agent and stops the whole run rather than leaving a
+      # half-applied restart state (activation itself already succeeded and
+      # is idempotent, so a re-run of this same target_sha is always safe
+      # and cheap once the gate later reads IDLE).
+      # -----------------------------------------------------------------
+      - name: EC2 - restart services
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          DRY_RUN="${{ inputs.dry_run }}"
+          RESTART_PTAI="${{ steps.classify.outputs.restart_ptai }}"
+          RESTART_LIVEKIT="${{ steps.classify.outputs.restart_livekit }}"
+          GATE="${{ steps.livekit_gate.outputs.gate_result }}"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "restart_ptai would be required: $RESTART_PTAI"
+            echo "restart_livekit would be required: $RESTART_LIVEKIT (LiveKit gate: $GATE)"
+            echo "dry_run=true - no service is restarted."
+            exit 0
+          fi
+
+          if [ "$RESTART_LIVEKIT" = "true" ] && [ "$GATE" != "IDLE" ]; then
+            echo "::error::LiveKit activity gate is $GATE (not IDLE) and this deployment requires a livekit-agent restart. Refusing to restart ANY service. current already points to the new release (activation is idempotent - re-running this same deployment once the gate reads IDLE will simply skip straight to restarts). STOP AND REPORT."
+            exit 1
+          fi
+
+          restart_and_verify() {
+            local unit="$1"
+            local cmd="systemctl restart $unit && sleep 3 && systemctl is-active $unit"
+            bash scripts/deploy/ssm-run.sh \
+              --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+              --timeout-seconds 60 --poll-interval-seconds 5 \
+              --command "$cmd" \
+              > "/tmp/restart_${unit}_result.txt"
+            cat "/tmp/restart_${unit}_result.txt"
+            local status
+            status=$(grep '^status=' "/tmp/restart_${unit}_result.txt" | cut -d= -f2-)
+            if [ "$status" != "Success" ] || ! sed -n '/---STDOUT---/,/---STDERR---/p' "/tmp/restart_${unit}_result.txt" | grep -q '^active$'; then
+              echo "::error::Restart of $unit did not result in an active service (status=$status)"
+              exit 1
+            fi
+            echo "$unit restarted and confirmed active."
+          }
+
+          if [ "$RESTART_PTAI" = "true" ]; then
+            restart_and_verify ptai.service
+          fi
+          if [ "$RESTART_LIVEKIT" = "true" ]; then
+            restart_and_verify ptai-livekit-agent.service
+          fi
+          echo "Restarts complete: ptai=$RESTART_PTAI livekit=$RESTART_LIVEKIT (gate was $GATE)"
+
+      # -----------------------------------------------------------------
+      # Rollback rehearsal. dry_run=true: unchanged --dry-run rehearsal.
+      # dry_run=false: skipped here - a real rollback (if needed) is decided
+      # AFTER the health checks below, from their result.
       # -----------------------------------------------------------------
       - name: EC2 - rollback-release.sh --dry-run
         timeout-minutes: 3
         run: |
           set -euo pipefail
+          if [ "${{ inputs.dry_run }}" != "true" ]; then
+            echo "dry_run=false - skipping rollback rehearsal here; a real rollback is only invoked below if the post-deployment health check fails."
+            exit 0
+          fi
           CMD="bash /home/ubuntu/ptai-deploy-scripts/rollback-release.sh --dry-run; echo DRYRUN_EXIT=\$?"
           bash scripts/deploy/ssm-run.sh \
             --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
@@ -498,9 +590,11 @@ jobs:
           echo "(rollback-release.sh exits non-zero when no rollback pointer exists yet - a correct, safe, expected outcome for an instance that has never been activated via these scripts; DRYRUN_EXIT is echoed explicitly above for visibility)"
 
       # -----------------------------------------------------------------
-      # Health checks - read-only, current production only.
+      # Health checks - read-only. Captures results as step outputs (rather
+      # than failing immediately) so dry_run=false can act on them below.
       # -----------------------------------------------------------------
       - name: EC2 - local health check
+        id: health_local
         timeout-minutes: 3
         run: |
           set -euo pipefail
@@ -511,30 +605,102 @@ jobs:
             --command "$CMD" \
             > /tmp/healthcheck_result.txt
           cat /tmp/healthcheck_result.txt
+          EXIT=$(sed -n '/---STDOUT---/,/---STDERR---/p' /tmp/healthcheck_result.txt | grep '^HEALTHCHECK_EXIT=' | tail -1 | cut -d= -f2-)
+          echo "exit_code=${EXIT:-2}" >> "$GITHUB_OUTPUT"
 
       - name: Public health check (from the runner)
+        id: health_public
         timeout-minutes: 2
         run: |
           set -euo pipefail
           CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -k "https://18.223.231.76/api/health")
           echo "Public health HTTP status: $CODE"
-          if [ "$CODE" != "200" ]; then
+          echo "http_code=$CODE" >> "$GITHUB_OUTPUT"
+          if [ "${{ inputs.dry_run }}" = "true" ] && [ "$CODE" != "200" ]; then
             echo "::error::Public health check did not return 200 (got $CODE)"
             exit 1
           fi
 
       # -----------------------------------------------------------------
+      # Post-deployment verification. dry_run=false only: if either health
+      # check indicates trouble, roll back immediately using the
+      # already-tested rollback path, restart services back, and re-verify
+      # - exactly as instructed ("use the already-tested rollback path
+      # immediately, unless a migration ran"). No migration ran in this
+      # workflow at any point (the hard gate gates that before this line is
+      # ever reached), so rollback is always safe to attempt here.
+      # -----------------------------------------------------------------
+      - name: EC2 - post-deployment verification (auto-rollback if unhealthy)
+        if: ${{ inputs.dry_run == 'false' }}
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          LOCAL_EXIT="${{ steps.health_local.outputs.exit_code }}"
+          PUBLIC_CODE="${{ steps.health_public.outputs.http_code }}"
+          if [ "$LOCAL_EXIT" = "0" ] && [ "$PUBLIC_CODE" = "200" ]; then
+            echo "Post-deployment health OK (local exit=$LOCAL_EXIT, public=$PUBLIC_CODE). No rollback needed."
+            exit 0
+          fi
+
+          echo "::error::Post-deployment health check failed (local health-check.sh exit=$LOCAL_EXIT, public HTTP=$PUBLIC_CODE). Rolling back immediately."
+
+          CMD="bash /home/ubuntu/ptai-deploy-scripts/rollback-release.sh --confirm; echo ROLLBACK_EXIT=\$?"
+          bash scripts/deploy/ssm-run.sh \
+            --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+            --timeout-seconds 60 --poll-interval-seconds 5 \
+            --command "$CMD" \
+            > /tmp/rollback_result.txt
+          cat /tmp/rollback_result.txt
+          ROLLBACK_STATUS=$(grep '^status=' /tmp/rollback_result.txt | cut -d= -f2-)
+          ROLLBACK_EXIT=$(sed -n '/---STDOUT---/,/---STDERR---/p' /tmp/rollback_result.txt | grep '^ROLLBACK_EXIT=' | tail -1 | cut -d= -f2-)
+          if [ "$ROLLBACK_STATUS" != "Success" ] || [ "$ROLLBACK_EXIT" != "0" ]; then
+            echo "::error::ROLLBACK ITSELF FAILED (status=$ROLLBACK_STATUS exit=$ROLLBACK_EXIT). Manual intervention required immediately - current state is uncertain."
+            exit 1
+          fi
+          echo "Rolled back: current -> previous release."
+
+          restart_and_verify() {
+            local unit="$1"
+            local cmd="systemctl restart $unit && sleep 3 && systemctl is-active $unit"
+            bash scripts/deploy/ssm-run.sh \
+              --instance-id "$TARGET_INSTANCE_ID" --region "$AWS_REGION" \
+              --timeout-seconds 60 --poll-interval-seconds 5 \
+              --command "$cmd" \
+              > "/tmp/rollback_restart_${unit}_result.txt"
+            cat "/tmp/rollback_restart_${unit}_result.txt"
+            local status
+            status=$(grep '^status=' "/tmp/rollback_restart_${unit}_result.txt" | cut -d= -f2-)
+            if [ "$status" != "Success" ] || ! sed -n '/---STDOUT---/,/---STDERR---/p' "/tmp/rollback_restart_${unit}_result.txt" | grep -q '^active$'; then
+              echo "::error::Restart of $unit after rollback did not result in an active service (status=$status) - manual intervention required."
+              exit 1
+            fi
+          }
+          [ "${{ steps.classify.outputs.restart_ptai }}" = "true" ] && restart_and_verify ptai.service
+          [ "${{ steps.classify.outputs.restart_livekit }}" = "true" ] && restart_and_verify ptai-livekit-agent.service
+
+          RECHECK=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -k "https://18.223.231.76/api/health")
+          echo "Post-rollback public health HTTP status: $RECHECK"
+          if [ "$RECHECK" != "200" ]; then
+            echo "::error::Health is STILL not OK after rollback (HTTP $RECHECK). Manual intervention required immediately."
+            exit 1
+          fi
+          echo "Rollback complete and confirmed healthy. Failing this run so the failed deployment attempt is clearly visible."
+          exit 1
+
+      # -----------------------------------------------------------------
       # Final summary.
       # -----------------------------------------------------------------
       - name: Summary
+        if: always()
         run: |
           {
-            echo "### Phase 3B-4 dry-run deployment validation complete"
+            echo "### Deployment run complete (dry_run=${{ inputs.dry_run }})"
             echo "- target_sha: ${{ inputs.target_sha }}"
             echo "- previous current_sha: ${{ steps.current_release.outputs.current_sha }}"
             echo "- artifact SHA-256: ${{ steps.build_artifact.outputs.artifact_sha256 }}"
-            echo "- restart_ptai would be required: ${{ steps.classify.outputs.restart_ptai }}"
-            echo "- restart_livekit would be required: ${{ steps.classify.outputs.restart_livekit }}"
+            echo "- restart_ptai required: ${{ steps.classify.outputs.restart_ptai }}"
+            echo "- restart_livekit required: ${{ steps.classify.outputs.restart_livekit }}"
             echo "- LiveKit activity gate: ${{ steps.livekit_gate.outputs.gate_result }}"
-            echo "- No release was activated, no service was restarted, /opt/ptai/current is unchanged."
+            echo "- local health exit: ${{ steps.health_local.outputs.exit_code }}"
+            echo "- public health HTTP: ${{ steps.health_public.outputs.http_code }}"
           } >> "$GITHUB_STEP_SUMMARY"
