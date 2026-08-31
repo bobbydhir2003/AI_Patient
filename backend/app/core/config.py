@@ -143,6 +143,93 @@ class Settings(BaseSettings):
     # bug) - changing this requires updating both sides together.
     livekit_agent_name: str = "ptai-patient-agent"
 
+    # --- Phase 2 raw-audio VAD/STT (parallel, OBSERVATIONAL only - see
+    # app/livekit_agent/worker.py's _StudentVadSttPipeline). This NEVER
+    # drives the conversation - browser SpeechRecognition remains the sole
+    # trigger for student_text/patient generation; server VAD/STT only emits
+    # diagnostic log events. Disabled unless BOTH this flag is true AND a
+    # real Deepgram credential is set - either alone leaves the pipeline off
+    # (fails open, matching livekit_poc_enabled's own all-or-nothing gating
+    # above). Get a key at https://console.deepgram.com/.
+    livekit_server_stt_enabled: bool = False
+    deepgram_api_key: str = ""
+
+    # --- Phase 3 semantic turn detection (EXPERIMENTAL, OBSERVATIONAL only -
+    # see app/livekit_agent/turn_detector.py and worker.py's
+    # _CandidateTurnCoordinator). A HOLD/END decision here NEVER triggers
+    # patient generation, never publishes student_text, never touches
+    # conversation/assessment history - it only ever logs
+    # student_turn_detector_decision. Requires livekit_server_stt_enabled
+    # above (the VAD/STT events this feeds on) - enabling this WITHOUT that
+    # is a no-op with a logged warning, never a startup failure (see
+    # _warn_semantic_turn_detection_misconfig below).
+    livekit_semantic_turn_detection_enabled: bool = False
+
+    # --- Phase 4 semantic turn CONTROL (EXPERIMENTAL - see worker.py's
+    # PocAgentSession._semantic_control_active/_handle_semantic_turn_end).
+    # Unlike Phase 3 above (observational only), this flag - once genuinely
+    # active - makes Smart Turn's HOLD/END decision the thing that submits
+    # the student's turn into the SAME patient-generation pipeline browser
+    # student_text uses, and makes browser student_text non-authoritative for
+    # the session (still accepted/acked, never processed - see
+    # semantic_turn_browser_text_ignored). Requires BOTH
+    # livekit_server_stt_enabled AND livekit_semantic_turn_detection_enabled
+    # above - see semantic_turn_control_active and
+    # _warn_semantic_turn_control_misconfig below for the same fail-safe,
+    # never-fail-startup discipline as Phase 3.
+    livekit_semantic_turn_control_enabled: bool = False
+
+    # --- Phase 5A semantic barge-in (EXPERIMENTAL - see worker.py's
+    # _CandidateTurnCoordinator barge-in buffer/PocAgentSession.
+    # _on_semantic_barge_in). Lets genuine student interruption speech
+    # (classified TRUE_BARGE_IN, see turn_detector.py's classify_barge_in)
+    # stop patient audio mid-turn, reusing the SAME cancellation primitive
+    # the manual interrupt_patient control message already uses - see
+    # PocAgentSession._cancel_active_patient_turn. Meaningless without
+    # semantic turn CONTROL already active (barge-in decides whether the
+    # PATIENT should yield the floor to the student's ALREADY-authoritative
+    # server-side turn pipeline) - see semantic_barge_in_active and
+    # _warn_semantic_barge_in_misconfig below for the same fail-safe,
+    # never-fail-startup discipline as Phase 3/4.
+    livekit_semantic_barge_in_enabled: bool = False
+
+    # --- Phase 5B spoken-transcript sync (EXPERIMENTAL - see
+    # patient_adapter.py's split_into_sentences/finalize_partial_patient_
+    # delivery and worker.py's PocAgentSession._run_turn per-sentence
+    # branch). Fixes a transcript-integrity bug present since Phase 1: the
+    # full patient response is persisted to the DB the instant OpenAI
+    # responds, BEFORE any audio has played - if the student then
+    # interrupts (manual button OR Phase 5A semantic barge-in), the DB
+    # still shows the entire (never-heard) response. When this flag is
+    # true, patient audio publishes sentence-by-sentence and an
+    # interruption/mid-response TTS failure corrects the ALREADY-persisted
+    # row back down to only the sentences that genuinely finished
+    # publishing - see generate_and_persist_turn's docstring for why the
+    # insert/commit timing and idempotency there are otherwise completely
+    # unchanged. Independent of Phase 4/5A (LIVEKIT_SEMANTIC_TURN_CONTROL_
+    # ENABLED/LIVEKIT_SEMANTIC_BARGE_IN_ENABLED) - the manual interrupt
+    # button already works without either of those, so this fix is useful
+    # on its own. No prerequisites, no misconfig warning needed.
+    livekit_spoken_transcript_sync_enabled: bool = False
+
+    # --- Phase 6 patient backchanneling (EXPERIMENTAL - see worker.py's
+    # PocAgentSession._on_semantic_hold/_schedule_backchannel/
+    # _play_backchannel). Lets the patient say a short, semantically-neutral
+    # acknowledgement ("Mm-hmm.") during a student's HOLD-classified
+    # thinking pause - a PATIENT_BACKCHANNEL, never a PATIENT_RESPONSE: it
+    # never calls OpenAI, never persists a transcript row, never touches
+    # the student's candidate transcript/turn id, and is cancelled
+    # immediately the instant the student resumes speaking. Requires
+    # semantic turn CONTROL already active (a backchannel only makes sense
+    # once Smart Turn's HOLD/END decision is authoritative for student turn
+    # completion) - deliberately does NOT require semantic barge-in
+    # (LIVEKIT_SEMANTIC_BARGE_IN_ENABLED); backchannel cancellation uses its
+    # own independent, simpler mechanism (VAD speech_started), not Phase
+    # 5A's interruption classifier. See patient_backchannel_active and
+    # _warn_patient_backchannel_misconfig below for the same fail-safe,
+    # never-fail-startup discipline as every other experimental flag here.
+    livekit_patient_backchannel_enabled: bool = False
+
     # --- Voice engine selection (Phase A: flag + student-safe token endpoint
     # only - the real InterviewPage does NOT read this yet; it still always
     # uses the legacy patientVoiceService/api/voice path unconditionally).
@@ -474,6 +561,106 @@ class Settings(BaseSettings):
                 self.environment,
             )
         return self
+
+    @model_validator(mode="after")
+    def _warn_semantic_turn_detection_misconfig(self) -> "Settings":
+        """Phase 3 (EXPERIMENTAL): semantic turn detection is layered on top
+        of Phase 2's server-side VAD/STT events - enabling it while
+        livekit_server_stt_enabled is off has nothing to observe. Per Step 11
+        this must fail SAFE, not fail the app: log once and let
+        worker.py's own per-job factory (_maybe_start_turn_detector) treat it
+        as effectively disabled - never a ConfigError, never blocked at
+        startup (this experimental flag has no bearing on the main API
+        server's ability to start)."""
+        if self.livekit_semantic_turn_detection_enabled and not self.livekit_server_stt_enabled:
+            logger.warning(
+                "LIVEKIT_SEMANTIC_TURN_DETECTION_ENABLED=true but "
+                "LIVEKIT_SERVER_STT_ENABLED=false - semantic turn detection has no VAD/STT "
+                "events to observe and will stay OFF until server-side STT is also enabled."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_semantic_turn_control_misconfig(self) -> "Settings":
+        """Phase 4 (EXPERIMENTAL): semantic turn CONTROL requires both Phase 2
+        (server STT) and Phase 3 (semantic detection) to be genuinely active -
+        see semantic_turn_control_active below, the single source of truth
+        worker.py actually reads. Same fail-SAFE discipline as Phase 3's own
+        warning above: log once, never block startup - worker.py's per-job
+        code treats an inconsistent config as control simply staying off."""
+        if self.livekit_semantic_turn_control_enabled and not self.semantic_turn_control_active:
+            logger.warning(
+                "LIVEKIT_SEMANTIC_TURN_CONTROL_ENABLED=true but LIVEKIT_SERVER_STT_ENABLED "
+                "and/or LIVEKIT_SEMANTIC_TURN_DETECTION_ENABLED is false - semantic turn "
+                "control has no HOLD/END decisions to act on and will stay OFF (browser "
+                "student_text remains authoritative) until both prerequisites are also enabled."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_semantic_barge_in_misconfig(self) -> "Settings":
+        """Phase 5A (EXPERIMENTAL): barge-in is layered on top of semantic
+        turn CONTROL, not just detection - enabling it while
+        semantic_turn_control_active is False has no authoritative student
+        turn pipeline to hand the floor back to. Same fail-SAFE discipline:
+        log once, never block startup - worker.py's per-job code treats an
+        inconsistent config as barge-in simply staying off."""
+        if self.livekit_semantic_barge_in_enabled and not self.semantic_turn_control_active:
+            logger.warning(
+                "LIVEKIT_SEMANTIC_BARGE_IN_ENABLED=true but semantic turn CONTROL is not "
+                "active (requires LIVEKIT_SERVER_STT_ENABLED, "
+                "LIVEKIT_SEMANTIC_TURN_DETECTION_ENABLED, and "
+                "LIVEKIT_SEMANTIC_TURN_CONTROL_ENABLED all true) - semantic barge-in has no "
+                "authoritative student turn pipeline to hand the floor to and will stay OFF."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _warn_patient_backchannel_misconfig(self) -> "Settings":
+        """Phase 6 (EXPERIMENTAL): backchanneling is layered on top of
+        semantic turn CONTROL, not barge-in - enabling it while
+        semantic_turn_control_active is False has no authoritative HOLD/END
+        decisions to schedule a backchannel around. Same fail-SAFE
+        discipline: log once, never block startup."""
+        if self.livekit_patient_backchannel_enabled and not self.semantic_turn_control_active:
+            logger.warning(
+                "LIVEKIT_PATIENT_BACKCHANNEL_ENABLED=true but semantic turn CONTROL is not "
+                "active (requires LIVEKIT_SERVER_STT_ENABLED, "
+                "LIVEKIT_SEMANTIC_TURN_DETECTION_ENABLED, and "
+                "LIVEKIT_SEMANTIC_TURN_CONTROL_ENABLED all true) - patient backchanneling has "
+                "no HOLD/END decisions to act on and will stay OFF."
+            )
+        return self
+
+    @property
+    def semantic_turn_control_active(self) -> bool:
+        """The single source of truth worker.py reads to decide whether
+        Smart Turn's HOLD/END decision is authoritative for a session - true
+        only when all three Phase 2/3/4 flags agree. Never crashes/raises;
+        a partial/inconsistent config simply evaluates to False (see
+        _warn_semantic_turn_control_misconfig above for the accompanying log)."""
+        return (
+            self.livekit_semantic_turn_control_enabled
+            and self.livekit_server_stt_enabled
+            and self.livekit_semantic_turn_detection_enabled
+        )
+
+    @property
+    def semantic_barge_in_active(self) -> bool:
+        """Phase 5A: true only when barge-in is enabled AND semantic turn
+        control is already active - barge-in can never be "more active"
+        than the turn-control pipeline it depends on. See
+        _warn_semantic_barge_in_misconfig above for the accompanying log."""
+        return self.livekit_semantic_barge_in_enabled and self.semantic_turn_control_active
+
+    @property
+    def patient_backchannel_active(self) -> bool:
+        """Phase 6: true only when backchanneling is enabled AND semantic
+        turn control is already active. Deliberately independent of
+        semantic_barge_in_active - backchannel cancellation uses its own
+        mechanism (VAD speech_started), not the Phase 5A barge-in
+        classifier. See _warn_patient_backchannel_misconfig above."""
+        return self.livekit_patient_backchannel_enabled and self.semantic_turn_control_active
 
     @property
     def cors_origin_list(self) -> list[str]:

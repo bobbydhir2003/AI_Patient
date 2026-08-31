@@ -32,6 +32,7 @@ matching the persistent worker's existing single-speaker-per-turn design.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Callable
 
@@ -43,6 +44,7 @@ from app.core.logging import get_logger
 from app.patient_engine import case_loader, generate_patient_response, speaker_router
 from app.repositories.session_repository import SessionRepository
 from app.repositories.transcript_repository import TranscriptRepository
+from app.voice.audio_cache import get_audio_cache, make_cache_key
 from app.voice.elevenlabs_client import get_elevenlabs_client
 from app.voice.speech_style_mapper import map_speech_style
 from app.voice.voice_profile_loader import load_voice_profile
@@ -210,6 +212,148 @@ def generate_and_persist_turn(
         voice_key=voice_key,
         replayed=False,
     )
+
+
+# Phase 5B: splits on whitespace following a sentence-ending punctuation
+# mark. Deliberately simple (Step 2: smallest architecture that gives a
+# REAL, provable text-to-audio boundary, not a timer-based approximation) -
+# known limitation: does not special-case abbreviations ("Dr. Smith" would
+# split into two "sentences"). This only affects sentence GROUPING for the
+# purpose of TTS/publish/spoken-tracking granularity - never the actual
+# generated text content, which is unaffected either way.
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def split_into_sentences(text: str) -> list[str]:
+    """Phase 5B (Step 2): the ONE function establishing sentence-level
+    granularity for spoken-content tracking - worker.py calls
+    synthesize_patient_audio_pcm/publishes audio once PER element of this
+    list, instead of once for the whole response, so each element gets a
+    genuine "did this sentence's audio finish publishing" boundary. Never
+    returns an empty list for non-empty input - text with no
+    sentence-ending punctuation at all (e.g. a short "Okay.") still comes
+    back as a single-element list."""
+    stripped = text.strip()
+    if not stripped:
+        return []
+    parts = [p.strip() for p in _SENTENCE_BOUNDARY_RE.split(stripped) if p.strip()]
+    return parts or [stripped]
+
+
+def finalize_partial_patient_delivery(
+    db: Session, *, patient_turn_id: str, spoken_text: str, reason: str
+) -> None:
+    """Phase 5B (Step 4/9): the ONE corrective UPDATE - called ONLY when a
+    patient turn's audio delivery was cut short (student interruption, or a
+    mid-response TTS failure) AFTER generate_and_persist_turn already
+    committed the FULL generated text (see that function's docstring - its
+    own insert/commit timing and idempotency are completely unchanged by
+    this function's existence). Rewrites the ALREADY-persisted row's
+    content down to ONLY the text whose audio genuinely finished publishing
+    (Step 5) - never the full generated text, never a time-based guess.
+    `reason` becomes the row's validation_status (Step 11: reuses the
+    EXISTING column, no schema migration) - e.g. "interrupted" or
+    "delivery_failed", so admin/debugging tooling can distinguish a
+    delivery-truncated turn from a normally-completed one. A no-op (never
+    raises) if the turn id no longer exists."""
+    repo = TranscriptRepository(db)
+    updated = repo.mark_delivery_status(patient_turn_id, content=spoken_text, validation_status=reason)
+    if updated:
+        db.commit()
+
+
+def resolve_backchannel_voice_key(case_id: str) -> str | None:
+    """Phase 6 (Step 11): resolves the voice a patient BACKCHANNEL should
+    use, WITHOUT the student's actual question text (a backchannel plays
+    during a HOLD pause, before the question is even complete). Only
+    returns a value when the case's speaker is deterministically knowable
+    in advance:
+      - single-speaker cases (e.g. Carly): always "patient".
+      - caregiver-primary-locked multi-speaker cases (e.g. Camden):
+        speaker_router.resolve_for_case's OWN caregiver-primary-lock branch
+        already ignores the question/turns entirely and always returns the
+        SAME primary speaker - safe to call with empty question/turns.
+      - any OTHER multi-participant case (none exist in this codebase
+        today, but the generic dynamic router in speaker_router.route()
+        genuinely depends on question content) - returns None. Never
+        guesses; the caller skips the backchannel entirely rather than
+        risk the wrong patient's voice (Step 11's explicit requirement)."""
+    case = case_loader.load_case(case_id)
+    if speaker_router.is_multi_participant(case) and not getattr(case, "caregiver_primary_only", False):
+        return None
+    routing = speaker_router.resolve_for_case(case, "", [])
+    _, _, voice_key = speaker_router.participant_meta(case, routing.speaker)
+    return voice_key
+
+
+def synthesize_backchannel_audio_pcm(*, case_id: str, voice_key: str, phrase: str) -> bytes | None:
+    """Phase 6 (Step 10): the SAME voice-resolution/TTS path
+    synthesize_patient_audio_pcm uses below, with ONE addition - a
+    process-level, bounded LRU cache (app.voice.audio_cache, the SAME
+    infrastructure the legacy /synthesize endpoint already uses) keyed on
+    (voice_id, model_id, phrase, settings, format). Safe to share across
+    ANY session/interview process-wide: unlike everything else this module
+    ever caches, a backchannel phrase's audio is a PURE function of
+    voice+text - no session-derived content, no student data. First
+    request for a given voice+phrase pays the real ElevenLabs latency
+    (cold start); every later request, from any session, is instant.
+
+    Returns None (never raises) on ANY failure - unavailable voice, no TTS
+    capacity, provider error - matching synthesize_patient_audio_pcm's own
+    contract. The caller treats None exactly like "skip this backchannel"
+    (Step 20: fail-open, never anything more disruptive)."""
+    resolved = load_voice_profile(case_id, speaker_id=voice_key)
+    if not resolved.available:
+        logger.warning(
+            "patient_backchannel_voice_unavailable case_id=%s voice_key=%s reason=%s",
+            case_id, voice_key, resolved.reason,
+        )
+        return None
+
+    mapped = map_speech_style(resolved.profile, None)
+    voice_settings = mapped.to_elevenlabs()
+    cache_key = make_cache_key(
+        resolved.profile.voice_id, resolved.model_id, phrase, voice_settings, LIVEKIT_PCM_OUTPUT_FORMAT,
+    )
+    cache = get_audio_cache()
+    cached = cache.get(cache_key)
+    if cached is not None:
+        logger.info(
+            "patient_backchannel_cache_hit case_id=%s voice_key=%s phrase=%r bytes=%d",
+            case_id, voice_key, phrase, len(cached),
+        )
+        return cached
+
+    slot = tts_slot().acquire()
+    if not slot.ok:
+        logger.warning("patient_backchannel_tts_no_capacity case_id=%s voice_key=%s", case_id, voice_key)
+        return None
+    try:
+        client = get_elevenlabs_client()
+        chunks = list(
+            client.stream_speech(
+                text=phrase,
+                voice_id=resolved.profile.voice_id,
+                model_id=resolved.model_id,
+                voice_settings=voice_settings,
+                output_format=LIVEKIT_PCM_OUTPUT_FORMAT,
+            )
+        )
+        pcm = b"".join(chunks)
+        cache.put(cache_key, pcm)
+        logger.info(
+            "patient_backchannel_cache_miss case_id=%s voice_key=%s phrase=%r bytes=%d",
+            case_id, voice_key, phrase, len(pcm),
+        )
+        return pcm
+    except Exception:
+        logger.exception(
+            "patient_backchannel_synthesis_failed case_id=%s voice_key=%s phrase=%r",
+            case_id, voice_key, phrase,
+        )
+        return None
+    finally:
+        slot.release()
 
 
 def synthesize_patient_audio_pcm(

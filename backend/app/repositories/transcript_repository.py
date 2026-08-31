@@ -73,6 +73,24 @@ class TranscriptRepository:
         )
         return self.db.execute(stmt).scalars().first()
 
+    def mark_delivery_status(self, turn_id: str, *, content: str, validation_status: str) -> bool:
+        """Phase 5B: the ONE corrective UPDATE path - rewrites an
+        ALREADY-persisted turn's content down to only what was genuinely
+        delivered (see patient_adapter.finalize_partial_patient_delivery),
+        and records why via the EXISTING validation_status column (no
+        schema migration - see ConversationTurn's own field, previously
+        only ever "valid"/"child_adjusted"). Returns False (a safe no-op,
+        never raises) if the turn id no longer exists - defensive only,
+        should be unreachable in practice since this is always called with
+        an id this same request just created."""
+        turn = self.db.get(ConversationTurn, turn_id)
+        if turn is None:
+            return False
+        turn.content = content
+        turn.validation_status = validation_status
+        self.db.flush()
+        return True
+
     def count_nonempty_by_role(self, session_id: str, role: str) -> int:
         stmt = select(func.count(ConversationTurn.id)).where(
             ConversationTurn.session_id == session_id,

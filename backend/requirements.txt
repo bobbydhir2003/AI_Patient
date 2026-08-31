@@ -66,3 +66,46 @@ opentelemetry-exporter-otlp-proto-http==1.34.1
 opentelemetry-exporter-otlp-proto-common==1.34.1
 opentelemetry-proto==1.34.1
 opentelemetry-semantic-conventions==0.55b1
+#
+# Phase 2 (server-side VAD/STT on the raw student-audio path - see
+# app/livekit_agent/worker.py's _StudentVadSttPipeline). PARALLEL/
+# OBSERVATIONAL ONLY: never drives the conversation, never touches
+# student_text/turn state - browser SpeechRecognition remains the sole
+# trigger for patient generation. Both pinned to the EXACT SAME 1.3.5
+# release as livekit-agents above - LiveKit publishes its plugins in
+# lockstep with the core package; do not bump independently of that pin
+# (same verification discipline as livekit-agents's own comment above).
+# Verified compatible with the opentelemetry-*==1.34.1 pins above:
+# onnxruntime (silero's own dependency) declares an unconstrained
+# `protobuf`, so pip's resolver satisfies opentelemetry-proto's
+# `protobuf<6.0,>=5.0` ceiling (resolves to protobuf==5.29.6) rather than
+# conflicting with it.
+livekit-plugins-silero==1.3.5
+livekit-plugins-deepgram==1.3.5
+#
+# Phase 3 (EXPERIMENTAL semantic turn detection - see
+# app/livekit_agent/turn_detector.py's SmartTurnDetector). OBSERVATIONAL
+# ONLY: a HOLD/END decision never drives the conversation. Deliberately
+# does NOT depend on the `pipecat-ai` package - see turn_detector.py's
+# module docstring: importing it globally monkeypatches asyncio.wait_for on
+# Python < 3.12 (this project's runtime), which livekit-agents' own
+# job-process supervision code (ipc/supervised_proc.py,
+# ipc/job_thread_executor.py) uses directly. Instead this loads the vendored
+# Smart Turn v3.2 ONNX model (app/livekit_agent/models/, BSD-2-Clause, see
+# that directory's NOTICE.md) via onnxruntime + transformers directly.
+#
+# onnxruntime pinned to the EXACT SAME version livekit-plugins-silero above
+# already resolves to (1.23.1) - reuses one onnxruntime install rather than
+# introducing a second version to resolve.
+onnxruntime==1.23.1
+#
+# transformers pinned exactly (not left as a bare range) because the
+# unconstrained range pipecat-ai itself declares (<6,>=4.48.0) resolves to a
+# brand-new major version (5.16.1 observed) with no verification it behaves
+# identically for WhisperFeatureExtractor. 4.57.1 is the SAME upper bound
+# livekit-plugins-turn-detector==1.3.5 (a first-party, actively-maintained
+# LiveKit plugin) itself pins against (<=4.57.1,>=4.47.1) - reusing their
+# verified-compatible ceiling rather than picking one blind. Verified:
+# WhisperFeatureExtractor requires no network access and no torch/
+# tensorflow/flax at runtime (pure numpy feature extraction).
+transformers==4.57.1
