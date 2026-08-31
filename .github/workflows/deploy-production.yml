@@ -310,12 +310,41 @@ jobs:
           node-version: "24"
           cache: "npm"
 
+      # VITE_API_BASE_URL="" is deliberate, not an oversight: Vite inlines
+      # import.meta.env.VITE_API_BASE_URL at build time, and src/services/
+      # api.ts's `?? "http://localhost:8000"` fallback only fires for
+      # null/undefined - an explicit empty string is NOT nullish, so it wins
+      # over the dev-only fallback without touching that source file or
+      # local development (which still gets the localhost fallback when this
+      # var is simply unset, e.g. `npm run dev` outside CI). An empty base
+      # makes every request same-origin-relative (`/api/auth/login`,
+      # `/api/livekit/token`), which nginx already proxies correctly to
+      # ptai.service - see docs/production-deployment-architecture.md. This
+      # is what was missing: this build previously ran with no
+      # VITE_API_BASE_URL at all, so the localhost fallback shipped straight
+      # into the production bundle.
       - name: Build frontend
         timeout-minutes: 10
+        env:
+          VITE_API_BASE_URL: ""
         run: |
           set -euo pipefail
           npm ci
           npm run build
+
+      # Fails loudly and immediately if the localhost fallback ever ends up
+      # in a production bundle again (wrong env var name, a future
+      # accidental unset, a build tool change) - catches the exact defect
+      # this step exists to prevent, rather than letting it silently reach
+      # production the way it did before.
+      - name: Verify production build has no localhost fallback
+        run: |
+          set -euo pipefail
+          if grep -r "localhost:8000" dist/assets/ 2>/dev/null; then
+            echo "::error::Production build contains 'localhost:8000' - VITE_API_BASE_URL was not applied correctly. Refusing to package this build."
+            exit 1
+          fi
+          echo "Confirmed: no 'localhost:8000' in dist/assets/"
 
       # -----------------------------------------------------------------
       # Build the deterministic release artifact and upload to S3.

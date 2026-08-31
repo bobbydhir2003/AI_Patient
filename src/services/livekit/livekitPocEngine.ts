@@ -236,11 +236,21 @@ interface TurnStatusPayload {
  *   - "semantic_fallback": one-way runtime downgrade - the semantic
  *     pipeline became unhealthy server-side, browser SpeechRecognition
  *     resumes being authoritative for the rest of the session.
+ *   - "turn_ack" gains `semanticIgnored`: true only when this ack covers a
+ *     browser-originated (non-manual-override) packet the agent received
+ *     but will NOT process because semantic control is authoritative for
+ *     this session - see worker.py's _send_turn_ack/_on_data and
+ *     handleTurnAck below. Turn-ID sync fix: without this, the engine had
+ *     no way to distinguish "the agent will process this" from "the agent
+ *     merely received this," and would claim "thinking"/arm the processing
+ *     watchdog for an id that could never resolve, permanently missing the
+ *     REAL semantic_turn_started that follows for a different id.
  */
 interface AgentControlPayload {
   type?: "agent_ready" | "turn_ack" | "semantic_turn_started" | "semantic_fallback";
   clientTurnId?: string;
   semanticTurnControl?: boolean;
+  semanticIgnored?: boolean;
   reason?: string;
 }
 
@@ -657,7 +667,7 @@ export class LiveKitPocEngine {
       return;
     }
     if (parsed.type === "turn_ack") {
-      this.handleTurnAck(parsed.clientTurnId);
+      this.handleTurnAck(parsed.clientTurnId, parsed.semanticIgnored === true);
       return;
     }
     if (parsed.type === "semantic_turn_started") {
@@ -798,12 +808,33 @@ export class LiveKitPocEngine {
     });
   }
 
-  private handleTurnAck(clientTurnId: string | undefined): void {
+  /** Turn-ID sync fix: `semanticIgnored` means the agent received this
+   * browser-originated packet but will NEVER process it or send any further
+   * message for this clientTurnId (semantic control is authoritative for
+   * this session - see worker.py's _on_data/_send_turn_ack). Claiming
+   * "thinking"/arming the processing watchdog for such an id would wait
+   * forever for a patient_turn_status that can never arrive, and - worse -
+   * leaves `state` stuck at "thinking" so the REAL semantic_turn_started
+   * that follows (a different clientTurnId) gets silently dropped by
+   * handleSemanticTurnStarted's own state==="listening" guard. Returning to
+   * "listening" here (and resuming recognition, for captions) is what lets
+   * that follow-up message be adopted cleanly. */
+  private handleTurnAck(clientTurnId: string | undefined, semanticIgnored: boolean): void {
     if (!clientTurnId || clientTurnId !== this.pendingDeliveryTurnId) return; // stale/foreign ack
     this.clearDeliveryWatchdog();
-    logVoiceEvent("livekit_turn_ack_received", { correlationId: clientTurnId, engineState: this.state });
     this.pendingDeliveryTurnId = null;
     this.deliveryRetryCount = 0;
+    if (semanticIgnored) {
+      logVoiceEvent("livekit_turn_ack_semantic_ignored", { correlationId: clientTurnId, engineState: this.state });
+      this.pendingProcessingTurnId = null;
+      this.turnSentAt = null;
+      if (this.state === "thinking") {
+        this.setState("listening");
+        this.startRecognition();
+      }
+      return;
+    }
+    logVoiceEvent("livekit_turn_ack_received", { correlationId: clientTurnId, engineState: this.state });
     this.pendingProcessingTurnId = clientTurnId;
     this.armThinkingWatchdog(clientTurnId);
   }
@@ -838,22 +869,15 @@ export class LiveKitPocEngine {
       onFinal: (text) => {
         if (this.state !== "listening") return; // already moved on (e.g. a semantic turn just started)
         this.callbacks.onStudentTranscript(text, true);
-        if (this.semanticTurnControlActive) {
-          // Phase 4 (Step 6/9): the server's Deepgram + Smart Turn pipeline
-          // is authoritative here, not this browser final - do NOT call
-          // sendText() (that would move the UI to "thinking" and publish a
-          // student_text turn the backend will just ignore - see worker.py's
-          // semantic_turn_browser_text_ignored). Only surface the text for
-          // on-screen captions. No manual restart needed: Web Speech's
-          // continuous=false means onEnd fires right after every final
-          // regardless, and it already restarts whenever state is still
-          // "listening" - exactly the case here, since we never changed it.
-          logVoiceEvent("livekit_browser_final_ignored_semantic_control", {
-            engineState: this.state,
-          });
-          return;
-        }
-        void this.sendText(text);
+        // Turn-ID sync fix: the semantic-control suppression now lives
+        // centrally in sendText() itself (source: "speech_browser"), not
+        // here - this guarantees ANY caller passing that source is
+        // protected, not just this one call site. No manual recognizer
+        // restart needed either way: Web Speech's continuous=false means
+        // onEnd fires right after every final regardless, and it already
+        // restarts whenever state is still "listening" - exactly the case
+        // here, since a suppressed call never touches state.
+        void this.sendText(text, { source: "speech_browser" });
       },
       onError: () => {
         // Non-fatal: the recognizer restarts itself via onEnd below, matching
@@ -891,37 +915,72 @@ export class LiveKitPocEngine {
   }
 
   /** Send one turn of student text to the agent - called internally by the
-   * recognizer's onFinal, and PUBLICLY by a caller wanting to submit typed
-   * text through the exact same path (InterviewPage's typed chat input while
-   * LiveKit mode is active - see useLiveKitInterviewVoice.ts). A no-op while
-   * not "listening" (already waiting for the agent/thinking/speaking/etc.) -
-   * the same guard the recognizer path relies on; this is also what
-   * guarantees a turn can never be sent while WAITING_FOR_AGENT. See
-   * interruptPatient() below for the separate SPEAKING-only barge-in path -
-   * sending typed/spoken text is never itself how a patient turn is
-   * interrupted. */
-  async sendText(text: string): Promise<void> {
+   * recognizer's onFinal (source: "speech_browser"), and PUBLICLY by a
+   * caller wanting to submit typed text through the exact same path
+   * (InterviewPage's typed chat input while LiveKit mode is active - see
+   * useLiveKitInterviewVoice.ts's submitExternal, source: "manual_typed").
+   * A no-op while not "listening" (already waiting for the agent/thinking/
+   * speaking/etc.) - the same guard the recognizer path relies on; this is
+   * also what guarantees a turn can never be sent while WAITING_FOR_AGENT.
+   * See interruptPatient() below for the separate SPEAKING-only barge-in
+   * path - sending typed/spoken text is never itself how a patient turn is
+   * interrupted.
+   *
+   * Turn-ID sync fix: `options.source` defaults to "manual_typed" - the
+   * NEVER-suppressed source - so every pre-existing caller that doesn't pass
+   * it (tests, any future external caller) keeps today's unconditional-send
+   * behavior with zero changes required there. Only a caller that
+   * deliberately opts into "speech_browser" (currently just onFinal above)
+   * gets the new suppression: while semantic turn control is active, a
+   * "speech_browser" source is dropped here - centrally, not just in
+   * onFinal - matching worker.py's own source-aware ignore logic (_on_data):
+   * a browser SpeechRecognition final is never authoritative once the
+   * server's Deepgram + Smart Turn pipeline governs turn completion for this
+   * session. "manual_typed" is a deliberate student action (the Send
+   * button), not a race-prone recognizer guess, and is NEVER suppressed
+   * here - the backend's TurnSource.MANUAL_OVERRIDE exempts it from its own
+   * ignore-path too, so typed Send keeps working exactly as before whether
+   * or not semantic control is on for this session. */
+  async sendText(
+    text: string,
+    options: { source: "speech_browser" | "manual_typed" } = { source: "manual_typed" },
+  ): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed || !this.room || this.state !== "listening") return;
+    if (options.source === "speech_browser" && this.semanticTurnControlActive) {
+      // The server's Deepgram + Smart Turn pipeline is authoritative here -
+      // do NOT publish (that would move the UI to "thinking" for a turn the
+      // backend will just ignore). Captions already happened in onFinal
+      // before this call, independent of this guard.
+      logVoiceEvent("livekit_browser_final_ignored_semantic_control", { engineState: this.state });
+      return;
+    }
     const clientTurnId = newClientTurnId();
     this.pendingDeliveryTurnId = clientTurnId;
     this.pendingProcessingTurnId = null;
     this.deliveryRetryCount = 0;
     this.turnSentAt = Date.now();
     this.setState("thinking");
-    await this.publishStudentText(clientTurnId, trimmed);
+    await this.publishStudentText(clientTurnId, trimmed, options.source);
   }
 
   /** Publishes (or re-publishes, on an automatic retry) the student_text
    * packet, targeted directly at the patient agent's identity (Phase C: no
    * more blind broadcast), and arms the delivery/ACK watchdog. Called both
    * by sendText() (first attempt) and by the delivery watchdog itself (retry
-   * attempts) - always with the SAME clientTurnId. */
-  private async publishStudentText(clientTurnId: string, text: string): Promise<void> {
+   * attempts) - always with the SAME clientTurnId AND source. `source` rides
+   * along in the payload so worker.py's _on_data can apply its own
+   * source-aware semantic-ignore/manual-override logic - see sendText's
+   * docstring. */
+  private async publishStudentText(
+    clientTurnId: string,
+    text: string,
+    source: "speech_browser" | "manual_typed",
+  ): Promise<void> {
     if (!this.room) return;
     logVoiceEvent("livekit_turn_publish_started", { correlationId: clientTurnId, engineState: this.state });
-    this.armDeliveryWatchdog(clientTurnId, text);
-    const payload = new TextEncoder().encode(JSON.stringify({ text, clientTurnId }));
+    this.armDeliveryWatchdog(clientTurnId, text, source);
+    const payload = new TextEncoder().encode(JSON.stringify({ text, clientTurnId, source }));
     try {
       await this.room.localParticipant.publishData(payload, {
         reliable: true,
@@ -946,7 +1005,11 @@ export class LiveKitPocEngine {
    * the SAME clientTurnId/text automatically (up to MAX_DELIVERY_RETRIES
    * times, entirely internally - no UI prompt, no retry button anywhere),
    * then give up with an explicit, internally-categorized error. */
-  private armDeliveryWatchdog(clientTurnId: string, text: string): void {
+  private armDeliveryWatchdog(
+    clientTurnId: string,
+    text: string,
+    source: "speech_browser" | "manual_typed",
+  ): void {
     this.deliveryWatchdog = window.setTimeout(() => {
       this.deliveryWatchdog = null;
       if (this.pendingDeliveryTurnId !== clientTurnId) return; // already acked/invalidated
@@ -958,7 +1021,7 @@ export class LiveKitPocEngine {
         logVoiceEvent("livekit_turn_auto_retry", {
           correlationId: clientTurnId, engineState: this.state, attempt: this.deliveryRetryCount,
         });
-        void this.publishStudentText(clientTurnId, text);
+        void this.publishStudentText(clientTurnId, text, source);
       } else {
         this.pendingDeliveryTurnId = null;
         logVoiceEvent("livekit_turn_delivery_failed", {

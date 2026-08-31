@@ -230,9 +230,15 @@ export function useLiveKitInterviewVoice(
   /** Typed input while LiveKit mode is active: sends through the SAME
    * engine.sendText() a spoken final transcript would use - same
    * "listening only" guard inside the engine, so a message typed while
-   * thinking/speaking is safely dropped rather than double-submitted. */
+   * thinking/speaking is safely dropped rather than double-submitted.
+   * source: "manual_typed" is what keeps this working as an explicit
+   * student turn even when semantic turn control is active for this
+   * session - see sendText's docstring and worker.py's
+   * TurnSource.MANUAL_OVERRIDE for why a deliberate typed Send is exempted
+   * from the "browser text is non-authoritative under semantic control"
+   * rule that governs "speech_browser"-sourced (SpeechRecognition) text. */
   const submitExternal = useCallback((text: string) => {
-    void engineRef.current?.sendText(text);
+    void engineRef.current?.sendText(text, { source: "manual_typed" });
   }, []);
 
   // Full cleanup on unmount - the room/mic must never stay connected.

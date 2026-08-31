@@ -59,8 +59,14 @@ def _seed_session(engine, *, case_id="carly"):
 class _StudentTextPacket:
     topic = "student_text"
 
-    def __init__(self, text: str, client_turn_id: str):
-        self.data = json.dumps({"text": text, "clientTurnId": client_turn_id}).encode()
+    def __init__(self, text: str, client_turn_id: str, source: str | None = None):
+        payload: dict = {"text": text, "clientTurnId": client_turn_id}
+        # source omitted entirely when None - exercises worker.py's own
+        # default-to-"speech_browser" fallback for a legacy/pre-Phase-4
+        # frontend build that never sends this field at all.
+        if source is not None:
+            payload["source"] = source
+        self.data = json.dumps(payload).encode()
 
 
 async def _run_until_idle(iterations: int = 30) -> None:
