@@ -140,7 +140,15 @@ export type VoiceEvent =
   // request/ack/timeout lifecycle these correspond to.
   | "livekit_interrupt_requested"
   | "livekit_interrupt_completed"
-  | "livekit_interrupt_failed";
+  | "livekit_interrupt_failed"
+  // --- Phase 4 (EXPERIMENTAL semantic turn control - see worker.py's
+  // PocAgentSession/_CandidateTurnCoordinator). browser SpeechRecognition
+  // is diagnostic-only while semanticTurnControlActive is true; these
+  // events let a report be attributed to whichever side (browser vs
+  // server) actually drove/skipped a given turn.
+  | "livekit_semantic_turn_started_received"
+  | "livekit_semantic_fallback_received"
+  | "livekit_browser_final_ignored_semantic_control";
 
 /** Stage-level failure category. See file header for how these map to the
  * report categories STATUS_PROBE_TRANSIENT / STATUS_CONFIRMED_UNAVAILABLE /
@@ -205,6 +213,11 @@ export interface VoiceEventMeta {
    * every time Start is pressed after a Stop/refresh/leave-return. An opaque
    * identifier only - never patient content, never a secret. */
   connectionId?: string;
+  /** Phase 4: LiveKitPocEngine.semanticTurnControlActive at event time -
+   * whether the backend's Smart Turn decision (not browser
+   * SpeechRecognition) is currently authoritative for this session's
+   * student turn completion. Engine lifecycle only. */
+  semanticTurnControlActive?: boolean;
 }
 
 export interface VoiceCounters {

@@ -75,8 +75,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # fetch-depth: 0 (full history for the checked-out PR ref) is required
+      # by the "git diff --check (PR diff only)" step at the bottom of this
+      # job: its three-dot diff needs a real, graph-walkable merge-base
+      # against the base branch. The default fetch-depth: 1 shallow checkout
+      # cuts the commit graph at the single checked-out commit - even
+      # explicitly fetching the base branch's tip separately does not help,
+      # since git's shallow boundary hides the parent link entirely rather
+      # than merely omitting a ref name (verified locally: "no merge base"
+      # persists even once the exact right commit is fetched under another
+      # name). No other step in this job needs shallow/fast checkout.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Node 24: satisfies Vite 8's engines requirement (^20.19.0 || >=22.12.0,
       # per package-lock.json) and matches this project's own @types/node
@@ -136,6 +148,35 @@ jobs:
 
       - name: Production build (vite build)
         run: npm run build
+
+      # The full-history checkout above (fetch-depth: 0) makes the merge-base
+      # this step needs graph-walkable, but it does not by itself create a
+      # local origin/<base> remote-tracking ref - only the PR's own merge
+      # ref was ever named locally, which is why "origin/main" was
+      # previously an "unknown revision" here. Fetch the PR's actual base
+      # branch explicitly - via github.base_ref, never a hardcoded "main" -
+      # so this also resolves correctly for PRs targeting any other branch.
+      #
+      # --prune was dropped: it prunes according to whatever
+      # remote.origin.fetch refspec(s) actions/checkout persisted for this
+      # PR checkout (narrow/PR-scoped, not the standard wildcard), and mixing
+      # that configured refspec with a one-off command-line refspec is a
+      # known source of surprising, git-version-dependent prune behavior -
+      # observed in CI as this exact ref going missing again immediately
+      # after a "successful" fetch. --prune serves no purpose here anyway
+      # (this fetch only ever creates/updates one named ref, nothing to
+      # clean up). The leading "+" forces the destination to be
+      # created/fast-forwarded/reset unconditionally, and the explicit
+      # rev-parse --verify fails this step loudly and immediately if the ref
+      # still isn't resolvable, instead of surfacing two steps later as a
+      # confusing "ambiguous argument" from git diff.
+      - name: Fetch PR base ref (for git diff --check below)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -e
+          git fetch --no-tags origin "+${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          git rev-parse --verify --quiet "refs/remotes/origin/${{ github.base_ref }}" >/dev/null \
+            || { echo "::error::origin/${{ github.base_ref }} did not resolve after fetch"; exit 1; }
 
       # Only meaningful against an actual introduced diff (a fresh checkout's
       # working tree is always clean) - check the PR's own diff for

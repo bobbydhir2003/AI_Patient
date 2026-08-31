@@ -218,10 +218,30 @@ interface TurnStatusPayload {
 
 /** Control-plane messages the agent sends on AGENT_CONTROL_TOPIC - readiness
  * and turn-delivery acknowledgement. Distinct from patient_turn_status
- * (turn/audio lifecycle) so the two concerns can evolve independently. */
+ * (turn/audio lifecycle) so the two concerns can evolve independently.
+ *
+ * Phase 4 (EXPERIMENTAL semantic turn control - see worker.py's
+ * PocAgentSession): three additions, all additive/backward-compatible -
+ * an older engine build simply never reads them and keeps today's
+ * browser-authoritative behavior.
+ *   - "agent_ready" gains `semanticTurnControl`: true only when the
+ *     backend's Smart Turn HOLD/END decision - not browser
+ *     SpeechRecognition - is authoritative for this session's student
+ *     turn completion (see handleAgentControl/semanticTurnControlActive).
+ *   - "semantic_turn_started": the server decided (Smart Turn END) that a
+ *     real patient turn is now processing - the ONE new event this phase
+ *     adds; everything after this (speaking_started/speaking_ended/failed)
+ *     reuses the EXISTING patient_turn_status protocol unchanged, keyed by
+ *     the SAME clientTurnId (see handleSemanticTurnStarted).
+ *   - "semantic_fallback": one-way runtime downgrade - the semantic
+ *     pipeline became unhealthy server-side, browser SpeechRecognition
+ *     resumes being authoritative for the rest of the session.
+ */
 interface AgentControlPayload {
-  type?: "agent_ready" | "turn_ack";
+  type?: "agent_ready" | "turn_ack" | "semantic_turn_started" | "semantic_fallback";
   clientTurnId?: string;
+  semanticTurnControl?: boolean;
+  reason?: string;
 }
 
 /** Coarse connection-milestone flags for the POC's diagnostic panel only -
@@ -275,6 +295,16 @@ export class LiveKitPocEngine {
   private pendingDeliveryTurnId: string | null = null;
   private pendingProcessingTurnId: string | null = null;
   private deliveryRetryCount = 0;
+  /** Phase 4 (EXPERIMENTAL): learned from agent_ready's additive
+   * `semanticTurnControl` field, then a ONE-WAY flag for the lifetime of
+   * this engine instance - a later "semantic_fallback" message can flip it
+   * true->false (never back), mirroring the backend's own one-way
+   * PocAgentSession._semantic_control_active. While true, a browser
+   * SpeechRecognition FINAL is diagnostic-only (see startRecognition's
+   * onFinal) - it never calls sendText()/moves the UI to "thinking"; the
+   * server drives that via "semantic_turn_started" instead (see
+   * handleSemanticTurnStarted). Reset to false in end(). */
+  private semanticTurnControlActive = false;
   /** Wall-clock time the current turn's text was FIRST sent to the agent -
    * used only to compute duration_ms for diagnostics (real-device latency
    * validation), never persisted or sent anywhere but the telemetry ping. */
@@ -432,6 +462,7 @@ export class LiveKitPocEngine {
     const generation = ++this.startupGeneration;
     this.micReady = false;
     this.agentReadyReceived = false;
+    this.semanticTurnControlActive = false;
     this.diagnostics = { ...INITIAL_DIAGNOSTICS };
     this.callbacks.onDiagnostics(this.diagnostics);
     this.setState("connecting");
@@ -614,15 +645,63 @@ export class LiveKitPocEngine {
       if (this.agentReadyReceived) return; // duplicate/late resend - already recorded
       this.agentReadyReceived = true;
       this.clearAgentReadyWatchdog();
+      // Phase 4: recorded once, at the same point agent_ready itself is
+      // recorded - this is the value startRecognition()'s onFinal reads for
+      // every subsequent recognizer cycle this session.
+      this.semanticTurnControlActive = parsed.semanticTurnControl === true;
       logVoiceEvent("livekit_agent_ready_received", {
         startupGeneration: generation, connectionId: this.connectionId ?? undefined,
+        semanticTurnControlActive: this.semanticTurnControlActive,
       });
       this.maybeEnterListening(generation);
       return;
     }
     if (parsed.type === "turn_ack") {
       this.handleTurnAck(parsed.clientTurnId);
+      return;
     }
+    if (parsed.type === "semantic_turn_started") {
+      this.handleSemanticTurnStarted(parsed.clientTurnId);
+      return;
+    }
+    if (parsed.type === "semantic_fallback") {
+      // Step 11: one-way - browser SpeechRecognition resumes being
+      // authoritative for the rest of this session (never flips back true).
+      if (!this.semanticTurnControlActive) return; // already off - no-op
+      this.semanticTurnControlActive = false;
+      logVoiceEvent("livekit_semantic_fallback_received", {
+        engineState: this.state, reason: parsed.reason ?? "unknown",
+      });
+    }
+  }
+
+  /** Phase 4 (Step 8): the server decided (Smart Turn END) that a real
+   * patient turn is now processing - the counterpart to sendText() for a
+   * SERVER-originated turn (no prior browser publish, so no delivery/ack
+   * phase - this goes straight to "processing"). Everything downstream
+   * (speaking_started/speaking_ended/failed) reuses handleTurnStatus
+   * unchanged, correlated by this SAME clientTurnId. Ignored while not
+   * "listening" (already mid-turn, or stale/duplicate) - mirrors sendText's
+   * own guard so a late/duplicate semantic_turn_started can never clobber
+   * an already-in-flight turn. */
+  private handleSemanticTurnStarted(clientTurnId: string | undefined): void {
+    if (!clientTurnId || this.state !== "listening") return;
+    logVoiceEvent("livekit_semantic_turn_started_received", {
+      correlationId: clientTurnId, engineState: this.state,
+    });
+    // No delivery phase for a server-originated turn - go straight to
+    // "processing", matching handleTurnAck's own effect on these fields.
+    this.pendingDeliveryTurnId = null;
+    this.deliveryRetryCount = 0;
+    this.pendingProcessingTurnId = clientTurnId;
+    this.turnSentAt = Date.now();
+    this.setState("thinking");
+    this.armThinkingWatchdog(clientTurnId);
+    // Stop the currently-listening recognizer explicitly - it would end on
+    // its own shortly anyway (continuous=false), but its onEnd's own
+    // restart-while-listening check would otherwise race against the
+    // state flip above happening on the SAME tick.
+    this.stopRecognition();
   }
 
   /** Runs microphone acquisition independently of the agent-ready wait
@@ -752,9 +831,28 @@ export class LiveKitPocEngine {
   private startRecognition(): void {
     this.stopRecognition();
     this.recognizer = createRecognizer({
-      onInterim: (text) => this.callbacks.onStudentTranscript(text, false),
+      onInterim: (text) => {
+        if (this.state !== "listening") return; // stale recognizer instance - see onFinal below
+        this.callbacks.onStudentTranscript(text, false);
+      },
       onFinal: (text) => {
+        if (this.state !== "listening") return; // already moved on (e.g. a semantic turn just started)
         this.callbacks.onStudentTranscript(text, true);
+        if (this.semanticTurnControlActive) {
+          // Phase 4 (Step 6/9): the server's Deepgram + Smart Turn pipeline
+          // is authoritative here, not this browser final - do NOT call
+          // sendText() (that would move the UI to "thinking" and publish a
+          // student_text turn the backend will just ignore - see worker.py's
+          // semantic_turn_browser_text_ignored). Only surface the text for
+          // on-screen captions. No manual restart needed: Web Speech's
+          // continuous=false means onEnd fires right after every final
+          // regardless, and it already restarts whenever state is still
+          // "listening" - exactly the case here, since we never changed it.
+          logVoiceEvent("livekit_browser_final_ignored_semantic_control", {
+            engineState: this.state,
+          });
+          return;
+        }
         void this.sendText(text);
       },
       onError: () => {

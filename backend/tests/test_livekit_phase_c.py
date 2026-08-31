@@ -112,7 +112,11 @@ def test_agent_ready_sent_after_track_published_and_session_verified(monkeypatch
 
     ready_messages = _control_messages(room, "agent_ready")
     assert len(ready_messages) == 1
-    assert ready_messages[0] == {"type": "agent_ready"}
+    # Phase 4: agent_ready now additionally carries semanticTurnControl -
+    # False here since none of the three LIVEKIT_SEMANTIC_TURN_*_ENABLED
+    # flags are set in this test (see test_livekit_phase4_semantic_control.py
+    # for the control-active case).
+    assert ready_messages[0] == {"type": "agent_ready", "semanticTurnControl": False}
     # Track publish must happen BEFORE agent_ready is announced - a student
     # must never be told "ready" before there is anything to hear from.
     assert room.local_participant.published_data[-1][1]["type"] == "agent_ready"
