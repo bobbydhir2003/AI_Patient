@@ -91,12 +91,23 @@ expect_json "fastapi-only" "$JSON" '.categories.FASTAPI | length' "1"
 # ---------------------------------------------------------------------------
 echo "=== Case: LiveKit-only ==="
 BASE=$(git -C "$REPO" rev-parse HEAD)
-commit_files "livekit change" "backend/app/livekit_agent/worker.py"
+commit_files "livekit change" "backend/app/livekit_agent/worker.py" "backend/app/livekit_agent/turn_detector.py"
 TARGET=$(git -C "$REPO" rev-parse HEAD)
 JSON=$(run_case livekit "$BASE" "$TARGET")
 expect_json "livekit-only" "$JSON" '.actions.restart_livekit' "true"
 expect_json "livekit-only" "$JSON" '.actions.restart_ptai' "false"
-expect_json "livekit-only" "$JSON" '.categories.LIVEKIT | length' "1"
+expect_json "livekit-only" "$JSON" '.categories.LIVEKIT | length' "2"
+
+# ---------------------------------------------------------------------------
+echo "=== Case: LiveKit vendored model (nested subdirectory - must classify like any other livekit_agent path, never NONE/UNKNOWN) ==="
+BASE=$(git -C "$REPO" rev-parse HEAD)
+commit_files "onnx model change" "backend/app/livekit_agent/models/smart_turn_v3_2_cpu.onnx" "backend/app/livekit_agent/models/NOTICE.md"
+TARGET=$(git -C "$REPO" rev-parse HEAD)
+JSON=$(run_case livekit_model "$BASE" "$TARGET")
+expect_json "livekit-model" "$JSON" '.categories.LIVEKIT | length' "2"
+expect_json "livekit-model" "$JSON" '.categories.UNKNOWN | length' "0"
+expect_json "livekit-model" "$JSON" '.actions.restart_livekit' "true"
+expect_json "livekit-model" "$JSON" '.actions.restart_ptai' "false"
 
 # ---------------------------------------------------------------------------
 echo "=== Case: shared backend (backend/app/* outside api/schemas/livekit) ==="
@@ -199,6 +210,17 @@ expect_json "none-paths" "$JSON" '.categories.NONE | length' "3"
 expect_json "none-paths" "$JSON" '.actions.restart_ptai' "false"
 expect_json "none-paths" "$JSON" '.actions.restart_livekit' "false"
 expect_json "none-paths" "$JSON" '.actions.build_frontend' "false"
+
+echo "=== Case: backend/.env.example (template/reference only - must NOT trigger any restart, must NOT be UNKNOWN) ==="
+BASE=$(git -C "$REPO" rev-parse HEAD)
+commit_files "env example" "backend/.env.example"
+TARGET=$(git -C "$REPO" rev-parse HEAD)
+JSON=$(run_case env_example "$BASE" "$TARGET")
+expect_json "env-example" "$JSON" '.categories.NONE | length' "1"
+expect_json "env-example" "$JSON" '.categories.UNKNOWN | length' "0"
+expect_json "env-example" "$JSON" '.actions.restart_ptai' "false"
+expect_json "env-example" "$JSON" '.actions.restart_livekit' "false"
+expect_json "env-example" "$JSON" '.actions.venv_rebuild' "false"
 
 # ---------------------------------------------------------------------------
 echo "=== Case: empty change set (base == target) ==="
