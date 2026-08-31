@@ -134,6 +134,68 @@ jobs:
       - name: test:assessment
         run: npm run test:assessment
 
+      # TEMPORARY diagnostic for the CI-only test:voice export-mismatch
+      # investigation (TypeError: svc.clearVoiceStatusCache is not a
+      # function in 23 tests, not reproducible locally with identical
+      # source/test/package.json content vs main). Prints only safe
+      # technical info - tool versions, a compiled-file existence check, a
+      # grep for one symbol name, and the compiled module's own exported
+      # names - never env vars, secrets, or file contents beyond that.
+      # Remove once the CI-specific cause is identified.
+      - name: Diagnose voice test build (temporary)
+        continue-on-error: true # diagnostic only - must never block or hide the real test:voice result below
+        run: |
+          set -e
+          echo "node version: $(node --version)"
+          echo "npm version: $(npm --version)"
+          echo "pwd: $(pwd)"
+          echo "git HEAD: $(git rev-parse HEAD)"
+
+          # Compile the exact same files test:voice compiles (same tsc
+          # invocation, same flags) so the output can be inspected before
+          # test:voice's own - functionally identical - compile step runs.
+          npx tsc src/hooks/voiceStateMachine.ts src/services/interruptionJudge.ts src/services/voicePlaybackState.ts src/services/patientVoiceService.ts src/services/streamingQueueState.ts --ignoreConfig --outDir .test-build --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --types vite/client
+
+          if [ -f .test-build/services/patientVoiceService.js ]; then
+            echo "compiled file exists: .test-build/services/patientVoiceService.js"
+          else
+            echo "compiled file MISSING: .test-build/services/patientVoiceService.js"
+          fi
+
+          echo "--- grep for clearVoiceStatusCache in compiled output ---"
+          grep -n "clearVoiceStatusCache" .test-build/services/patientVoiceService.js || echo "NOT FOUND in compiled output"
+
+          # The compiled output uses bare local specifiers (e.g. "./api",
+          # no extension), which Node's ESM loader cannot resolve directly -
+          # test-atomic-voice-fallback.mjs itself patches this before
+          # importing (same file list, same two replacements) so a naive
+          # `import()` here would fail for an unrelated reason and give a
+          # misleading answer. Mirror that exact patch so this reports what
+          # the real test actually sees.
+          echo "--- exported symbol names from compiled module (via the same patch the real test applies) ---"
+          cat > /tmp/ci_voice_diag_import.mjs <<'EOF'
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const buildDir = path.join(process.cwd(), ".test-build", "services");
+          for (const file of [
+            "patientVoiceService.js", "api.js", "textToSpeechService.js",
+            "voicePlaybackState.js", "voiceDiagnostics.js", "mobileAudio.js",
+          ]) {
+            const p = path.join(buildDir, file);
+            if (!fs.existsSync(p)) continue;
+            let code = fs.readFileSync(p, "utf8");
+            code = code.replaceAll("import.meta.env", "(globalThis.__viteEnv ?? {})");
+            code = code.replace(/from "(\.{1,2}\/[^"]+?)(\.js)?"/g, 'from "$1.js"');
+            fs.writeFileSync(p, code);
+          }
+
+          const mod = await import(path.join(buildDir, "patientVoiceService.js"));
+          console.log(Object.keys(mod).sort().join(", "));
+          EOF
+          node /tmp/ci_voice_diag_import.mjs
+          rm -f /tmp/ci_voice_diag_import.mjs
+
       - name: test:voice
         run: npm run test:voice
 
