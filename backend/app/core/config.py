@@ -230,6 +230,35 @@ class Settings(BaseSettings):
     # never-fail-startup discipline as every other experimental flag here.
     livekit_patient_backchannel_enabled: bool = False
 
+    # --- Phase 7 semantic resolution timers (EXPERIMENTAL - see worker.py's
+    # _CandidateTurnCoordinator._arm_pending_resolution/_HOLD_RECOVERY_SECONDS/
+    # _PENDING_END_GRACE_SECONDS). Fixes two confirmed turn-taking bugs on
+    # top of Phase 4 turn CONTROL: (1) a Smart Turn HOLD decision has no
+    # recovery mechanism today - if Smart Turn misjudges a genuinely
+    # complete question as HOLD and the student then waits silently for an
+    # answer, nothing ever re-evaluates and the turn stays open for the rest
+    # of the session (at most one backchannel plays, then permanent
+    # silence). (2) a Smart Turn END decision resets and submits the
+    # candidate turn immediately, so a brief natural mid-question pause
+    # ("When your pain started... were you walking or sitting?") can split
+    # into two unrelated turns. When this flag is true (and semantic turn
+    # CONTROL is already active), HOLD arms a bounded recovery deadline
+    # (anchored to the VAD END_OF_SPEECH boundary, not to when Smart Turn
+    # happens to finish evaluating) that force-commits the candidate if the
+    # student never resumes, and END defers its reset/submission behind a
+    # short, universal, cancellable grace window instead of committing
+    # instantly - either timer is cancelled immediately if the student
+    # resumes speaking, in which case the SAME semantic turn continues with
+    # no submission. Requires semantic turn CONTROL already active (there is
+    # no authoritative HOLD/END decision to arm a resolution timer around
+    # otherwise) - see semantic_resolution_timers_active and
+    # _warn_semantic_resolution_timers_misconfig below for the same
+    # fail-safe, never-fail-startup discipline as every other experimental
+    # flag here. When false (the default), HOLD/END behave byte-for-byte as
+    # they did before this phase - see _CandidateTurnCoordinator's own
+    # gating.
+    livekit_semantic_resolution_timers_enabled: bool = False
+
     # --- Voice engine selection (Phase A: flag + student-safe token endpoint
     # only - the real InterviewPage does NOT read this yet; it still always
     # uses the legacy patientVoiceService/api/voice path unconditionally).
@@ -632,6 +661,23 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _warn_semantic_resolution_timers_misconfig(self) -> "Settings":
+        """Phase 7 (EXPERIMENTAL): the HOLD-recovery/END-grace timers are
+        layered on top of semantic turn CONTROL, not backchanneling -
+        enabling them while semantic_turn_control_active is False has no
+        authoritative HOLD/END decision to arm a resolution timer around.
+        Same fail-SAFE discipline: log once, never block startup."""
+        if self.livekit_semantic_resolution_timers_enabled and not self.semantic_turn_control_active:
+            logger.warning(
+                "LIVEKIT_SEMANTIC_RESOLUTION_TIMERS_ENABLED=true but semantic turn CONTROL is "
+                "not active (requires LIVEKIT_SERVER_STT_ENABLED, "
+                "LIVEKIT_SEMANTIC_TURN_DETECTION_ENABLED, and "
+                "LIVEKIT_SEMANTIC_TURN_CONTROL_ENABLED all true) - semantic resolution timers "
+                "have no authoritative HOLD/END decision to act on and will stay OFF."
+            )
+        return self
+
     @property
     def semantic_turn_control_active(self) -> bool:
         """The single source of truth worker.py reads to decide whether
@@ -661,6 +707,16 @@ class Settings(BaseSettings):
         mechanism (VAD speech_started), not the Phase 5A barge-in
         classifier. See _warn_patient_backchannel_misconfig above."""
         return self.livekit_patient_backchannel_enabled and self.semantic_turn_control_active
+
+    @property
+    def semantic_resolution_timers_active(self) -> bool:
+        """Phase 7: true only when HOLD-recovery/END-grace timers are
+        enabled AND semantic turn control is already active. Deliberately
+        independent of patient_backchannel_active/semantic_barge_in_active -
+        resolution timers and backchanneling are separate concerns that
+        happen to both layer on top of the same turn-CONTROL prerequisite.
+        See _warn_semantic_resolution_timers_misconfig above."""
+        return self.livekit_semantic_resolution_timers_enabled and self.semantic_turn_control_active
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -244,6 +244,37 @@ _BACKCHANNEL_ECHO_GRACE_SECONDS = 1.5
 # here.
 _BACKCHANNEL_PHRASES: tuple[str, ...] = ("Mm-hmm.", "Uh-huh.", "Okay.")
 
+# Phase 7 (EXPERIMENTAL semantic resolution timers - see
+# _CandidateTurnCoordinator._arm_pending_resolution): bounded, cancellable
+# safety net for a false-HOLD (Smart Turn HOLDs a genuinely complete
+# utterance, student then waits silently for an answer - today this stays
+# open for the rest of the session, see the Phase 7 audit). Anchored to the
+# triggering boundary's VAD END_OF_SPEECH timestamp (_vad_end_at), NOT to
+# whenever Smart Turn happens to finish evaluating - so STT-grace-wait/
+# inference latency already spent counts AGAINST this budget rather than
+# stacking on top of it, keeping total worst-case latency from the
+# student's actual last word bounded and predictable regardless of STT
+# timing jitter. A plain module constant, starting value for experimental
+# tuning - not derived, see the Phase 7 design doc's timing model.
+_HOLD_RECOVERY_SECONDS = 2.3
+
+# Phase 7: bounded, cancellable, UNIVERSAL grace after every Smart Turn END
+# decision (no lexical/grammar heuristic - see the Phase 7 design doc for
+# why a text-based classifier was rejected) before the candidate is reset
+# and submitted - lets a brief natural pause ("When your pain started...
+# were you walking or sitting?") rejoin the SAME semantic turn instead of
+# splitting into two. Same VAD-END anchoring principle as
+# _HOLD_RECOVERY_SECONDS above, though the effect size is smaller given how
+# short this window is. Starting value for experimental tuning.
+_PENDING_END_GRACE_SECONDS = 0.4
+
+# Phase 7: the two kinds of pending semantic resolution a coordinator can
+# have armed - see _CandidateTurnCoordinator._arm_pending_resolution. Never
+# more than one armed at a time for a given coordinator (single-slot
+# invariant - see _CandidateTurnCoordinator._pending_kind).
+_HOLD_RECOVERY_KIND = "hold_recovery"
+_PENDING_END_KIND = "pending_end"
+
 
 class TurnSource(str, Enum):
     """Phase 4: explicit turn-origin concept (Step 3). Exactly one of these
@@ -412,6 +443,34 @@ class _StudentVadSttPipeline:
 
         try:
             async for event in self._stt_stream:
+                if event.type == agents_stt.SpeechEventType.END_OF_SPEECH:
+                    # Phase 7 (diagnostic only): checked BEFORE the
+                    # `alternatives`-empty guard below, since this event
+                    # (derived by the plugin from Deepgram's own
+                    # speech_final - a SEPARATE, differently-tuned
+                    # endpointing signal from Silero's VAD) never carries
+                    # any alternatives and would otherwise be silently
+                    # skipped by that guard. The Deepgram plugin already
+                    # emits this but worker.py has never consumed it
+                    # before now. Logged ONLY for future correlation/
+                    # analysis - deliberately does NOT submit, shorten any
+                    # timer, or otherwise influence any decision (see the
+                    # Phase 7 design doc's explicit "log only, not sole
+                    # authority, not even an accelerator yet" decision).
+                    pending_kind = pending_turn_id = pending_elapsed_ms = None
+                    if self._candidate_turn is not None:
+                        pending_kind, pending_turn_id, pending_elapsed_ms = (
+                            self._candidate_turn.diagnostic_pending_resolution_state()
+                        )
+                    logger.info(
+                        "student_stt_native_end_of_speech session_id=%s identity=%s track=%s "
+                        "semantic_turn_id=%s pending_resolution_kind=%s "
+                        "pending_resolution_elapsed_ms=%s",
+                        self._session_id, self._identity, self._track_sid,
+                        pending_turn_id or "-", pending_kind or "-",
+                        f"{pending_elapsed_ms:.0f}" if pending_elapsed_ms is not None else "-",
+                    )
+                    continue
                 if not event.alternatives:
                     continue
                 text = event.alternatives[0].text
@@ -428,11 +487,25 @@ class _StudentVadSttPipeline:
                         f"{elapsed_ms:.0f}" if elapsed_ms is not None else "-", text,
                     )
                 elif event.type == agents_stt.SpeechEventType.FINAL_TRANSCRIPT:
+                    # Phase 7 (diagnostic only - see the Phase 7 design doc's
+                    # "STT final diagnostics" note): these fields are already
+                    # computed by the plugin (SpeechData.start_time/end_time
+                    # from Deepgram's own per-word timestamps, request_id/
+                    # confidence from the same response) but were previously
+                    # discarded before ever reaching a log line. Logged here
+                    # PURELY for future observability/analysis - never read
+                    # by on_final_transcript, never used for ordering or
+                    # ownership decisions (that remains explicitly out of
+                    # scope for this phase).
+                    alt = event.alternatives[0]
                     logger.info(
                         "student_stt_final session_id=%s identity=%s track=%s "
-                        "partial_count=%d elapsed_since_speech_started_ms=%s text=%r",
+                        "partial_count=%d elapsed_since_speech_started_ms=%s text=%r "
+                        "start_time=%s end_time=%s confidence=%s request_id=%s",
                         self._session_id, self._identity, self._track_sid, self._partial_count,
                         f"{elapsed_ms:.0f}" if elapsed_ms is not None else "-", text,
+                        f"{alt.start_time:.3f}", f"{alt.end_time:.3f}", f"{alt.confidence:.3f}",
+                        event.request_id or "-",
                     )
                     # Phase 3: hands this final segment to the EXPERIMENTAL
                     # candidate-turn transcript accumulator (see
@@ -567,6 +640,30 @@ class _CandidateTurnCoordinator:
     _speaking_client_turn_id sense and could arrive regardless of any other
     state. All three are None together whenever backchanneling is off -
     zero behavior change from Phase 5B.
+
+    Phase 7 (EXPERIMENTAL semantic resolution timers): `resolution_timers_enabled`
+    (only True when PocAgentSession.settings.semantic_resolution_timers_active
+    is True - see _maybe_start_turn_detector) gates a SINGLE pending-resolution
+    slot (`_pending_kind`/`_pending_turn_id`/`_pending_task` - never two
+    independent timer states that could coexist) armed on EVERY HOLD or END
+    decision once semantic control is active: HOLD arms a bounded recovery
+    deadline (fixes "Smart Turn HOLDs a genuinely complete question and the
+    student is then left with silence forever" - there was previously no
+    recovery from a false HOLD at all); END arms a short universal grace
+    instead of resetting/submitting immediately (fixes "a brief natural
+    pause splits one utterance into two turns"). Both are cancelled the
+    instant on_speech_started fires (same turn continues, nothing submitted)
+    and otherwise converge on the SAME shared commit path
+    (_commit_pending_resolution) that HOLD/END already used before this
+    phase - see _arm_pending_resolution/_cancel_pending_resolution. When
+    False (the default), HOLD/END behave byte-for-byte as they did before
+    this phase existed. `on_before_commit`, when supplied, is called
+    (sync, like on_student_resumed) immediately before a commit proceeds -
+    lets PocAgentSession explicitly stop any pending/playing backchannel
+    through its EXISTING cancellation mechanism before the real patient
+    turn's audio starts publishing, rather than relying only on the
+    "new speech cancels it" invariant (which does not hold for a
+    HOLD-recovery commit - by definition no new speech occurred).
     """
 
     def __init__(
@@ -584,6 +681,8 @@ class _CandidateTurnCoordinator:
         on_hold: Callable[[str, str, "float | None"], None] | None = None,
         on_student_resumed: Callable[[], None] | None = None,
         is_backchannel_echo: Callable[[str], bool] | None = None,
+        resolution_timers_enabled: bool = False,
+        on_before_commit: Callable[[], None] | None = None,
     ) -> None:
         self._session_id = session_id
         self._identity = identity
@@ -615,6 +714,29 @@ class _CandidateTurnCoordinator:
         self._on_hold = on_hold
         self._on_student_resumed = on_student_resumed
         self._is_backchannel_echo = is_backchannel_echo
+        self._resolution_timers_enabled = resolution_timers_enabled
+        self._on_before_commit = on_before_commit
+        # Phase 7: anchor timestamp for _HOLD_RECOVERY_SECONDS/
+        # _PENDING_END_GRACE_SECONDS deadlines - captured at the START of
+        # on_speech_ended (the VAD END_OF_SPEECH boundary), NOT when Smart
+        # Turn happens to finish evaluating, so STT-grace-wait/inference
+        # latency already spent counts against the budget rather than
+        # extending it. Overwritten on every boundary; only the value at
+        # the boundary that actually produces a HOLD/END decision matters.
+        self._vad_end_at: float | None = None
+        # Phase 7: the SINGLE pending-resolution slot (Step: "one semantic
+        # candidate -> at most one pending resolution" invariant) - never
+        # two independent timer fields that could accidentally both be
+        # armed. `_pending_kind` is one of _HOLD_RECOVERY_KIND/
+        # _PENDING_END_KIND when armed, None otherwise; the other four
+        # fields are only meaningful together with it (all None when
+        # `_pending_kind` is None) - see _arm_pending_resolution/
+        # _cancel_pending_resolution/_commit_pending_resolution.
+        self._pending_kind: str | None = None
+        self._pending_turn_id: str | None = None
+        self._pending_task: "asyncio.Task[None] | None" = None
+        self._pending_armed_at: float | None = None
+        self._pending_probability: float | None = None
         # Phase 5A: text accumulated WHILE the patient is speaking, re-
         # classified as a whole on every new final (Step 9) - kept entirely
         # separate from _candidate_segments until/unless promoted (Step 7.9)
@@ -671,9 +793,16 @@ class _CandidateTurnCoordinator:
         the earliest possible "the student is talking again" signal,
         regardless of every other branch below. A harmless no-op when there
         is no pending/playing backchannel to cancel (PocAgentSession checks
-        that itself); this class has no idea whether one exists."""
+        that itself); this class has no idea whether one exists.
+
+        Phase 7: cancels any armed pending-resolution timer (HOLD recovery
+        or END grace) FIRST, before on_student_resumed and before any
+        candidate-state mutation below - the earliest possible point, so a
+        HOLD_RECOVERY/PENDING_END deadline can never fire once genuinely
+        new speech has started. A harmless no-op when nothing is armed."""
         if self._closed:
             return
+        self._cancel_pending_resolution(reason="student_resumed")
         if self._on_student_resumed is not None:
             self._on_student_resumed()
         if (
@@ -824,6 +953,12 @@ class _CandidateTurnCoordinator:
             self._barge_in_buffer = []
             self._pending_final_event.clear()
             return
+        # Phase 7: anchor for HOLD_RECOVERY/PENDING_END deadlines - see
+        # __init__'s _vad_end_at docstring note. Captured unconditionally
+        # (even if the in-flight guard below ends up skipping evaluation
+        # for THIS boundary) since only the value captured at whichever
+        # boundary actually produces a decision matters.
+        self._vad_end_at = time.monotonic()
         self._metric_boundaries += 1
         self._pending_final_event.clear()
         if self._eval_task is not None and not self._eval_task.done():
@@ -899,17 +1034,11 @@ class _CandidateTurnCoordinator:
                     result.inference_ms, len(self._candidate_segments), total_turn_str,
                     stt_final_pending, transcript, candidate_turn_id or "-",
                 )
-                # Reset BEFORE firing submission (Step 4/10) - the NEXT
-                # candidate turn (if speech starts again while this one's
-                # patient response is still generating) gets a fresh id, and
-                # a stray re-evaluation of THIS boundary can never resubmit
-                # the same candidate_turn_id.
-                self._reset_candidate_turn()
                 if self._on_end is None:
                     # Phase 3 default (control off/not-yet-active) -
                     # byte-for-byte the original observational-only
-                    # behavior: log and reset, nothing else.
-                    pass
+                    # behavior: reset, nothing else.
+                    self._reset_candidate_turn()
                 elif not transcript or candidate_turn_id is None:
                     # Step 10: END with an empty/unusable candidate
                     # transcript - never submit an empty turn to OpenAI.
@@ -918,7 +1047,16 @@ class _CandidateTurnCoordinator:
                         "semantic_turn_id=%s",
                         self._session_id, self._identity, self._track_sid, candidate_turn_id or "-",
                     )
-                else:
+                    self._reset_candidate_turn()
+                elif not self._resolution_timers_enabled:
+                    # Phase 7 flag OFF (default) - byte-for-byte the
+                    # pre-Phase-7 behavior: reset BEFORE firing submission
+                    # (Step 4/10 - the NEXT candidate turn, if speech starts
+                    # again while this one's patient response is still
+                    # generating, gets a fresh id, and a stray
+                    # re-evaluation of THIS boundary can never resubmit the
+                    # same candidate_turn_id), then fire-and-forget on_end.
+                    self._reset_candidate_turn()
                     # Fire-and-forget (Step 4): the actual patient-generation
                     # pipeline (turn lock, OpenAI, TTS, audio publish) can
                     # take many seconds - awaiting it here would block this
@@ -927,6 +1065,17 @@ class _CandidateTurnCoordinator:
                     # PocAgentSession's own _turn_lock is what actually
                     # serializes patient generation.
                     asyncio.ensure_future(self._on_end(candidate_turn_id, transcript))
+                else:
+                    # Phase 7 flag ON: universal END grace - EVERY END gets
+                    # this, deliberately no lexical/grammar heuristic (see
+                    # the Phase 7 design doc for why a text classifier was
+                    # rejected as unreliable). Do NOT reset yet - preserve
+                    # candidate audio/transcript/turn id exactly like a
+                    # HOLD would, so a brief natural pause can still rejoin
+                    # this SAME turn if the student resumes before the
+                    # deadline (see on_speech_started's
+                    # _cancel_pending_resolution call).
+                    self._arm_pending_resolution(kind=_PENDING_END_KIND, probability=result.probability)
             else:
                 self._metric_hold += 1
                 self._consecutive_errors = 0
@@ -963,6 +1112,20 @@ class _CandidateTurnCoordinator:
                     self._on_hold(self._candidate_turn_id, transcript, result.probability)
                 # HOLD: deliberately preserve candidate_audio/candidate_segments/
                 # turn_started_at - see class docstring.
+                # Phase 7: arm the false-HOLD recovery deadline whenever
+                # resolution timers are enabled AND semantic control is
+                # genuinely active (on_end is the same "is this authoritative"
+                # signal every other Phase-4+ feature here already gates on) -
+                # fixes "Smart Turn HOLDs a genuinely complete question and
+                # the student is left with silence forever" (there was
+                # previously NO recovery from a false HOLD at all). A no-op
+                # when the flag is off - byte-for-byte pre-Phase-7 behavior.
+                if (
+                    self._resolution_timers_enabled
+                    and self._on_end is not None
+                    and self._candidate_turn_id is not None
+                ):
+                    self._arm_pending_resolution(kind=_HOLD_RECOVERY_KIND, probability=result.probability)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -978,6 +1141,190 @@ class _CandidateTurnCoordinator:
             ):
                 self._on_unhealthy("detector_repeated_errors")
 
+    def _arm_pending_resolution(self, *, kind: str, probability: "float | None") -> None:
+        """Phase 7: arms the SINGLE pending-resolution slot for the CURRENT
+        candidate turn. Defensively cancels/clears any existing one first
+        (Step: "entering a new resolution must defensively cancel/clear an
+        existing one") - should be structurally unreachable given both
+        callers' own gating (a candidate turn only ever produces ONE
+        HOLD/END decision per boundary), but cheap to guarantee regardless.
+        No-op if there is no active candidate turn to arm against
+        (defensive - both callers already check this).
+
+        Deadline is anchored to self._vad_end_at (the VAD END_OF_SPEECH
+        timestamp for the boundary that produced this decision), NOT to
+        `time.monotonic()` right now - see __init__'s _vad_end_at note for
+        why this matters (STT-grace-wait/inference latency already spent
+        must count AGAINST the budget, never stack on top of it)."""
+        turn_id = self._candidate_turn_id
+        if turn_id is None:
+            return
+        self._cancel_pending_resolution(reason="superseded")
+        configured_seconds = (
+            _HOLD_RECOVERY_SECONDS if kind == _HOLD_RECOVERY_KIND else _PENDING_END_GRACE_SECONDS
+        )
+        anchor = self._vad_end_at if self._vad_end_at is not None else time.monotonic()
+        deadline = anchor + configured_seconds
+        now = time.monotonic()
+        delay = max(0.0, deadline - now)
+        self._pending_kind = kind
+        self._pending_turn_id = turn_id
+        self._pending_armed_at = now
+        self._pending_probability = probability
+        self._pending_task = asyncio.ensure_future(
+            self._resolve_pending_resolution(kind=kind, turn_id=turn_id, delay=delay)
+        )
+        started_event = (
+            "semantic_hold_recovery_started" if kind == _HOLD_RECOVERY_KIND
+            else "semantic_pending_end_started"
+        )
+        probability_str = f"{probability:.4f}" if probability is not None else "-"
+        audio_duration_ms = (
+            (self._candidate_audio_samples / self._sample_rate) * 1000 if self._sample_rate else 0.0
+        )
+        transcript = " ".join(self._candidate_segments).strip()
+        logger.info(
+            "%s session_id=%s identity=%s track=%s semantic_turn_id=%s probability=%s "
+            "candidate_text=%r candidate_audio_duration_ms=%.0f configured_seconds=%.3f "
+            "remaining_seconds=%.3f",
+            started_event, self._session_id, self._identity, self._track_sid, turn_id,
+            probability_str, transcript, audio_duration_ms, configured_seconds, delay,
+        )
+
+    def _cancel_pending_resolution(self, *, reason: str) -> None:
+        """Phase 7: idempotent - a harmless no-op if nothing is armed.
+        Cancels the task best-effort (fire-and-forget, matching
+        _cancel_pending_backchannel's own discipline elsewhere in this
+        file - not awaited here) and clears all pending-resolution fields
+        together, so the single-slot invariant can never observe a
+        partially-cleared state."""
+        if self._pending_kind is None:
+            return
+        task = self._pending_task
+        kind = self._pending_kind
+        turn_id = self._pending_turn_id
+        armed_at = self._pending_armed_at
+        if task is not None and not task.done():
+            task.cancel()
+        elapsed_ms = (time.monotonic() - armed_at) * 1000 if armed_at is not None else None
+        cancelled_event = (
+            "semantic_hold_recovery_cancelled" if kind == _HOLD_RECOVERY_KIND
+            else "semantic_pending_end_cancelled"
+        )
+        logger.info(
+            "%s session_id=%s identity=%s track=%s semantic_turn_id=%s reason=%s elapsed_ms=%s",
+            cancelled_event, self._session_id, self._identity, self._track_sid, turn_id or "-",
+            reason, f"{elapsed_ms:.0f}" if elapsed_ms is not None else "-",
+        )
+        self._pending_kind = None
+        self._pending_turn_id = None
+        self._pending_task = None
+        self._pending_armed_at = None
+        self._pending_probability = None
+
+    async def _resolve_pending_resolution(self, *, kind: str, turn_id: str, delay: float) -> None:
+        """Phase 7: the deadline-wait half of the pending-resolution
+        lifecycle - sleeps, then hands off to _commit_pending_resolution.
+        Defensive re-verification after the sleep (same-event-loop-tick
+        race safety: "whichever callback executes first establishes the
+        state transition, but both possible orderings must be internally
+        consistent, exactly-once, no double submission") - if this task has
+        been superseded/cancelled by the time the sleep resolves,
+        self._pending_task no longer points at US (asyncio.current_task()),
+        so we do nothing rather than trust stale closure state."""
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if self._closed:
+                return
+            if self._pending_task is not asyncio.current_task():
+                # Superseded/cancelled between the sleep resolving and this
+                # check - a safe no-op, not an error.
+                return
+            if self._candidate_turn_id != turn_id:
+                # Should be unreachable given _cancel_pending_resolution's
+                # own discipline (on_speech_started always cancels BEFORE
+                # any candidate-state mutation) - defensive backstop only.
+                return
+            await self._commit_pending_resolution(kind=kind)
+        except asyncio.CancelledError:
+            raise
+
+    async def _commit_pending_resolution(self, *, kind: str) -> None:
+        """Phase 7: the ONE shared commit path for both HOLD_RECOVERY and
+        PENDING_END outcomes - do not create a second submission
+        architecture (Step: "Do not create a second submission
+        architecture"). Guarantees exactly-once commit: every
+        pending-resolution field is cleared BEFORE any further await, so a
+        concurrent cancel racing this exact moment finds nothing left to
+        cancel. Reuses the EXACT SAME reset-before-submit ordering
+        invariant the immediate-END path already used before this phase."""
+        turn_id = self._candidate_turn_id
+        transcript = " ".join(self._candidate_segments).strip()
+        audio_duration_ms = (
+            (self._candidate_audio_samples / self._sample_rate) * 1000 if self._sample_rate else 0.0
+        )
+        armed_at = self._pending_armed_at
+        elapsed_ms = (time.monotonic() - armed_at) * 1000 if armed_at is not None else None
+        probability = self._pending_probability
+        probability_str = f"{probability:.4f}" if probability is not None else "-"
+
+        # Clear pending-resolution bookkeeping BEFORE any further await -
+        # exactly-once commit.
+        self._pending_kind = None
+        self._pending_turn_id = None
+        self._pending_task = None
+        self._pending_armed_at = None
+        self._pending_probability = None
+
+        committed_event = (
+            "semantic_hold_recovery_committed" if kind == _HOLD_RECOVERY_KIND
+            else "semantic_pending_end_committed"
+        )
+        logger.info(
+            "%s session_id=%s identity=%s track=%s semantic_turn_id=%s elapsed_ms=%s "
+            "probability=%s candidate_text=%r candidate_audio_duration_ms=%.0f",
+            committed_event, self._session_id, self._identity, self._track_sid, turn_id or "-",
+            f"{elapsed_ms:.0f}" if elapsed_ms is not None else "-", probability_str, transcript,
+            audio_duration_ms,
+        )
+
+        # Explicit cancellation on commit, not just the historical "new
+        # speech cancels it" invariant (which does not hold here - a
+        # HOLD_RECOVERY commit happens PRECISELY when no new speech
+        # occurred): stop any pending/playing backchannel through
+        # PocAgentSession's EXISTING mechanism before the real patient
+        # turn's audio starts publishing.
+        if self._on_before_commit is not None:
+            self._on_before_commit()
+
+        # Reset BEFORE firing submission - same invariant the immediate-END
+        # path always used (Step 4/10).
+        self._reset_candidate_turn()
+
+        if self._on_end is None:
+            return
+        if not transcript or turn_id is None:
+            logger.info(
+                "semantic_turn_end_empty_transcript_skipped session_id=%s identity=%s track=%s "
+                "semantic_turn_id=%s",
+                self._session_id, self._identity, self._track_sid, turn_id or "-",
+            )
+            return
+        # Fire-and-forget - see the immediate-END path's own note on why
+        # this is never awaited inline.
+        asyncio.ensure_future(self._on_end(turn_id, transcript))
+
+    def diagnostic_pending_resolution_state(self) -> "tuple[str | None, str | None, float | None]":
+        """Phase 7: read-only snapshot (kind, turn_id, elapsed_ms) for
+        DIAGNOSTIC correlation only (see _StudentVadSttPipeline's
+        student_stt_native_end_of_speech log line) - never used for any
+        decision, never mutates anything."""
+        if self._pending_kind is None or self._pending_armed_at is None:
+            return None, None, None
+        elapsed_ms = (time.monotonic() - self._pending_armed_at) * 1000
+        return self._pending_kind, self._pending_turn_id, elapsed_ms
+
     def _reset_candidate_turn(self) -> None:
         self._candidate_audio.clear()
         self._candidate_audio_samples = 0
@@ -986,6 +1333,17 @@ class _CandidateTurnCoordinator:
         self._candidate_turn_id = None
         self._barge_in_buffer = []
         self._pending_final_event.clear()
+        self._vad_end_at = None
+        # Phase 7: defensive symmetry - pending-resolution bookkeeping
+        # should already be clear by the time reset runs (both real
+        # callers - _commit_pending_resolution and aclose - clear/cancel it
+        # themselves first), but never leave stale pending-resolution state
+        # pointing at a retired turn id.
+        self._pending_kind = None
+        self._pending_turn_id = None
+        self._pending_task = None
+        self._pending_armed_at = None
+        self._pending_probability = None
 
     async def aclose(self) -> None:
         self._closed = True
@@ -998,6 +1356,17 @@ class _CandidateTurnCoordinator:
             except Exception:
                 logger.exception(
                     "student_turn_detector_eval_task_failed session_id=%s track=%s",
+                    self._session_id, self._track_sid,
+                )
+        if self._pending_task is not None and not self._pending_task.done():
+            self._pending_task.cancel()
+            try:
+                await self._pending_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception(
+                    "student_turn_detector_pending_resolution_task_failed session_id=%s track=%s",
                     self._session_id, self._track_sid,
                 )
         self._reset_candidate_turn()
@@ -1145,6 +1514,13 @@ class PocAgentSession:
         # SAME one-way _fallback_to_browser_control (backchanneling can
         # never outlive the turn-control pipeline it depends on).
         self._backchannel_enabled = False
+        # Phase 7 (EXPERIMENTAL semantic resolution timers - Step 2):
+        # computed once in start() from
+        # settings.semantic_resolution_timers_active - independent of
+        # Phase 5A/6 (see config.py's own note), cleared by the SAME
+        # one-way _fallback_to_browser_control (resolution timers can never
+        # outlive the turn-control pipeline they depend on).
+        self._resolution_timers_enabled = False
         # Phase 6 (Step 3): the ONE task covering BOTH the post-HOLD delay
         # phase and the actual audio-publish phase - cancelling it at
         # EITHER point uniformly satisfies Step 6 (cancel before it starts)
@@ -1428,6 +1804,17 @@ class PocAgentSession:
         logger.info(
             "patient_backchannel_enabled session_id=%s active=%s",
             self.session_id, self._backchannel_enabled,
+        )
+        # Phase 7 (Step 2): requires turn control (like Phase 5A/6),
+        # independent of barge-in/backchannel - resolution timers and
+        # backchanneling are separate concerns that happen to both layer on
+        # top of the same turn-CONTROL prerequisite.
+        self._resolution_timers_enabled = (
+            self._semantic_control_active and get_settings().semantic_resolution_timers_active
+        )
+        logger.info(
+            "semantic_resolution_timers_enabled session_id=%s active=%s",
+            self.session_id, self._resolution_timers_enabled,
         )
 
         self._send_agent_ready()
@@ -1882,6 +2269,17 @@ class PocAgentSession:
         # is active too - it is the cancellation signal, no reason to ever
         # omit it once backchannel scheduling itself can happen.
         backchannel_active = self._backchannel_enabled
+        # Phase 7 (Step 2/4): resolution_timers_enabled is wired ONLY when
+        # this session's flag is genuinely active (already AND'd with
+        # semantic_control_active in start() - see _resolution_timers_enabled's
+        # own note) - when it isn't, the coordinator's HOLD/END branches
+        # behave byte-for-byte as they did before this phase.
+        # on_before_commit is wired ONLY when backchanneling is ALSO active
+        # (nothing to cancel otherwise) - reuses the SAME
+        # _cancel_pending_backchannel function on_student_resumed already
+        # uses, just invoked from a second, explicitly-named entry point
+        # (a HOLD-recovery commit is not a "student resumed" event).
+        resolution_timers_enabled = self._resolution_timers_enabled
         return _CandidateTurnCoordinator(
             session_id=self.session_id, identity=identity, track_sid=track_sid,
             detector=detector, sample_rate=_VAD_STT_SAMPLE_RATE,
@@ -1892,6 +2290,8 @@ class PocAgentSession:
             on_hold=self._on_semantic_hold if backchannel_active else None,
             on_student_resumed=self._cancel_pending_backchannel if backchannel_active else None,
             is_backchannel_echo=self._is_likely_backchannel_echo if backchannel_active else None,
+            resolution_timers_enabled=resolution_timers_enabled,
+            on_before_commit=self._cancel_pending_backchannel if backchannel_active else None,
         )
 
     async def _ingest_student_audio(self, track: "rtc.Track", identity: str, track_sid: str) -> None:
