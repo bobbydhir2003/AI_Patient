@@ -112,6 +112,11 @@ export type VoiceEvent =
   | "livekit_turn_publish_started"
   | "livekit_turn_publish_resolved"
   | "livekit_turn_ack_received"
+  // Turn-ID sync fix: this ack covers a browser-originated packet the agent
+  // will never process (semantic control is authoritative) - distinct from
+  // a plain ack so the engine can avoid claiming "thinking" for an id that
+  // will never resolve. See handleTurnAck/worker.py's _send_turn_ack.
+  | "livekit_turn_ack_semantic_ignored"
   | "livekit_turn_ack_timeout"
   | "livekit_turn_auto_retry"
   | "livekit_turn_delivery_failed"
@@ -351,6 +356,7 @@ const TELEMETRY_EVENTS = new Set<VoiceEvent>([
   "livekit_audio_playing", "livekit_audio_play_failed", "livekit_engine_error",
   "livekit_agent_ready_received", "livekit_turn_publish_started",
   "livekit_turn_publish_resolved", "livekit_turn_ack_received",
+  "livekit_turn_ack_semantic_ignored",
   "livekit_turn_ack_timeout", "livekit_turn_auto_retry", "livekit_turn_delivery_failed",
   "livekit_mic_request_started", "livekit_mic_request_resolved",
   "livekit_mic_request_failed", "livekit_mic_request_timeout",

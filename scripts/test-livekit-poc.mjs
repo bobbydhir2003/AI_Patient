@@ -433,13 +433,36 @@ async function flushMicrotasks() {
 // ---------------------------------------------------------------------------
 const encode = (obj) => new TextEncoder().encode(JSON.stringify(obj));
 
-function sendAgentReady(room) {
-  room.emit(RoomEvent.DataReceived, encode({ type: "agent_ready" }), undefined, undefined, "agent_control");
+function sendAgentReady(room, extra = {}) {
+  room.emit(
+    RoomEvent.DataReceived, encode({ type: "agent_ready", ...extra }), undefined, undefined, "agent_control",
+  );
 }
 
-function sendTurnAck(room, clientTurnId) {
+/** Phase 4 turn-ID sync fix convenience wrapper - identical to sendAgentReady
+ * except `semanticTurnControl: true`, matching worker.py's own additive
+ * agent_ready field. */
+function sendAgentReadySemantic(room) {
+  sendAgentReady(room, { semanticTurnControl: true });
+}
+
+function sendTurnAck(room, clientTurnId, extra = {}) {
   room.emit(
-    RoomEvent.DataReceived, encode({ type: "turn_ack", clientTurnId }), undefined, undefined, "agent_control",
+    RoomEvent.DataReceived, encode({ type: "turn_ack", clientTurnId, ...extra }), undefined, undefined, "agent_control",
+  );
+}
+
+/** Phase 4 turn-ID sync fix: the server's "a real semantic turn is now
+ * processing" signal - see worker.py's _handle_semantic_turn_end. */
+function sendSemanticTurnStarted(room, clientTurnId) {
+  room.emit(
+    RoomEvent.DataReceived, encode({ type: "semantic_turn_started", clientTurnId }), undefined, undefined, "agent_control",
+  );
+}
+
+function sendSemanticFallback(room, reason = "test_fallback") {
+  room.emit(
+    RoomEvent.DataReceived, encode({ type: "semantic_fallback", reason }), undefined, undefined, "agent_control",
   );
 }
 
@@ -449,6 +472,10 @@ function sendTurnStatus(room, clientTurnId, status) {
 
 function studentTextPublishes(room) {
   return room.publishedData.filter((p) => p.options.topic === "student_text");
+}
+
+function decodedStudentTextPublishes(room) {
+  return studentTextPublishes(room).map((p) => JSON.parse(new TextDecoder().decode(p.payload)));
 }
 
 function latestStudentTurnId(room) {
@@ -487,6 +514,19 @@ async function startReady(engine, sessionId, fetchToken) {
   await flushMicrotasks();
   const room = createdRooms.at(-1);
   sendAgentReady(room);
+  await flushMicrotasks();
+  return room;
+}
+
+/** Phase 4 turn-ID sync fix: identical to startReady, but the session
+ * advertises semantic turn control as active (semanticTurnControl: true),
+ * matching how a real semantic-control-enabled worker.py session's
+ * agent_ready looks. */
+async function startReadySemantic(engine, sessionId, fetchToken) {
+  await engine.start(sessionId, fetchToken);
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReadySemantic(room);
   await flushMicrotasks();
   return room;
 }
@@ -2465,4 +2505,190 @@ test("PHASE D1+D2 P: Interrupt mid-flight, then Stop, then Resume still works en
   await flushMicrotasks();
   assert.equal(tester.getResult().state, "LISTENING");
   assert.equal(tokenMintCalls().length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// PHASE 4: turn-ID synchronization fix (semantic turn control). Confirmed
+// production bug: worker.py's _send_turn_ack unconditionally ack'd every
+// browser-originated packet, even ones semantic control was about to
+// ignore. The frontend's handleTurnAck treated that ack as authorization to
+// claim "thinking" and arm a processing watchdog for an id that would never
+// resolve - which left `state` stuck so the REAL semantic_turn_started that
+// followed (a different id) was silently dropped by
+// handleSemanticTurnStarted's own state==="listening" guard, and every
+// subsequent patient_turn_status for the real turn was rejected as
+// "foreign." Fix: an additive `semanticIgnored` ack field, source-aware
+// sendText() (speech_browser vs manual_typed), and a MANUAL_OVERRIDE
+// backend bypass so typed Send keeps working. These tests drive the fix
+// through the SAME FakeRoom/fetch mocks every other test in this file uses.
+// ---------------------------------------------------------------------------
+
+test("PHASE 4: a browser SpeechRecognition final while semantic control is active never publishes a student_text packet", async () => {
+  resetFixtures();
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReadySemantic(engine, "session-p4-1");
+
+  FakeSpeechRecognition.instances.at(-1).emitFinal("How long has this been going on?");
+  await flushMicrotasks();
+
+  assert.equal(studentTextPublishes(room).length, 0, "a speech final must never publish while semantic control is active");
+  assert.equal(engine.getState(), "listening", "the engine must stay in listening, never claim thinking for a suppressed final");
+
+  await engine.end();
+});
+
+test("PHASE 4: sendText's speech_browser guard is centralized - suppresses regardless of call site, not just onFinal", async () => {
+  resetFixtures();
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReadySemantic(engine, "session-p4-2");
+
+  await engine.sendText("direct call simulating a speech final", { source: "speech_browser" });
+  await flushMicrotasks();
+
+  assert.equal(studentTextPublishes(room).length, 0);
+  assert.equal(engine.getState(), "listening");
+
+  await engine.end();
+});
+
+test("PHASE 4: an ignored ack (semanticIgnored) returns the engine to listening, and the following semantic_turn_started is then adopted", async () => {
+  resetFixtures();
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReadySemantic(engine, "session-p4-3");
+
+  // Establish a pending delivery turn to exercise handleTurnAck's recovery
+  // path itself (the mechanism under test), independent of how such a
+  // pending turn could arise in production (a race, a legacy frontend
+  // build, etc.) - manual_typed is used here purely as the vehicle to reach
+  // "thinking" with a real pendingDeliveryTurnId; the assertion is entirely
+  // about what happens when the server's ack for THIS id says
+  // semanticIgnored: true.
+  await engine.sendText("stray turn", { source: "manual_typed" });
+  await flushMicrotasks();
+  const strayTurnId = latestStudentTurnId(room);
+  assert.equal(engine.getState(), "thinking");
+
+  sendTurnAck(room, strayTurnId, { semanticIgnored: true });
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "listening", "must return to listening, never stay stuck in thinking");
+
+  // The REAL semantic turn now arrives, keyed by a completely different id.
+  sendSemanticTurnStarted(room, "semantic-session-p4-3-1");
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "thinking", "the semantic turn must now be adopted (state==='listening' guard passed)");
+
+  sendTurnStatus(room, "semantic-session-p4-3-1", "speaking_started");
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "speaking", "speaking_started for the semantic id must be accepted, not rejected as foreign");
+
+  sendTurnStatus(room, "semantic-session-p4-3-1", "speaking_ended");
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "listening");
+  assert.deepEqual(rec.completedTurns, [1], "onTurnCompleted must fire exactly once for the semantic turn");
+
+  await engine.end();
+});
+
+test("PHASE 4: manual typed Send (submitExternal) still creates a real, authoritative turn while semantic control is active", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p4-4" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReadySemantic(room);
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "LISTENING");
+
+  tester.getResult().submitExternal("I have a question about my medication");
+  await flushMicrotasks();
+
+  const published = decodedStudentTextPublishes(room);
+  assert.equal(published.length, 1, "typed Send must still publish a student_text packet under semantic control");
+  assert.equal(published[0].source, "manual_typed");
+  assert.equal(tester.getResult().state, "PROCESSING", "typed Send moves the UI to PROCESSING exactly like before");
+
+  // The backend acks a manual override normally (no semanticIgnored) - see
+  // worker.py's TurnSource.MANUAL_OVERRIDE - so the existing turn_ack path
+  // completes the turn exactly like any pre-Phase-4 typed Send.
+  const clientTurnId = published[0].clientTurnId;
+  sendTurnAck(room, clientTurnId);
+  sendTurnStatus(room, clientTurnId, "speaking_started");
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "SPEAKING");
+  sendTurnStatus(room, clientTurnId, "speaking_ended");
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "LISTENING");
+});
+
+test("PHASE 4: semantic_fallback restores normal browser-authoritative behavior for the rest of the session", async () => {
+  resetFixtures();
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReadySemantic(engine, "session-p4-5");
+
+  // Before fallback: a speech final is suppressed, exactly like the first
+  // test above.
+  const firstRecognizer = FakeSpeechRecognition.instances.at(-1);
+  firstRecognizer.emitFinal("First attempt, before fallback");
+  await flushMicrotasks();
+  assert.equal(studentTextPublishes(room).length, 0);
+
+  sendSemanticFallback(room, "stt_stream_died");
+  await flushMicrotasks();
+
+  // A suppressed final never starts a real turn, so there is no
+  // speaking_ended to synchronously create the next recognizer - simulate
+  // the browser naturally ending this (still-listening) recognition
+  // session, which arms the SAME debounced restart onEnd always uses, then
+  // fire it (fake timers, no real 150ms wait) to get a fresh instance.
+  firstRecognizer.abort();
+  fireTimerById(latestTimerId());
+
+  // After fallback: browser SpeechRecognition is authoritative again - a
+  // fresh final on the NEW recognizer now publishes normally, exactly like
+  // the pre-Phase-4/non-semantic path.
+  FakeSpeechRecognition.instances.at(-1).emitFinal("Second attempt, after fallback");
+  await flushMicrotasks();
+  const published = decodedStudentTextPublishes(room);
+  assert.equal(published.length, 1, "fallback must restore normal browser-authoritative publishing");
+  assert.equal(published[0].source, "speech_browser");
+  assert.equal(engine.getState(), "thinking");
+
+  await engine.end();
+});
+
+test("PHASE 4: no duplicate student/patient signaling - exactly one publish and one onTurnCompleted per semantic turn", async () => {
+  resetFixtures();
+
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReadySemantic(engine, "session-p4-6");
+
+  // A speech final is suppressed (no publish at all)...
+  FakeSpeechRecognition.instances.at(-1).emitFinal("Suppressed final");
+  await flushMicrotasks();
+  assert.equal(studentTextPublishes(room).length, 0);
+
+  // ...and the SAME utterance's server-side semantic turn completes exactly
+  // once end-to-end.
+  sendSemanticTurnStarted(room, "semantic-session-p4-6-1");
+  await flushMicrotasks();
+  sendTurnStatus(room, "semantic-session-p4-6-1", "speaking_started");
+  await flushMicrotasks();
+  sendTurnStatus(room, "semantic-session-p4-6-1", "speaking_ended");
+  await flushMicrotasks();
+
+  assert.equal(studentTextPublishes(room).length, 0, "still zero browser publishes for the whole turn");
+  assert.deepEqual(rec.completedTurns, [1], "onTurnCompleted must fire exactly once, never zero or twice");
+
+  await engine.end();
 });

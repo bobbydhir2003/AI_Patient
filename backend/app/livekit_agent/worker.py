@@ -255,6 +255,14 @@ class TurnSource(str, Enum):
 
     BROWSER_TEXT = "browser_text"
     SERVER_SEMANTIC = "server_semantic"
+    # Phase 4 turn-ID sync fix: an explicit student Send (typed chat, never a
+    # SpeechRecognition final) submitted while semantic control is active.
+    # Deliberately bypasses the BROWSER_TEXT ignore-path below - the student
+    # took a conscious action, so it is treated as an authoritative turn even
+    # though semantic control governs spoken input for this session. Still
+    # funnels through the exact same _handle_student_turn/_run_turn pipeline
+    # and dedup/lock as every other turn source - see _on_data.
+    MANUAL_OVERRIDE = "manual_override"
 
 
 def parse_job_metadata(raw: str) -> tuple[str, str] | None:
@@ -1214,29 +1222,49 @@ class PocAgentSession:
                     "livekit_agent_bad_payload session_id=%s reason=missing_field", self.session_id,
                 )
                 return
+            # Additive field (Phase 4 turn-ID sync fix): distinguishes a
+            # deliberate typed Send ("manual_typed") from a browser
+            # SpeechRecognition final ("speech_browser" - also the default
+            # for any older/legacy frontend build that never sends this
+            # field at all, which is the conservative choice: an unknown
+            # source is treated as non-authoritative under semantic control,
+            # never the other way around).
+            source = str(payload.get("source") or "speech_browser")
+            is_manual_override = source == "manual_typed"
 
             self._log_agent_event("livekit_agent_student_packet_received", client_turn_id=client_turn_id)
+            logger.info(
+                "livekit_agent_student_packet_received session_id=%s client_turn_id=%s source=%s",
+                self.session_id, client_turn_id, source,
+            )
+
+            # Phase 4 (Step 3/6): once semantic turn CONTROL is genuinely
+            # active for this session, a SPEECH-sourced browser student_text
+            # is accepted for compatibility/diagnostics ONLY - it must never
+            # independently trigger patient generation (that would race/
+            # duplicate against the server-side Smart Turn decision for the
+            # SAME utterance). An explicit MANUAL typed Send is a conscious
+            # student action, not a race-prone recognizer guess, and is
+            # deliberately exempted - see TurnSource.MANUAL_OVERRIDE. Re-
+            # checked on every packet (not cached) so a mid-session fallback
+            # (_fallback_to_browser_control) takes effect immediately for the
+            # very next browser packet.
+            semantic_ignored = self._semantic_control_active and not is_manual_override
 
             # Turn ACK is the FIRST action for any structurally valid packet -
             # before any dedup/processing decision, before OpenAI/TTS ever
             # starts (Part 3). A duplicate gets ack'd again too (Part 5). This
             # ack is unconditional even under Phase 4 semantic control below -
             # it only ever tells the browser "the agent received your
-            # publish", never "this will drive the conversation", so acking a
-            # non-authoritative browser packet cannot cause a duplicate
-            # patient response; it only prevents a pointless client-side
-            # delivery-retry storm for a packet the server is about to ignore.
-            self._send_turn_ack(client_turn_id)
+            # publish", never (by itself) "this will drive the conversation" -
+            # the additive `semanticIgnored` flag is what tells a Phase-4-
+            # aware frontend the difference, so acking a non-authoritative
+            # browser packet cannot cause a duplicate patient response; it
+            # only prevents a pointless client-side delivery-retry storm for
+            # a packet the server is about to ignore.
+            self._send_turn_ack(client_turn_id, semantic_ignored=semantic_ignored)
 
-            # Phase 4 (Step 3/6): once semantic turn CONTROL is genuinely
-            # active for this session, browser student_text is accepted for
-            # compatibility/diagnostics ONLY - it must never independently
-            # trigger patient generation (that would race/duplicate against
-            # the server-side Smart Turn decision for the SAME utterance).
-            # Re-checked on every packet (not cached) so a mid-session
-            # fallback (_fallback_to_browser_control) takes effect
-            # immediately for the very next browser packet.
-            if self._semantic_control_active:
+            if semantic_ignored:
                 self._log_agent_event(
                     "semantic_turn_browser_text_ignored", client_turn_id=client_turn_id,
                 )
@@ -1246,6 +1274,15 @@ class PocAgentSession:
                     self.session_id, client_turn_id, TurnSource.BROWSER_TEXT.value,
                 )
                 return
+
+            if is_manual_override and self._semantic_control_active:
+                self._log_agent_event(
+                    "semantic_turn_manual_override_accepted", client_turn_id=client_turn_id,
+                )
+                logger.info(
+                    "semantic_turn_manual_override_accepted session_id=%s client_turn_id=%s turn_source=%s",
+                    self.session_id, client_turn_id, TurnSource.MANUAL_OVERRIDE.value,
+                )
 
             if client_turn_id in self._completed_turn_ids or client_turn_id in self._in_flight_turn_ids:
                 self._log_agent_event("livekit_agent_duplicate_turn_received", client_turn_id=client_turn_id)
@@ -1427,9 +1464,22 @@ class PocAgentSession:
         # there, i.e. legacy browser-authoritative behavior).
         self._publish_control({"type": "agent_ready", "semanticTurnControl": self._semantic_control_active})
 
-    def _send_turn_ack(self, client_turn_id: str) -> None:
+    def _send_turn_ack(self, client_turn_id: str, *, semantic_ignored: bool = False) -> None:
         self._log_agent_event("livekit_agent_turn_ack_sent", client_turn_id=client_turn_id)
-        self._publish_control({"type": "turn_ack", "clientTurnId": client_turn_id})
+        logger.info(
+            "livekit_agent_turn_ack_sent session_id=%s client_turn_id=%s semantic_ignored=%s",
+            self.session_id, client_turn_id, semantic_ignored,
+        )
+        payload: dict = {"type": "turn_ack", "clientTurnId": client_turn_id}
+        # Additive field, only ever present (and only ever true) when this ack
+        # covers a browser-originated packet the agent will NOT process
+        # because semantic control is authoritative for this session - see
+        # the caller in _on_data. Omitted entirely for a normal ack (never
+        # sent as `false`) so this never changes the payload shape any
+        # existing frontend build already parses correctly.
+        if semantic_ignored:
+            payload["semanticIgnored"] = True
+        self._publish_control(payload)
 
     def _fallback_to_browser_control(self, reason: str) -> None:
         """Phase 4 (Step 11): ONE-WAY session-scoped downgrade - once called,

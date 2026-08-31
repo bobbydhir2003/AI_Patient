@@ -105,6 +105,7 @@ VoiceTelemetryEventName = Literal[
     "livekit_turn_publish_started",
     "livekit_turn_publish_resolved",
     "livekit_turn_ack_received",
+    "livekit_turn_ack_semantic_ignored",
     "livekit_turn_ack_timeout",
     "livekit_turn_auto_retry",
     "livekit_turn_delivery_failed",

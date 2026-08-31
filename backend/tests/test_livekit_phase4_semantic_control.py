@@ -274,10 +274,72 @@ def test_browser_text_ignored_when_semantic_control_active(monkeypatch, engine, 
 
     assert calls == [], "browser text must never trigger patient generation while semantic control is active"
     # Still ack'd - the browser must not spuriously retry a packet the
-    # server has simply decided is non-authoritative.
+    # server has simply decided is non-authoritative. Turn-ID sync fix:
+    # semanticIgnored=true is the additive signal that lets the frontend
+    # avoid claiming "thinking"/arming a processing watchdog for this id -
+    # see handleTurnAck in livekitPocEngine.ts.
     acks = _control_messages(room, "turn_ack")
-    assert acks == [{"type": "turn_ack", "clientTurnId": "turn-browser-1"}]
+    assert acks == [{"type": "turn_ack", "clientTurnId": "turn-browser-1", "semanticIgnored": True}]
     assert any("semantic_turn_browser_text_ignored" in r.message for r in caplog.records)
+
+
+def test_manual_typed_override_bypasses_semantic_ignore(monkeypatch, engine):
+    """Turn-ID sync fix: an explicit typed Send (source="manual_typed") must
+    still create a real, authoritative turn even while semantic control is
+    active - unlike a "speech_browser"-sourced (or source-less/legacy)
+    packet, which gets ignored. This is what keeps the typed chat Send
+    button working during an active semantic voice session."""
+    with _fake_rtc_for_worker():
+        session, room, _sid = _make_ready_session(engine, monkeypatch)
+        calls = []
+
+        def fake_generate(db, **kwargs):
+            calls.append(kwargs["client_turn_id"])
+            raise patient_adapter.LiveKitPocSessionNotFoundError("stop-here")
+
+        monkeypatch.setattr(patient_adapter, "generate_and_persist_turn", fake_generate)
+
+        async def _drive():
+            await session.start()
+            session._semantic_control_active = True  # simulate an active session
+            room.emit(
+                "data_received",
+                _StudentTextPacket("I have a question", "turn-manual-1", source="manual_typed"),
+            )
+            await _run_until_idle()
+
+        asyncio.run(_drive())
+
+    assert calls == ["turn-manual-1"], "a manual typed Send must be processed even under semantic control"
+    acks = _control_messages(room, "turn_ack")
+    # Not ignored - no semanticIgnored field at all, matching the plain-ack
+    # shape every non-ignored turn (semantic or legacy) already gets.
+    assert acks == [{"type": "turn_ack", "clientTurnId": "turn-manual-1"}]
+
+
+def test_speech_browser_source_without_explicit_field_defaults_to_ignored(monkeypatch, engine):
+    """A legacy/pre-Phase-4 frontend build that never sends `source` at all
+    must be treated exactly like "speech_browser" - the conservative
+    default - never accidentally treated as an authoritative override."""
+    with _fake_rtc_for_worker():
+        session, room, _sid = _make_ready_session(engine, monkeypatch)
+        calls = []
+        monkeypatch.setattr(
+            patient_adapter, "generate_and_persist_turn",
+            lambda db, **kwargs: calls.append(kwargs["client_turn_id"]),
+        )
+
+        async def _drive():
+            await session.start()
+            session._semantic_control_active = True
+            room.emit("data_received", _StudentTextPacket("Hello", "turn-no-source-1"))  # no source field
+            await _run_until_idle()
+
+        asyncio.run(_drive())
+
+    assert calls == [], "a packet with no source field must default to non-authoritative under semantic control"
+    acks = _control_messages(room, "turn_ack")
+    assert acks == [{"type": "turn_ack", "clientTurnId": "turn-no-source-1", "semanticIgnored": True}]
 
 
 def test_semantic_end_submits_exactly_once_through_the_canonical_pipeline(monkeypatch, engine):
