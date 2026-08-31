@@ -74,6 +74,15 @@ classify_one() {
   case "$f" in
     backend/requirements.txt|backend/requirements.lock.txt)
       CAT_DEPENDENCIES+=("$f") ;;
+    backend/.env.example)
+      # Documents available environment variables for operators; never read
+      # by the running process. Production secrets are injected entirely
+      # via /opt/ptai/shared/backend.env (systemd EnvironmentFile= for both
+      # ptai.service and ptai-livekit-agent.service - see prepare-release.sh
+      # and docs/production-deployment-architecture.md), never from any file
+      # inside the release checkout itself. A template/reference file, not
+      # application code - no restart or venv rebuild follows from it.
+      CAT_NONE+=("$f") ;;
     backend/app/database/migrations/versions/*)
       CAT_DATABASE_MIGRATION+=("$f") ;;
     backend/app/livekit_agent/*)
