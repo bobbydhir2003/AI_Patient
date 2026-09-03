@@ -111,6 +111,9 @@ export type VoiceEvent =
   // distinguishes "about to call publishData" from "publishData resolved",
   // closing the exact gap a prior forensic inspection identified.
   | "livekit_agent_ready_received"
+  // prompt_agent: OpenAI Realtime owns transcription, so the browser recognizer
+  // is deliberately never started (barge-in/latency fix). Engine lifecycle only.
+  | "livekit_recognition_skipped_prompt_agent"
   | "livekit_turn_publish_started"
   | "livekit_turn_publish_resolved"
   | "livekit_turn_ack_received"
@@ -225,6 +228,10 @@ export interface VoiceEventMeta {
    * SpeechRecognition) is currently authoritative for this session's
    * student turn completion. Engine lifecycle only. */
   semanticTurnControlActive?: boolean;
+  /** prompt_agent mode at event time - OpenAI Realtime owns speech detection +
+   * transcription end to end, so the browser recognizer stays off. Engine
+   * lifecycle only. */
+  promptAgentMode?: boolean;
 }
 
 export interface VoiceCounters {

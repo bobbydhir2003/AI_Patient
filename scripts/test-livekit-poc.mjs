@@ -543,6 +543,18 @@ async function startReadySemantic(engine, sessionId, fetchToken) {
   return room;
 }
 
+/** prompt_agent: agent_ready carries promptAgent:true, meaning OpenAI Realtime
+ * owns speech detection + transcription and the browser recognizer must stay
+ * OFF for the whole session. */
+async function startReadyPromptAgent(engine, sessionId, fetchToken) {
+  await engine.start(sessionId, fetchToken);
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReady(room, { promptAgent: true });
+  await flushMicrotasks();
+  return room;
+}
+
 function telemetryEvents() {
   return fetchCalls
     .filter((c) => c.url.includes("/voice/telemetry"))
@@ -2944,5 +2956,70 @@ test("P0-2: legacy browser-owned status correlation remains unchanged", async ()
   sendTurnStatus(room, browserTurnId, "speaking_ended");
   assert.equal(engine.getState(), "listening");
   assert.deepEqual(rec.completedTurns, [1]);
+  await engine.end();
+});
+
+// ---------------------------------------------------------------------------
+// prompt_agent: OpenAI Realtime owns speech detection + transcription, so the
+// browser SpeechRecognition recognizer must never start (barge-in/latency fix).
+// ---------------------------------------------------------------------------
+test("prompt_agent: browser SpeechRecognition never starts (agent_ready.promptAgent=true)", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReadyPromptAgent(engine, "session-prompt-agent");
+
+  // Reached LISTENING via agent_ready + mic, but the recognizer stayed OFF.
+  assert.equal(engine.getState(), "listening");
+  assert.equal(
+    FakeSpeechRecognition.instances.length, 0,
+    "prompt_agent must not construct/start any browser SpeechRecognition",
+  );
+
+  // Backend-authoritative transcript still flows in via transcript_sync (the
+  // recognizer being off must not break student/patient text rendering).
+  sendTranscriptSync(room, {
+    type: "student_transcript", clientTurnId: "rt-1", epoch: 1,
+    text: "How long has this been going on?", studentTurnId: "db-stu-1",
+  });
+  await flushMicrotasks();
+  assert.equal(
+    FakeSpeechRecognition.instances.length, 0,
+    "prompt_agent must still never start recognition after a transcript_sync",
+  );
+  await engine.end();
+});
+
+test("prompt_agent: a patient turn does not spin up a recognizer on resume", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReadyPromptAgent(engine, "session-prompt-agent-2");
+
+  // Simulate a full backend-owned patient turn (no patient_turn_status is sent
+  // in prompt_agent; state simply stays "listening"). Even the turn-completion
+  // resume path must not construct a recognizer.
+  sendTranscriptSync(room, {
+    type: "patient_text_final", clientTurnId: "rt-2", epoch: 2,
+    text: "It started about a week ago.", patientTurnId: "db-pat-1",
+  });
+  await flushMicrotasks();
+
+  assert.equal(engine.getState(), "listening");
+  assert.equal(FakeSpeechRecognition.instances.length, 0);
+  // No browser student_text was ever published (Realtime owns turns).
+  assert.equal(studentTextPublishes(room).length, 0);
+  await engine.end();
+});
+
+test("legacy mode unchanged: recognizer still starts when promptAgent is absent", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await startReady(engine, "session-legacy-recognizer");
+  assert.equal(
+    FakeSpeechRecognition.instances.length, 1,
+    "legacy/controlled/native agent_ready (no promptAgent) must keep starting recognition",
+  );
   await engine.end();
 });

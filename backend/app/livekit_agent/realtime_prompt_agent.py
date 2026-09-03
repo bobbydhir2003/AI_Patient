@@ -34,6 +34,15 @@ from app.repositories.transcript_repository import TranscriptRepository
 
 logger = get_logger("app.livekit_agent.realtime")
 
+# Bounds the decoupled outbound patient-audio queue. OpenAI streams a whole
+# response's audio faster than real time, but the publisher drains it at real
+# time (the LiveKit AudioSource paces playout), so this queue holds the bulk of
+# an in-flight response. The cap is deliberately generous - a patient turn
+# longer than this is pathological - and only ever guards against unbounded
+# memory growth, never normal speech. On overflow the OLDEST chunk is dropped
+# (matching the input-audio queue discipline in realtime_session.py).
+_MAX_QUEUED_OUT_CHUNKS = 2000
+
 # GA Realtime server-event types this runtime acts on.
 _EVT_SPEECH_STARTED = "input_audio_buffer.speech_started"
 _EVT_INPUT_TRANSCRIPTION_DONE = "conversation.item.input_audio_transcription.completed"
@@ -94,6 +103,100 @@ class PromptAgentRuntime:
         # dropped so a cancelled answer never keeps playing.
         self._interrupted_responses: set[str] = set()
 
+        # --- Decoupled outbound patient-audio pipeline -----------------------
+        # Barge-in only feels instant if `input_audio_buffer.speech_started`
+        # is processed the moment it arrives. That cannot happen if the
+        # Realtime receive loop is awaiting LiveKit's AudioSource.capture_frame
+        # (which back-pressures once its small playout buffer is full). So the
+        # audio-delta handler NEVER publishes inline: it decodes and enqueues,
+        # returning to the receive loop immediately, and a dedicated publisher
+        # task drains this queue into the AudioSource at LiveKit's pace.
+        self._audio_out: "asyncio.Queue[bytes | None]" = asyncio.Queue(
+            maxsize=_MAX_QUEUED_OUT_CHUNKS
+        )
+        self._publisher_task: "asyncio.Task[None] | None" = None
+        self._closed = False
+        self._out_frames_dropped = 0
+
+    # ---- decoupled publisher lifecycle -----------------------------------
+    def start(self) -> None:
+        """Launch the dedicated outbound-audio publisher task. Idempotent and
+        cheap; safe to call from the worker once the AudioSource exists."""
+        if self._publisher_task is None and not self._closed:
+            self._publisher_task = asyncio.ensure_future(self._publisher_loop())
+
+    async def aclose(self) -> None:
+        """Stop the publisher task cleanly (sentinel + await). Best-effort."""
+        self._closed = True
+        try:
+            self._audio_out.put_nowait(None)
+        except asyncio.QueueFull:
+            # Drop one item to make room for the stop sentinel - teardown wins.
+            try:
+                self._audio_out.get_nowait()
+                self._audio_out.put_nowait(None)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+        task = self._publisher_task
+        self._publisher_task = None
+        if task is not None and not task.done():
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception(
+                    "prompt_agent_publisher_close_failed session_id=%s", self._session_id,
+                )
+
+    async def _publisher_loop(self) -> None:
+        """Drain decoded patient PCM into the LiveKit AudioSource at real time.
+        This is the ONLY place that awaits on_audio/capture_frame, so its
+        back-pressure can never stall the Realtime receive/event loop."""
+        while not self._closed:
+            pcm = await self._audio_out.get()
+            if pcm is None:  # stop sentinel
+                return
+            try:
+                await self._on_audio(pcm)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "prompt_agent_publish_failed session_id=%s", self._session_id,
+                )
+
+    def _enqueue_out(self, pcm: bytes) -> None:
+        """Non-blocking enqueue of one patient-audio chunk. On overflow (a
+        pathologically long response) the OLDEST chunk is dropped so live
+        audio-delta handling is never back-pressured."""
+        try:
+            self._audio_out.put_nowait(pcm)
+        except asyncio.QueueFull:
+            try:
+                self._audio_out.get_nowait()
+                self._audio_out.put_nowait(pcm)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                pass
+            self._out_frames_dropped += 1
+
+    def _flush_out(self) -> None:
+        """Drop every not-yet-published patient chunk (barge-in). The chunk the
+        publisher may already be awaiting inside capture_frame cannot be
+        recalled, but the worker's AudioSource.clear_queue() discards that side,
+        so the two together stop stale audio near-instantly."""
+        while True:
+            try:
+                item = self._audio_out.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if item is None:  # preserve a pending stop sentinel
+                try:
+                    self._audio_out.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
+                break
+
     # ---- readiness / configuration surface (mirrors native runtime) --------
     @property
     def config(self) -> dict[str, Any]:
@@ -138,11 +241,15 @@ class PromptAgentRuntime:
 
     def _on_speech_started(self) -> None:
         # Barge-in: interrupt_response=True makes OpenAI cancel its own answer,
-        # but late audio deltas already in flight for that response must not
-        # keep playing. Mark it so _on_audio_delta drops them; the worker
-        # separately clears the LiveKit playback buffer (on_speech_started).
+        # but audio for that response must stop the instant the student speaks.
+        # Three layers, all local and cheap:
+        #   1. mark the response so any late audio deltas are dropped,
+        #   2. flush the not-yet-published chunks out of our decoupled queue,
+        #   3. the worker separately clears the LiveKit AudioSource playout
+        #      buffer (see worker._on_prompt_speech_started).
         if self._active_response_id:
             self._interrupted_responses.add(self._active_response_id)
+        self._flush_out()
 
     async def _on_audio_delta(self, event: Any) -> None:
         response_id = str(_get(event, "response_id") or self._active_response_id or "")
@@ -159,7 +266,10 @@ class PromptAgentRuntime:
             )
             return
         if pcm:
-            await self._on_audio(pcm)
+            # Decouple: enqueue and return to the receive loop immediately so a
+            # full AudioSource buffer can never delay speech_started/response.*
+            # control events. The dedicated publisher task does the awaiting.
+            self._enqueue_out(pcm)
 
     def _on_patient_transcript_delta(self, event: Any) -> None:
         response_id = str(_get(event, "response_id") or self._active_response_id or "")

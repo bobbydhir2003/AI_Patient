@@ -286,3 +286,91 @@ def test_route_paths_are_exact(assess_env):
         "/api/rubrics",
     ):
         assert api.options(expected).status_code != 404, f"missing route {expected}"
+
+
+# ---------------------------------------------------------------------------
+# Four-domain hardening: schema requirement + missing-domain recovery retry.
+# Regression for the production failure:
+#   assessment_failed error=Expected all four rubric domains, got ['OARS Communication']
+# ---------------------------------------------------------------------------
+def _one_domain_combined(student_text="Hi Camden, how are you?", turn_label="turn_00"):
+    """A structurally-parseable combined payload that (wrongly) carries only ONE
+    rubric domain - exactly the shape that broke production."""
+    return {
+        "domains": [
+            _domain("OARS Communication", "Developing",
+                    [_ev_item("ev_oars_01", turn_label, student_text)]),
+        ],
+        "overall_level": "Developing",
+        "overall_summary": "Only one domain returned (defective).",
+        "focus_areas": [],
+    }
+
+
+def test_schema_requires_all_four_domains():
+    """The combined structured-output contract must force exactly four domain
+    objects, each pinned to the canonical rubric-domain enum."""
+    from app.schemas.assessment_schema import COMBINED_ASSESSMENT_JSON_SCHEMA
+
+    domains = COMBINED_ASSESSMENT_JSON_SCHEMA["properties"]["domains"]
+    assert domains["minItems"] == len(RUBRIC_DOMAINS) == 4
+    assert domains["maxItems"] == len(RUBRIC_DOMAINS)
+    assert set(domains["items"]["properties"]["rubric_domain"]["enum"]) == set(RUBRIC_DOMAINS)
+
+
+def test_one_domain_response_triggers_recovery_retry(assess_env):
+    """A one-domain CALL-1 result must trigger ONE targeted regeneration BEFORE
+    validation; the recovered four-domain result then completes normally."""
+    api, fake = assess_env
+    session_id = _run_interview(api)
+    # CALL 1 = defective (one domain) -> recovery CALL 2 = full four domains
+    # -> verify CALL 3. Still within the 3-call budget.
+    fake.queue_structured(_one_domain_combined(), _combined(), _review())
+    r = api.post(f"/api/sessions/{session_id}/assessment")
+    assert r.status_code == 201
+    body = r.json()
+    assert body["status"] == "COMPLETE"
+    assert {d["rubricDomain"] for d in body["domains"]} == set(RUBRIC_DOMAINS)
+    # gen -> recovery(gen) -> verify. The recovery reused the combined schema.
+    assert fake.structured_calls == [
+        "combined_assessment", "combined_assessment", "assessment_review",
+    ]
+
+
+def test_recovery_that_still_misses_a_domain_fails_cleanly(assess_env):
+    """If even the ONE recovery retry comes back incomplete, the run must FAIL
+    via the validator - bounded, never an infinite retry loop."""
+    api, fake = assess_env
+    session_id = _run_interview(api)
+    # Both the initial and the single recovery attempt return one domain.
+    fake.queue_structured(_one_domain_combined(), _one_domain_combined())
+    r = api.post(f"/api/sessions/{session_id}/assessment")
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "ASSESSMENT_UNAVAILABLE"
+    latest = api.get(f"/api/sessions/{session_id}/assessment").json()
+    assert latest["status"] == "FAILED"
+    assert latest["domains"] == []  # no fabricated feedback
+    # Exactly two generation attempts - the recovery is a SINGLE bounded retry,
+    # and no verify ran because validation failed first. No loop.
+    assert fake.structured_calls == ["combined_assessment", "combined_assessment"]
+
+
+def test_retry_button_after_failure_starts_a_fresh_run(assess_env):
+    """'Generate Assessment Again' (retry=true) must create a NEW run for a
+    previously-FAILED session, not return the cached FAILED payload."""
+    api, fake = assess_env
+    session_id = _run_interview(api)
+    # First attempt fails outright.
+    fake.fail = True
+    r1 = api.post(f"/api/sessions/{session_id}/assessment")
+    assert r1.status_code == 503
+    assert api.get(f"/api/sessions/{session_id}/assessment").json()["status"] == "FAILED"
+
+    # Retry with a healthy provider now succeeds on a fresh run.
+    fake.fail = False
+    _queue_happy_path(fake)
+    r2 = api.post(f"/api/sessions/{session_id}/assessment?retry=true")
+    assert r2.status_code == 201
+    body = r2.json()
+    assert body["status"] == "COMPLETE"
+    assert {d["rubricDomain"] for d in body["domains"]} == set(RUBRIC_DOMAINS)

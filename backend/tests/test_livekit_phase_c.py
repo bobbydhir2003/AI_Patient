@@ -122,7 +122,11 @@ def test_agent_ready_sent_after_track_published_and_session_verified(monkeypatch
     # False here since none of the three LIVEKIT_SEMANTIC_TURN_*_ENABLED
     # flags are set in this test (see test_livekit_phase4_semantic_control.py
     # for the control-active case).
-    assert ready_messages[0] == {"type": "agent_ready", "semanticTurnControl": False}
+    # promptAgent is an additive, backward-compatible field (False here since
+    # this is not prompt_agent mode) - see worker._send_agent_ready.
+    assert ready_messages[0] == {
+        "type": "agent_ready", "semanticTurnControl": False, "promptAgent": False,
+    }
     # Track publish must happen BEFORE agent_ready is announced - a student
     # must never be told "ready" before there is anything to hear from.
     assert room.local_participant.published_data[-1][1]["type"] == "agent_ready"

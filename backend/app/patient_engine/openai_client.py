@@ -134,6 +134,21 @@ class OpenAIPatientClient:
                 usage_out["input_tokens"] = in_tok
                 usage_out["output_tokens"] = out_tok
                 usage_out["model"] = rt.model
+        # Explicit incompleteness signal from the Responses API. When the model
+        # hits the output-token ceiling the response is returned with
+        # status="incomplete" (reason "max_output_tokens") and the JSON is cut
+        # off. Treat that as truncation up front - never hand a half-formed
+        # structured payload to schema/rubric validation as if it were complete.
+        status = getattr(response, "status", None)
+        if status == "incomplete":
+            reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+            logger.warning(
+                "structured_output_incomplete task=%s tokens=%s reason=%s",
+                schema_name, resolved_tokens, reason,
+            )
+            raise StructuredOutputTruncatedError(
+                f"The AI response was incomplete (reason={reason})."
+            )
         raw = (response.output_text or "").strip()
         if not raw:
             raise PatientEngineError("OpenAI returned an empty response.")

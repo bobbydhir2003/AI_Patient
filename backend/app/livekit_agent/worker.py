@@ -169,6 +169,15 @@ AGENT_PARTICIPANT_IDENTITY = "patient-agent"
 _FRAME_SECONDS = 0.02
 _FRAME_BYTES = int(patient_adapter.LIVEKIT_PCM_SAMPLE_RATE * _FRAME_SECONDS) * 2
 
+# Outbound patient-voice AudioSource playout buffer for prompt_agent. LiveKit's
+# default is 1000ms, which stands ~1s of patient audio ahead of the student and
+# is exactly what has to be discarded on barge-in - the main source of the
+# "patient keeps talking" lag vs. the OpenAI Playground. 200ms is small enough
+# to make interruption feel immediate while still absorbing normal jitter in
+# OpenAI's audio-delta delivery (a handful of 20ms frames). Only prompt_agent
+# uses this; legacy/controlled/native modes keep LiveKit's default.
+_PROMPT_AGENT_AUDIO_QUEUE_MS = 200
+
 # Bounds memory for the per-session completed-clientTurnId dedup set (see
 # PocAgentSession._mark_turn_completed) - a typical interview has a few dozen
 # turns at most, so this is a generous cap, not a tuned limit.
@@ -1902,9 +1911,14 @@ class PocAgentSession:
             REALTIME_PCM_SAMPLE_RATE if self._realtime_engine_active
             else patient_adapter.LIVEKIT_PCM_SAMPLE_RATE
         )
-        self._audio_source = rtc.AudioSource(
-            sample_rate=self._patient_audio_sample_rate, num_channels=1,
-        )
+        # prompt_agent uses a small playout buffer so barge-in is not delayed by
+        # ~1s of queued patient audio; all other engines keep LiveKit's default.
+        audio_source_kwargs = {
+            "sample_rate": self._patient_audio_sample_rate, "num_channels": 1,
+        }
+        if self._realtime_prompt_agent_active:
+            audio_source_kwargs["queue_size_ms"] = _PROMPT_AGENT_AUDIO_QUEUE_MS
+        self._audio_source = rtc.AudioSource(**audio_source_kwargs)
         track = rtc.LocalAudioTrack.create_audio_track("patient-voice", self._audio_source)
         await room.local_participant.publish_track(track, rtc.TrackPublishOptions())
         logger.info("livekit_agent_track_published session_id=%s job_id=%s", self.session_id, self._job_id)
@@ -2017,7 +2031,16 @@ class PocAgentSession:
         # Phase 4 (Step 7/8): additive field, backward-compatible with any
         # frontend build that doesn't read it (defaults to falsy/undefined
         # there, i.e. legacy browser-authoritative behavior).
-        self._publish_control({"type": "agent_ready", "semanticTurnControl": self._semantic_control_active})
+        # `promptAgent` (additive, backward-compatible): tells the frontend that
+        # OpenAI Realtime OWNS speech detection, turn-taking AND transcription
+        # for this session, so the browser must NOT run its own SpeechRecognition
+        # (it would be redundant dead weight and cause UI flicker). Absent/false
+        # for legacy/controlled/native modes, which keep their existing behavior.
+        self._publish_control({
+            "type": "agent_ready",
+            "semanticTurnControl": self._semantic_control_active,
+            "promptAgent": self._realtime_prompt_agent_active,
+        })
 
     def _maybe_send_realtime_agent_ready(self) -> None:
         """Compatibility signal, delayed until provider + mic path are real."""
@@ -2264,6 +2287,9 @@ class PocAgentSession:
                 await realtime_session.aclose()
                 if self._realtime_session is realtime_session:
                     self._realtime_session = None
+            prompt_runtime = self._prompt_agent_runtime
+            if prompt_runtime is not None:
+                await prompt_runtime.aclose()
             self._native_agent_runtime = None
             self._prompt_agent_runtime = None
             self._realtime_configured_ready = False
@@ -2843,6 +2869,11 @@ class PocAgentSession:
             )
             self._realtime_session = realtime_session
             self._prompt_agent_runtime = prompt_runtime
+            # Launch the decoupled outbound-audio publisher so the Realtime
+            # receive loop never blocks on LiveKit capture_frame back-pressure
+            # (barge-in latency fix). The AudioSource already exists (created in
+            # start() before ingest); the publisher just awaits its queue.
+            prompt_runtime.start()
             await realtime_session.start()
         except Exception:
             if self._realtime_session is realtime_session:

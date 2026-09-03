@@ -256,6 +256,9 @@ interface AgentControlPayload {
   semanticTurnControl?: boolean;
   semanticIgnored?: boolean;
   reason?: string;
+  /** prompt_agent mode: OpenAI Realtime owns speech detection, turn-taking AND
+   * transcription, so the browser must NOT run its own SpeechRecognition. */
+  promptAgent?: boolean;
 }
 
 /** Phase G transcript-sync events (Realtime engine only). Every event carries
@@ -384,6 +387,12 @@ export class LiveKitPocEngine {
    * server drives that via "semantic_turn_started" instead (see
    * handleSemanticTurnStarted). Reset to false in end(). */
   private semanticTurnControlActive = false;
+  /** prompt_agent mode (from agent_ready.promptAgent): OpenAI Realtime owns
+   * speech detection, turn-taking AND transcription end to end. When true the
+   * engine NEVER starts browser SpeechRecognition - student/patient text arrive
+   * via transcript_sync, and mic audio is pure LiveKit transport to Realtime.
+   * Reset to false in end(). Never affects legacy/controlled/native modes. */
+  private promptAgentMode = false;
   /** Wall-clock time the current turn's text was FIRST sent to the agent -
    * used only to compute duration_ms for diagnostics (real-device latency
    * validation), never persisted or sent anywhere but the telemetry ping. */
@@ -737,9 +746,13 @@ export class LiveKitPocEngine {
       // recorded - this is the value startRecognition()'s onFinal reads for
       // every subsequent recognizer cycle this session.
       this.semanticTurnControlActive = parsed.semanticTurnControl === true;
+      // prompt_agent: Realtime owns transcription too, so the browser recognizer
+      // is disabled for this session (startRecognition() becomes a no-op).
+      this.promptAgentMode = parsed.promptAgent === true;
       logVoiceEvent("livekit_agent_ready_received", {
         startupGeneration: generation, connectionId: this.connectionId ?? undefined,
         semanticTurnControlActive: this.semanticTurnControlActive,
+        promptAgentMode: this.promptAgentMode,
       });
       this.maybeEnterListening(generation);
       return;
@@ -939,6 +952,16 @@ export class LiveKitPocEngine {
    * is the turn-2-never-recognized bug this fixes). */
   private startRecognition(): void {
     this.stopRecognition();
+    // prompt_agent: OpenAI Realtime owns speech detection AND transcription, so
+    // the browser recognizer is deliberately never started. Student/patient
+    // text arrive via transcript_sync; the LiveKit mic track carries the audio
+    // straight to Realtime. This is the single guard that keeps EVERY caller
+    // (maybeEnterListening, turn-completion resumes, watchdog recoveries) from
+    // spinning up a redundant recognizer in this mode.
+    if (this.promptAgentMode) {
+      logVoiceEvent("livekit_recognition_skipped_prompt_agent", { engineState: this.state });
+      return;
+    }
     this.recognizer = createRecognizer({
       onInterim: (text) => {
         if (this.state !== "listening") return; // stale recognizer instance - see onFinal below
@@ -1460,6 +1483,8 @@ export class LiveKitPocEngine {
     this.startupGeneration += 1;
     this.micReady = false;
     this.agentReadyReceived = false;
+    this.semanticTurnControlActive = false;
+    this.promptAgentMode = false;
     this.connectionId = null;
     this.clearMicTimeout();
     this.clearAgentReadyWatchdog();
