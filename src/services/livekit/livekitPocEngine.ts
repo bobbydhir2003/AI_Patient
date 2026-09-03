@@ -266,6 +266,9 @@ interface TranscriptSyncPayload {
   clientTurnId?: string;
   epoch?: number;
   patientTurnId?: string;
+  /** prompt_agent mode: the DB ConversationTurn id of a FINAL student turn,
+   * so the page can insert it with a stable identity (see StudentTextMeta). */
+  studentTurnId?: string;
   text?: string;
   reason?: string;
 }
@@ -275,6 +278,14 @@ export interface PatientTextMeta {
   patientTurnId?: string;
   final: boolean;
   reason?: string;
+}
+
+/** prompt_agent mode: a FINAL student message that must be inserted into the
+ * conversation window with a stable DB id (studentTurnId), mirroring
+ * PatientTextMeta so the same refetch-reconciliation applies to both roles. */
+export interface StudentTextMeta {
+  clientTurnId?: string;
+  studentTurnId: string;
 }
 
 /** Coarse connection-milestone flags for the POC's diagnostic panel only -
@@ -312,6 +323,15 @@ export interface LiveKitPocCallbacks {
   onPatientText?: (
     text: string,
     meta: PatientTextMeta,
+  ) => void;
+  /** prompt_agent mode (OpenAI Realtime owns the conversation): a FINAL student
+   * transcript persisted to a ConversationTurn, carrying its DB id so the page
+   * inserts it into the conversation window with a stable identity. OPTIONAL so
+   * every existing caller/test is unaffected; only fires when the backend sends
+   * a student_transcript event with a studentTurnId (prompt_agent only). */
+  onStudentText?: (
+    text: string,
+    meta: StudentTextMeta,
   ) => void;
 }
 
@@ -1246,7 +1266,18 @@ export class LiveKitPocEngine {
     this.latestSyncEpoch = epoch;
     const text = parsed.text ?? "";
     if (parsed.type === "student_transcript") {
+      // Clear any interim draft (existing behavior for every mode).
       this.callbacks.onStudentTranscript(text, true);
+      // prompt_agent mode: the FINAL student turn is persisted server-side and
+      // carries its DB id, so insert it into the conversation window with a
+      // stable identity rather than discarding it. Legacy/controlled/native
+      // sessions never send studentTurnId, so this stays a no-op there.
+      if (parsed.studentTurnId) {
+        this.callbacks.onStudentText?.(text, {
+          clientTurnId: parsed.clientTurnId,
+          studentTurnId: parsed.studentTurnId,
+        });
+      }
       return;
     }
     if (parsed.type === "patient_text_ready") {

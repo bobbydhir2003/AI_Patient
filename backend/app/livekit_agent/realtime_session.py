@@ -33,6 +33,7 @@ from app.livekit_agent.realtime_client import (
     REALTIME_PCM_SAMPLE_RATE,
     RealtimeConnectionLike,
     build_native_agent_session_update,
+    build_prompt_agent_session_update,
     build_session_update,
     encode_audio_append,
 )
@@ -123,6 +124,7 @@ class RealtimeSession:
         on_speech_stopped: "Callable[[], None] | None" = None,
         on_unavailable: UnavailableHook | None = None,
         native_agent: Any | None = None,
+        prompt_agent: Any | None = None,
     ) -> None:
         self._session_id = session_id
         self._case_id = case_id
@@ -139,6 +141,13 @@ class RealtimeSession:
         self._native_agent = native_agent
         if self._native_agent is not None:
             self._native_agent.bind_session(self)
+        # prompt_agent mode: Realtime OWNS the conversation. Mutually exclusive
+        # with native_agent (the worker only ever wires one). When set, this
+        # session sends the prompt_agent session.update and routes every server
+        # event to the runtime, which handles audio-out + transcript persistence.
+        self._prompt_agent = prompt_agent
+        if self._prompt_agent is not None:
+            self._prompt_agent.bind_session(self)
         self._native_followups: dict[str, dict[str, Any]] = {}
         self._native_active_response_id: str | None = None
         self._native_active_item_id: str | None = None
@@ -223,11 +232,17 @@ class RealtimeSession:
             "realtime_session_starting session_id=%s identity=%s track=%s model=%s voice=%s",
             self._session_id, self._identity, self._track_sid,
             (
-                self._settings.openai_realtime_native_agent_model
+                self._prompt_agent.config["model"]
+                if self._prompt_agent is not None
+                else self._settings.openai_realtime_native_agent_model
                 if self._native_agent is not None
                 else self._settings.openai_realtime_model
             ),
-            self._settings.openai_realtime_voice,
+            (
+                self._prompt_agent.config["voice"]
+                if self._prompt_agent is not None
+                else self._settings.openai_realtime_voice
+            ),
         )
 
     @property
@@ -295,14 +310,17 @@ class RealtimeSession:
                 self._conn = conn
                 self._connected = True
                 self._configuration_pending = True
-                session_update = (
-                    build_native_agent_session_update(
+                if self._prompt_agent is not None:
+                    session_update = build_prompt_agent_session_update(
+                        self._settings, self._prompt_agent.config,
+                    )
+                elif self._native_agent is not None:
+                    session_update = build_native_agent_session_update(
                         self._settings,
                         instructions=self._native_agent.instructions,
                     )
-                    if self._native_agent is not None
-                    else build_session_update(self._settings)
-                )
+                else:
+                    session_update = build_session_update(self._settings)
                 await conn.send(session_update)
                 logger.info(
                     "realtime_session_connected_config_pending session_id=%s identity=%s track=%s",
@@ -386,6 +404,12 @@ class RealtimeSession:
             if event is None:
                 return
             self._handle_event(event)
+            if self._prompt_agent is not None:
+                event_type = getattr(event, "type", None) or (
+                    event.get("type") if isinstance(event, dict) else None
+                )
+                if event_type:
+                    await self._prompt_agent.handle_event(event_type, event)
             if self._native_agent is not None:
                 event_type = getattr(event, "type", None) or (
                     event.get("type") if isinstance(event, dict) else None

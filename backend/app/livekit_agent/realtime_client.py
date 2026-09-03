@@ -189,6 +189,56 @@ def build_native_agent_session_update(
     }
 
 
+def build_prompt_agent_session_update(
+    settings: "Settings", config: dict[str, Any],
+) -> dict[str, Any]:
+    """Configure Realtime to OWN the whole patient conversation (prompt_agent).
+
+    Unlike controlled/native mode, here Realtime is the conversational author:
+      - turn_detection = server_vad with create_response=True so Realtime
+        answers the student NATURALLY on end-of-turn (no backend generation),
+      - interrupt_response=True so Realtime auto-truncates its own answer on
+        barge-in (the worker additionally clears the LiveKit playback buffer),
+      - a hosted `prompt` reference (resolved server-side per patient) carries
+        the persona/instructions, so no per-patient prompt text lives here,
+      - conversation stays the DEFAULT (Realtime maintains dialogue state) -
+        we deliberately do NOT set conversation:"none".
+
+    `config` is a resolved dict from realtime_patient_configs.resolve_patient_config
+    (model/voice/prompt_id/turn_detection). reasoning_effort is carried in that
+    config for future use but is NOT sent here: gpt-realtime voice models do not
+    accept it today, and an unknown session field would fail the whole update.
+    """
+    turn = config["turn_detection"]
+    session: dict[str, Any] = {
+        "type": "realtime",
+        "model": config["model"],
+        "output_modalities": ["audio"],
+        "audio": {
+            "input": {
+                "format": dict(_PCM_FORMAT),
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": turn["threshold"],
+                    "prefix_padding_ms": turn["prefix_padding_ms"],
+                    "silence_duration_ms": turn["silence_duration_ms"],
+                    "create_response": True,
+                    "interrupt_response": True,
+                },
+                "transcription": {"model": settings.openai_realtime_transcription_model},
+            },
+            "output": {
+                "format": dict(_PCM_FORMAT),
+                "voice": config["voice"],
+            },
+        },
+    }
+    prompt_id = config.get("prompt_id")
+    if prompt_id:
+        session["prompt"] = {"id": prompt_id}
+    return {"type": "session.update", "session": session}
+
+
 def encode_audio_append(pcm16_bytes: bytes) -> dict[str, Any]:
     """The input_audio_buffer.append client event for one chunk of 24kHz mono
     PCM16 student audio (base64 as the wire format requires)."""

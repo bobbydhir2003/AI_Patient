@@ -29,6 +29,7 @@ import { useLiveKitInterviewVoice } from "../hooks/useLiveKitInterviewVoice";
 import {
   mapSessionMessages,
   reconcileLiveKitPatientMessage,
+  reconcileLiveKitStudentMessage,
 } from "../services/livekit/liveKitTranscriptMessages";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { AppImage } from "../components/common/AppImage";
@@ -433,6 +434,15 @@ export function InterviewPage() {
     onPatientText: (text, meta) => {
       setMessages((prev) =>
         reconcileLiveKitPatientMessage(prev, text, meta, formatTimestamp()),
+      );
+    },
+    // prompt_agent mode: OpenAI Realtime owns the conversation, so FINAL student
+    // turns arrive as transcript_sync events (keyed by the DB ConversationTurn
+    // id) rather than from the browser recognizer. Insert them the same way as
+    // patient text so the authoritative refetch reconciles without duplicating.
+    onStudentText: (text, meta) => {
+      setMessages((prev) =>
+        reconcileLiveKitStudentMessage(prev, text, meta, formatTimestamp()),
       );
     },
   });

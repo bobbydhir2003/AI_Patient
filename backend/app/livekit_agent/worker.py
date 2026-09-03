@@ -1489,6 +1489,8 @@ class PocAgentSession:
         self._realtime_engine_active = False
         self._realtime_native_agent_active = False
         self._native_agent_runtime: "Any | None" = None
+        self._realtime_prompt_agent_active = False
+        self._prompt_agent_runtime: "Any | None" = None
         self._realtime_session_started = asyncio.Event()
         self._realtime_configured_ready = False
         self._realtime_ready_task: "asyncio.Task[None] | None" = None
@@ -1657,6 +1659,7 @@ class PocAgentSession:
         startup_settings = get_settings()
         self._realtime_engine_active = startup_settings.realtime_engine_active
         self._realtime_native_agent_active = startup_settings.realtime_native_agent_active
+        self._realtime_prompt_agent_active = startup_settings.realtime_prompt_agent_active
 
         # The student typically connects (creating the room, which triggers
         # our job dispatch) BEFORE this worker joins - so their identity is
@@ -2262,6 +2265,7 @@ class PocAgentSession:
                 if self._realtime_session is realtime_session:
                     self._realtime_session = None
             self._native_agent_runtime = None
+            self._prompt_agent_runtime = None
             self._realtime_configured_ready = False
             self._realtime_producer_attached = False
             self._realtime_producer_track_sid = None
@@ -2719,6 +2723,15 @@ class PocAgentSession:
             from app.livekit_agent.realtime_client import OpenAIRealtimeClient
             from app.livekit_agent.realtime_session import RealtimeSession
 
+            # prompt_agent: OpenAI Realtime owns the whole conversation. Fully
+            # isolated from controlled/native - it uses its own runtime, its own
+            # per-patient model/voice/prompt, and bypasses turn control, backend
+            # generation and native staging entirely.
+            if settings.realtime_prompt_agent_active:
+                return await self._start_prompt_agent_session(
+                    settings, identity, track_sid,
+                )
+
             native_runtime = None
             if settings.realtime_native_agent_active:
                 from app.livekit_agent.native_agent_runtime import NativeRealtimeAgentRuntime
@@ -2780,6 +2793,101 @@ class PocAgentSession:
             self.session_id, identity, track_sid,
         )
         return realtime_session
+
+    async def _start_prompt_agent_session(
+        self, settings, identity: str, track_sid: str,
+    ) -> "RealtimeSession | None":
+        """prompt_agent path: resolve this interview's patient config from the
+        trusted server-side case_id and open ONE Realtime session that OWNS the
+        conversation. Fails safe to None (like the parent) if the patient is
+        unconfigured or construction fails, so the caller can shut down cleanly
+        rather than voice the wrong / an unconfigured patient."""
+        from app.livekit_agent.realtime_client import OpenAIRealtimeClient
+        from app.livekit_agent.realtime_patient_configs import (
+            PatientConfigError,
+            resolve_patient_config,
+        )
+        from app.livekit_agent.realtime_prompt_agent import PromptAgentRuntime
+        from app.livekit_agent.realtime_session import RealtimeSession
+
+        try:
+            config = resolve_patient_config(self.case_id, settings)
+        except PatientConfigError:
+            logger.exception(
+                "prompt_agent_config_unresolved session_id=%s case_id=%s",
+                self.session_id, self.case_id,
+            )
+            return None
+        realtime_session = None
+        try:
+            prompt_runtime = PromptAgentRuntime(
+                session_id=self.session_id,
+                case_id=self.case_id,
+                config=config,
+                db_factory=self._session_factory,
+                on_audio=self._publish_realtime_pcm,
+                on_student_final=self._on_prompt_student_final,
+                on_patient_final=self._on_prompt_patient_final,
+            )
+            client = OpenAIRealtimeClient(api_key=settings.openai_api_key, model=config["model"])
+            realtime_session = RealtimeSession(
+                session_id=self.session_id, case_id=self.case_id, identity=identity,
+                track_sid=track_sid, client=client, settings=settings,
+                # Realtime owns turn-taking AND authoring: no turn controller, no
+                # backend turn acceptance. speech_started only clears the local
+                # playback buffer on barge-in (OpenAI cancels its own response).
+                on_turn_complete=None,
+                on_speech_started=self._on_prompt_speech_started,
+                on_unavailable=self._on_realtime_unavailable,
+                prompt_agent=prompt_runtime,
+            )
+            self._realtime_session = realtime_session
+            self._prompt_agent_runtime = prompt_runtime
+            await realtime_session.start()
+        except Exception:
+            if self._realtime_session is realtime_session:
+                self._realtime_session = None
+                self._prompt_agent_runtime = None
+            logger.exception(
+                "prompt_agent_session_start_failed session_id=%s case_id=%s identity=%s track=%s",
+                self.session_id, self.case_id, identity, track_sid,
+            )
+            return None
+        logger.info(
+            "prompt_agent_engine_active session_id=%s case_id=%s identity=%s track=%s model=%s voice=%s",
+            self.session_id, self.case_id, identity, track_sid,
+            config["model"], config["voice"],
+        )
+        return realtime_session
+
+    def _on_prompt_speech_started(self) -> None:
+        """Barge-in in prompt_agent mode: immediately drop any queued patient
+        audio so a cancelled answer stops the instant the student speaks. OpenAI
+        (interrupt_response=True) cancels its own in-flight response server-side;
+        the runtime rejects any late audio deltas for it."""
+        if self._audio_source is not None:
+            try:
+                self._audio_source.clear_queue()
+            except Exception:
+                logger.exception(
+                    "prompt_agent_audio_clear_failed session_id=%s", self.session_id,
+                )
+
+    def _on_prompt_student_final(
+        self, client_turn_id: str, epoch: int, student_turn_id: str, text: str,
+    ) -> None:
+        self._send_transcript_sync(
+            "student_transcript", client_turn_id, epoch=epoch, text=text,
+            student_turn_id=student_turn_id,
+        )
+
+    def _on_prompt_patient_final(
+        self, client_turn_id: str, epoch: int, patient_turn_id: str, text: str,
+    ) -> None:
+        self._send_transcript_sync(
+            "patient_text_final", client_turn_id, epoch=epoch, text=text,
+            patient_turn_id=patient_turn_id,
+        )
 
     def _reserve_native_generation(self, client_turn_id: str) -> int:
         """Native equivalent of P0-3's synchronous authoritative boundary."""
@@ -3891,7 +3999,8 @@ class PocAgentSession:
 
     def _send_transcript_sync(
         self, event_type: str, client_turn_id: str, *, epoch: int, text: str,
-        patient_turn_id: str | None = None, reason: str | None = None,
+        patient_turn_id: str | None = None, student_turn_id: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Phase G: publish one transcript-sync event (see TRANSCRIPT_SYNC_TOPIC)
         targeted at the student, carrying the generation epoch so the frontend
@@ -3901,6 +4010,8 @@ class PocAgentSession:
         body: dict = {"type": event_type, "clientTurnId": client_turn_id, "epoch": epoch, "text": text}
         if patient_turn_id is not None:
             body["patientTurnId"] = patient_turn_id
+        if student_turn_id is not None:
+            body["studentTurnId"] = student_turn_id
         if reason is not None:
             body["reason"] = reason
         payload = json.dumps(body).encode("utf-8")

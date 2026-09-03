@@ -30,6 +30,7 @@ import {
   fetchStudentLiveKitToken,
   type PocState,
   type PatientTextMeta,
+  type StudentTextMeta,
 } from "../services/livekit/livekitPocEngine";
 import { isSpeechRecognitionSupported } from "../services/speechRecognitionService";
 import { isConversationActive, type VoiceConversationState } from "./voiceStateMachine";
@@ -107,6 +108,14 @@ export interface UseLiveKitInterviewVoiceOptions {
     text: string,
     meta: PatientTextMeta,
   ) => void;
+  /** prompt_agent mode: a FINAL student transcript persisted server-side,
+   * keyed by `studentTurnId` (the DB ConversationTurn id) so the page can
+   * render it immediately and reconcile with the authoritative DB refetch
+   * WITHOUT duplicating the message. Optional/no-op in every other mode. */
+  onStudentText?: (
+    text: string,
+    meta: StudentTextMeta,
+  ) => void;
 }
 
 export interface UseLiveKitInterviewVoiceResult {
@@ -174,6 +183,12 @@ export function useLiveKitInterviewVoice(
       onPatientText: (text, meta) => {
         if (engineRef.current !== engine) return;
         optionsRef.current.onPatientText?.(text, meta);
+      },
+      // prompt_agent mode: forward the FINAL student transcript so the page can
+      // insert it into the conversation window with a stable DB id.
+      onStudentText: (text, meta) => {
+        if (engineRef.current !== engine) return;
+        optionsRef.current.onStudentText?.(text, meta);
       },
       // POC-only diagnostics/room-name surfacing - the real InterviewPage
       // has no admin diagnostic panel and never displays a room name.

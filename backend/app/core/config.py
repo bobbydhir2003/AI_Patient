@@ -286,8 +286,20 @@ class Settings(BaseSettings):
     # Selects which OpenAI Realtime architecture the worker uses.  The
     # existing backend-controlled pipeline remains the default.  "native_agent"
     # enables the tool-authorized conversational agent without changing token
-    # minting or the legacy LiveKit/ElevenLabs selection.
+    # minting or the legacy LiveKit/ElevenLabs selection.  "prompt_agent" hands
+    # the whole conversation to OpenAI Realtime (hosted prompt per patient,
+    # server_vad, native create_response) and only persists/streams the final
+    # transcripts - see app/livekit_agent/realtime_prompt_agent.py.
     openai_realtime_engine_mode: str = "controlled"
+    # prompt_agent hosted-prompt IDs, one per canonical case_id. These are
+    # SECRETS supplied per environment (never hardcoded, never sent to the
+    # frontend) and resolved server-side from the interview's trusted case_id
+    # (see realtime_patient_configs.resolve_patient_config). Empty => that
+    # patient is not yet configured and its interview fails to start loudly.
+    openai_realtime_carly_prompt_id: str = ""
+    openai_realtime_camden_prompt_id: str = ""
+    openai_realtime_sofia_prompt_id: str = ""
+    openai_realtime_jayden_prompt_id: str = ""
     # GA Realtime model + native voice. "gpt-realtime" is the current GA model;
     # "marin"/"cedar" are OpenAI's recommended voices. Single voice for the POC.
     openai_realtime_model: str = "gpt-realtime"
@@ -552,9 +564,10 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_realtime_engine_mode(cls, value: object) -> object:
         normalized = str(value or "controlled").strip().lower()
-        if normalized not in ("controlled", "native_agent"):
+        if normalized not in ("controlled", "native_agent", "prompt_agent"):
             raise ValueError(
-                "OPENAI_REALTIME_ENGINE_MODE must be 'controlled' or 'native_agent'"
+                "OPENAI_REALTIME_ENGINE_MODE must be 'controlled', 'native_agent' "
+                "or 'prompt_agent'"
             )
         return normalized
 
@@ -772,6 +785,14 @@ class Settings(BaseSettings):
     @property
     def realtime_native_agent_active(self) -> bool:
         return self.realtime_engine_active and self.openai_realtime_engine_mode == "native_agent"
+
+    @property
+    def realtime_prompt_agent_active(self) -> bool:
+        """prompt_agent engine: OpenAI Realtime owns the whole conversation
+        (hosted prompt per patient). True only when the Realtime engine is
+        enabled/keyed AND this mode is explicitly selected, so controlled and
+        native_agent behavior is byte-for-byte untouched when it is off."""
+        return self.realtime_engine_active and self.openai_realtime_engine_mode == "prompt_agent"
 
     @property
     def cors_origin_list(self) -> list[str]:
