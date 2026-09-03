@@ -33,8 +33,9 @@ matching the persistent worker's existing single-speaker-per-turn design.
 from __future__ import annotations
 
 import re
+from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, ContextManager
 
 from sqlalchemy.orm import Session
 
@@ -67,6 +68,16 @@ class LiveKitPocSessionNotFoundError(Exception):
     HTTP context of its own (it is called from worker.py, not a request)."""
 
 
+class GenerationStaleError(Exception):
+    """Phase F: raised INSIDE generate_and_persist_turn when the caller's
+    is_generation_valid() predicate reports this turn was superseded by a newer
+    genuine student utterance DURING its (uncancellable) OpenAI generation.
+    Raised BEFORE any authoritative side effect (turn rows, disclosure state,
+    active topic, commit), so a stale generation mutates nothing - it is as if
+    the response never existed. Only the Realtime engine passes the predicate;
+    legacy callers never trigger this."""
+
+
 @dataclass(frozen=True)
 class PocTurnResult:
     student_turn_id: str
@@ -88,6 +99,8 @@ def generate_and_persist_turn(
     question: str,
     client_turn_id: str,
     on_stage: StageCallback | None = None,
+    is_generation_valid: Callable[[], bool] | None = None,
+    generation_authority: ContextManager[object] | None = None,
 ) -> PocTurnResult:
     """Reuses interview_service.send_student_message's core steps, INCLUDING
     its speaker_router.resolve_for_case() routing decision - so a
@@ -185,21 +198,41 @@ def generate_and_persist_turn(
 
     eff_speaker_id, speaker_label, voice_key = speaker_router.participant_meta(case, resolved_speaker)
 
-    student_turn = transcript_repo.append_turn(
-        session_id, ROLE_STUDENT, question,
-        client_turn_id=client_turn_id, source="speech",
-    )
-    patient_turn = transcript_repo.append_turn(
-        session_id, ROLE_PATIENT, result.text,
-        client_turn_id=f"{client_turn_id}:patient", source="openai",
-        model_name=result.model_name, prompt_version=PROMPT_VERSION,
-        facts_used=result.used_fact_ids, response_type=result.response_type,
-        validation_status=result.validation_status,
-        speaker_id=eff_speaker_id, speaker_label=speaker_label,
-    )
-    session_repo.add_disclosed_fact_ids(session, result.newly_disclosed_fact_ids)
-    session_repo.set_active_topic(session, result.active_topic)
-    db.commit()
+    # Phase F generation-epoch gate: the Realtime engine passes a predicate
+    # checked HERE - after generation/validation/disclosure-decision, but
+    # BEFORE the first authoritative side effect below (the two append_turn
+    # inserts, add_disclosed_fact_ids, set_active_topic, commit). If a newer
+    # genuine student utterance superseded this turn while its uncancellable
+    # OpenAI call was running, raise so NOTHING is persisted and disclosure
+    # state is NOT mutated. Note the in-memory DisclosureManager.mark_disclosed
+    # done inside generate_patient_response above only touched a LOCAL object
+    # (result.newly_disclosed_fact_ids); the authoritative disclosure write is
+    # add_disclosed_fact_ids below, which this gate prevents. Legacy callers
+    # pass no predicate and are byte-for-byte unaffected.
+    # Realtime supplies the same short lock used for accepted-generation
+    # reservation. Therefore either this entire authoritative transaction
+    # commits first, or a newer generation reserves first and this block does
+    # zero writes. The lock is acquired only after OpenAI generation and is
+    # released before any audio work. Legacy callers omit it unchanged.
+    with generation_authority if generation_authority is not None else nullcontext():
+        if is_generation_valid is not None and not is_generation_valid():
+            raise GenerationStaleError(client_turn_id)
+
+        student_turn = transcript_repo.append_turn(
+            session_id, ROLE_STUDENT, question,
+            client_turn_id=client_turn_id, source="speech",
+        )
+        patient_turn = transcript_repo.append_turn(
+            session_id, ROLE_PATIENT, result.text,
+            client_turn_id=f"{client_turn_id}:patient", source="openai",
+            model_name=result.model_name, prompt_version=PROMPT_VERSION,
+            facts_used=result.used_fact_ids, response_type=result.response_type,
+            validation_status=result.validation_status,
+            speaker_id=eff_speaker_id, speaker_label=speaker_label,
+        )
+        session_repo.add_disclosed_fact_ids(session, result.newly_disclosed_fact_ids)
+        session_repo.set_active_topic(session, result.active_topic)
+        db.commit()
 
     logger.info(
         "livekit_poc_turn_completed session_id=%s client_turn_id=%s case_id=%s speaker_id=%s voice_key=%s",

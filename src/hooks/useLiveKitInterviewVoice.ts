@@ -15,12 +15,10 @@
  *   never touched by the engine directly (it is embedded server-side by
  *   livekit_token_service.py's dispatch metadata, from the SAME session
  *   row - see backend/app/services/livekit_token_service.py).
- * - Patient TEXT is never invented client-side: onTurnCompleted only
- *   signals "a turn just finished" - the page re-fetches the authoritative
- *   transcript from the backend (the same DB rows the agent already wrote),
- *   exactly like the existing "resume an in-progress session" code path
- *   already does. This avoids adding a second, parallel text-delivery
- *   protocol to worker.py/patient_turn_status.
+ * - Patient TEXT is never invented client-side: Realtime transcript_sync
+ *   events surface backend-approved persisted text immediately, then
+ *   onTurnCompleted causes the page to re-fetch the same authoritative DB
+ *   rows. Both paths share ConversationTurn.id, so they reconcile naturally.
  *
  * NEVER calls speechSynthesis, patientVoiceService, or any legacy playback
  * primitive - see livekitPocEngine.ts's own docstring/tests for that
@@ -31,6 +29,7 @@ import {
   LiveKitPocEngine,
   fetchStudentLiveKitToken,
   type PocState,
+  type PatientTextMeta,
 } from "../services/livekit/livekitPocEngine";
 import { isSpeechRecognitionSupported } from "../services/speechRecognitionService";
 import { isConversationActive, type VoiceConversationState } from "./voiceStateMachine";
@@ -97,6 +96,17 @@ export interface UseLiveKitInterviewVoiceOptions {
    * NO text - the page is expected to re-fetch the session's transcript,
    * the single source of truth, rather than trust a client-held copy. */
   onTurnCompleted: () => void;
+  /** P0-1: the backend-APPROVED patient text for a Realtime turn, delivered
+   * as soon as it is persisted (`final:false`, before/at speech start) and
+   * reconciled on completion/interruption (`final:true`, with `reason`).
+   * Keyed by `patientTurnId` (the DB ConversationTurn id) so the page can
+   * render Carly's text immediately and later reconcile with the authoritative
+   * DB refetch WITHOUT duplicating the message. Optional/no-op in legacy mode
+   * (transcript_sync never arrives there). */
+  onPatientText?: (
+    text: string,
+    meta: PatientTextMeta,
+  ) => void;
 }
 
 export interface UseLiveKitInterviewVoiceResult {
@@ -158,6 +168,12 @@ export function useLiveKitInterviewVoice(
       onTurnCompleted: () => {
         if (engineRef.current !== engine) return;
         optionsRef.current.onTurnCompleted();
+      },
+      // P0-1: forward the Realtime approved/final patient text so the page can
+      // render Carly immediately (no page refresh needed).
+      onPatientText: (text, meta) => {
+        if (engineRef.current !== engine) return;
+        optionsRef.current.onPatientText?.(text, meta);
       },
       // POC-only diagnostics/room-name surfacing - the real InterviewPage
       // has no admin diagnostic panel and never displays a room name.

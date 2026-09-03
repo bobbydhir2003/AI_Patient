@@ -8,7 +8,6 @@ import {
   fetchSession,
   fetchSessionTurns,
   sendStudentMessage,
-  type ApiSession,
   type VoiceEngine,
 } from "../services/api";
 import { classifyInterviewInitError } from "../services/interviewErrors";
@@ -27,6 +26,10 @@ import { unlockAudioPlayback } from "../services/audioUnlock";
 import { audioSetupOptions, autoInterruptNote } from "../services/mobileAudio";
 import { useVoiceConversation } from "../hooks/useVoiceConversation";
 import { useLiveKitInterviewVoice } from "../hooks/useLiveKitInterviewVoice";
+import {
+  mapSessionMessages,
+  reconcileLiveKitPatientMessage,
+} from "../services/livekit/liveKitTranscriptMessages";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { AppImage } from "../components/common/AppImage";
 import { isUsableTranscript, type VoiceConversationState } from "../hooks/voiceStateMachine";
@@ -42,28 +45,9 @@ import { InterviewTimer } from "../components/interview/InterviewTimer";
 import { ConfirmationModal } from "../components/interview/ConfirmationModal";
 import type {
   ConnectionState,
-  ConversationMessage,
   PatientExchange,
 } from "../types/interview";
 import styles from "./InterviewPage.module.css";
-
-/** Shared by the initial "resume an in-progress session" restore AND, in
- * LiveKit mode, the per-turn refresh after the agent completes a turn - the
- * backend transcript is the single source of truth in both cases. */
-function mapSessionMessages(session: ApiSession): ConversationMessage[] {
-  return session.messages.map((m) => ({
-    id: m.id,
-    sender: m.sender,
-    text: m.text,
-    speakerId: m.speakerId,
-    speakerLabel: m.speakerLabel,
-    saveStatus: "saved" as const,
-    timestamp: new Date(m.timestamp).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    }),
-  }));
-}
 
 const PROGRESS_STEPS = ["Case Introduction", "Interview", "Complete"];
 
@@ -441,6 +425,15 @@ export function InterviewPage() {
         .catch((err) => {
           if (import.meta.env.DEV) console.error("Could not refresh transcript after LiveKit turn:", err);
         });
+    },
+    // P0-1: render Carly's approved text the instant it's ready (before speech
+    // completes) and reconcile it on final - keyed by patientTurnId (the DB
+    // ConversationTurn id) so the later authoritative DB refetch REPLACES this
+    // same message rather than appending a duplicate.
+    onPatientText: (text, meta) => {
+      setMessages((prev) =>
+        reconcileLiveKitPatientMessage(prev, text, meta, formatTimestamp()),
+      );
     },
   });
 

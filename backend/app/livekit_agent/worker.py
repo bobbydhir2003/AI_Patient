@@ -93,6 +93,7 @@ import collections
 import itertools
 import json
 import logging
+import threading
 import time
 from collections import OrderedDict
 from enum import Enum
@@ -105,6 +106,7 @@ from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.database.connection import get_db_factory
 from app.livekit_agent import patient_adapter
+from app.livekit_agent.realtime_client import REALTIME_PCM_SAMPLE_RATE
 from app.livekit_agent.turn_detector import (
     BargeInDecision,
     SemanticTurnDetector,
@@ -120,6 +122,7 @@ if TYPE_CHECKING:
     import livekit.rtc as rtc
     from livekit.agents import stt as agents_stt
     from livekit.agents import vad as agents_vad
+    from app.livekit_agent.realtime_session import RealtimeSession
 
 logger = get_logger("app.livekit_agent.worker")
 
@@ -130,6 +133,20 @@ PATIENT_TURN_STATUS_TOPIC = "patient_turn_status"
 # independently. Both use topic + a `type`/`status` discriminator, matching
 # the frontend's livekitPocEngine.ts AgentControlPayload/TurnStatusPayload.
 AGENT_CONTROL_TOPIC = "agent_control"
+
+# Phase G (Realtime engine only): agent->browser transcript-sync events so the
+# visible conversation reflects the Realtime engine promptly, while the DB stays
+# authoritative. Distinct topic from patient_turn_status (audio lifecycle) and
+# agent_control (readiness/acks) so it evolves independently and a legacy
+# frontend that never subscribes is completely unaffected. Every event carries
+# clientTurnId + generation `epoch` (+ patientTurnId where applicable) so the
+# frontend can drop a stale/out-of-order event. Event `type`s:
+#   student_transcript  - the authoritative student text for this Realtime turn
+#   patient_text_ready  - the backend-APPROVED patient text, sent BEFORE speech
+#                         completes so it can render immediately
+#   patient_text_final  - the reconciled final content (full on normal
+#                         completion, the delivered PORTION after an interruption)
+TRANSCRIPT_SYNC_TOPIC = "transcript_sync"
 
 # Phase D2: the browser sends this on AGENT_CONTROL_TOPIC (the SAME topic the
 # agent already uses for agent_ready/turn_ack) to request true SPEAKING-only
@@ -163,6 +180,11 @@ _MAX_COMPLETED_TURN_IDS = 200
 # active mic does not spam the log at frame rate (~50 frames/sec at 20ms
 # frames) - see PocAgentSession._ingest_student_audio.
 _STUDENT_AUDIO_LOG_INTERVAL_SECONDS = 10.0
+
+# Must resolve before the frontend's existing 20-second agent_ready watchdog.
+# This bounds only provider configuration acknowledgement; it does not change
+# VAD, turn, generation, or response latency behavior.
+_REALTIME_READY_TIMEOUT_SECONDS = 15.0
 
 # Phase 2 (server-side VAD/STT, PARALLEL/OBSERVATIONAL only - see
 # _StudentVadSttPipeline below): the sample rate requested from both Silero
@@ -310,6 +332,18 @@ def parse_job_metadata(raw: str) -> tuple[str, str] | None:
     if not session_id or not case_id:
         return None
     return session_id, case_id
+
+
+def _normalize_for_fidelity(text: str) -> str:
+    """Lowercase, drop punctuation, collapse whitespace - so the Phase D
+    verbatim-fidelity check (see PocAgentSession._check_voice_fidelity) compares
+    spoken vs approved CONTENT, not trivial STT punctuation/casing. No regex
+    (keeps worker.py's import surface unchanged)."""
+    # Drop apostrophes outright (not to a space) so contractions collapse
+    # consistently ("I've" -> "ive"), then map remaining punctuation to spaces.
+    stripped = (text or "").replace("'", "").replace("’", "")
+    cleaned = "".join(c.lower() if c.isalnum() else " " for c in stripped)
+    return " ".join(cleaned.split())
 
 
 class _StudentVadSttPipeline:
@@ -1436,9 +1470,55 @@ class PocAgentSession:
         self._room_id = room_id
         self._on_shutdown = on_shutdown
         self._shutdown_called = False  # idempotency guard - see _trigger_shutdown
+        self._closed = False
+        self._close_lock = asyncio.Lock()
+        self._accepting_audio_producers = True
+        self._shutdown_task: "asyncio.Task[None] | None" = None
         self._turn_lock = asyncio.Lock()
         self._session_factory = get_db_factory()
         self._audio_source: "rtc.AudioSource | None" = None
+        # Phase D: the AudioSource rate depends on the engine - the legacy
+        # ElevenLabs path publishes 16kHz PCM, the Realtime native-voice path
+        # publishes 24kHz. Resolved once in start() from settings; the outbound
+        # track and every _publish_*_pcm frame must agree with this value.
+        self._patient_audio_sample_rate = patient_adapter.LIVEKIT_PCM_SAMPLE_RATE
+        # Phase 1 persistent ownership: the worker job owns this provider
+        # session. Microphone AudioStreams are replaceable producers only and
+        # must never close or clear it.
+        self._realtime_session: "RealtimeSession | None" = None
+        self._realtime_engine_active = False
+        self._realtime_native_agent_active = False
+        self._native_agent_runtime: "Any | None" = None
+        self._realtime_session_started = asyncio.Event()
+        self._realtime_configured_ready = False
+        self._realtime_ready_task: "asyncio.Task[None] | None" = None
+        self._realtime_producer_generation = 0
+        self._realtime_producer_track_sid: str | None = None
+        self._realtime_producer_attached = False
+        self._agent_ready_sent = False
+        # P0-3 backend-authoritative generation identity. Advanced only when
+        # RealtimeTurnController accepts a deduplicated, non-empty completed
+        # transcript; raw speech_started is only a low-latency audio signal.
+        # A patient turn receives its generation synchronously at acceptance;
+        # any async
+        # side effect (persistence, native speech) verifies it still owns the
+        # current epoch before proceeding, so a superseded turn can never
+        # persist stale disclosure state or speak over the student. See
+        # _on_realtime_speech_started / _handle_realtime_turn / _run_realtime_turn.
+        self._generation_epoch = 0
+        # Shared only by accepted-generation reservation and the final
+        # Realtime persistence/disclosure transaction. Never held during model
+        # generation, _turn_lock waiting, or audio playback.
+        self._generation_authority_lock = threading.Lock()
+        # Orthogonal raw-audio candidate state. The Event is set whenever it is
+        # safe for Carly to begin speaking and cleared only during an actual
+        # speech_started..speech_stopped interval. Teardown always releases it.
+        self._realtime_student_speech_active = False
+        self._realtime_student_speech_stopped = asyncio.Event()
+        self._realtime_student_speech_stopped.set()
+        # One cutoff per currently-speaking patient turn, even when duplicate
+        # speech_started and accepted-turn confirmation both request it.
+        self._realtime_cutoff_turn_id: str | None = None
         self._started_at = time.monotonic()
         # The student's participant identity, once known - used to target
         # agent->browser control/status messages instead of blindly
@@ -1570,6 +1650,13 @@ class PocAgentSession:
         import livekit.rtc as rtc
 
         room = self._room
+        # Decide ownership mode before registering/backfilling track handlers:
+        # a pre-existing microphone may subscribe synchronously and its
+        # producer must wait for the job-owned RealtimeSession, never start the
+        # legacy pipeline by accident.
+        startup_settings = get_settings()
+        self._realtime_engine_active = startup_settings.realtime_engine_active
+        self._realtime_native_agent_active = startup_settings.realtime_native_agent_active
 
         # The student typically connects (creating the room, which triggers
         # our job dispatch) BEFORE this worker joins - so their identity is
@@ -1627,6 +1714,21 @@ class PocAgentSession:
             # very next browser packet.
             semantic_ignored = self._semantic_control_active and not is_manual_override
 
+            # Fix 1 (dual-engine guard): when the OpenAI Realtime engine is the
+            # active turn/voice brain for this session, the raw student-AUDIO
+            # path already drives every spoken turn in native voice. A browser
+            # SpeechRecognition final must therefore NEVER also enter the legacy
+            # _handle_student_turn/_run_turn/ElevenLabs pipeline - that would
+            # double-respond and (on a key lacking text_to_speech) fail the turn
+            # (the exact symptom this fixes). A deliberate MANUAL typed Send is
+            # still honored, but routed through the SAME Realtime engine below,
+            # never the legacy ElevenLabs path. Re-read per packet (not cached),
+            # mirroring the semantic re-check above.
+            realtime_settings = get_settings()
+            realtime_active = realtime_settings.realtime_engine_active
+            realtime_native = realtime_settings.realtime_native_agent_active
+            realtime_ignored = realtime_active and not is_manual_override
+
             # Turn ACK is the FIRST action for any structurally valid packet -
             # before any dedup/processing decision, before OpenAI/TTS ever
             # starts (Part 3). A duplicate gets ack'd again too (Part 5). This
@@ -1638,7 +1740,9 @@ class PocAgentSession:
             # browser packet cannot cause a duplicate patient response; it
             # only prevents a pointless client-side delivery-retry storm for
             # a packet the server is about to ignore.
-            self._send_turn_ack(client_turn_id, semantic_ignored=semantic_ignored)
+            self._send_turn_ack(
+                client_turn_id, semantic_ignored=semantic_ignored or realtime_ignored,
+            )
 
             if semantic_ignored:
                 self._log_agent_event(
@@ -1647,6 +1751,20 @@ class PocAgentSession:
                 logger.info(
                     "semantic_turn_browser_text_ignored session_id=%s client_turn_id=%s turn_source=%s "
                     "reason=semantic_control_active",
+                    self.session_id, client_turn_id, TurnSource.BROWSER_TEXT.value,
+                )
+                return
+
+            if realtime_ignored:
+                # Browser speech-recognition text under the Realtime engine -
+                # ack'd (so the browser doesn't retry) but never processed: the
+                # audio path owns this spoken turn. No legacy _run_turn/ElevenLabs.
+                self._log_agent_event(
+                    "realtime_browser_text_ignored", client_turn_id=client_turn_id,
+                )
+                logger.info(
+                    "realtime_browser_text_ignored session_id=%s client_turn_id=%s turn_source=%s "
+                    "reason=realtime_engine_active",
                     self.session_id, client_turn_id, TurnSource.BROWSER_TEXT.value,
                 )
                 return
@@ -1664,9 +1782,31 @@ class PocAgentSession:
                 self._log_agent_event("livekit_agent_duplicate_turn_received", client_turn_id=client_turn_id)
                 return
 
-            # Reserve the slot synchronously (not inside the coroutine below)
-            # so a duplicate arriving in the brief window before the
-            # scheduled task actually starts running is still caught.
+            # Fix 1: a MANUAL typed Send under the Realtime engine is a conscious
+            # student action, so it IS honored - but through the SAME Realtime
+            # pipeline (native voice), never the legacy _run_turn/ElevenLabs.
+            # Reserve Realtime authority synchronously before scheduling, just
+            # like an accepted spoken Realtime transcript.
+            if realtime_active and is_manual_override:
+                self._log_agent_event(
+                    "realtime_manual_override_accepted", client_turn_id=client_turn_id,
+                )
+                if realtime_native:
+                    realtime_session = self._realtime_session
+                    if realtime_session is not None:
+                        asyncio.ensure_future(
+                            realtime_session.submit_typed_text(text, client_turn_id)
+                        )
+                else:
+                    processing = self._accept_realtime_turn(client_turn_id, text)
+                    if processing is not None:
+                        asyncio.ensure_future(processing)
+                return
+
+            # Legacy path (Realtime engine off, or a semantic manual override):
+            # reserve the slot synchronously (not inside the coroutine below) so
+            # a duplicate arriving in the brief window before the scheduled task
+            # actually starts running is still caught.
             self._in_flight_turn_ids.add(client_turn_id)
             asyncio.ensure_future(self._handle_student_turn(text, client_turn_id))
 
@@ -1751,8 +1891,16 @@ class PocAgentSession:
                 except Exception:
                     logger.exception("student_audio_backfill_subscribe_failed session_id=%s", self.session_id)
 
+        # Phase D: match the outbound track rate to the active engine's audio
+        # (Realtime native voice = 24kHz, legacy ElevenLabs = 16kHz). Computed
+        # here from config (the engine is known at start() time), before the
+        # track is published, so it is fixed for the job's lifetime.
+        self._patient_audio_sample_rate = (
+            REALTIME_PCM_SAMPLE_RATE if self._realtime_engine_active
+            else patient_adapter.LIVEKIT_PCM_SAMPLE_RATE
+        )
         self._audio_source = rtc.AudioSource(
-            sample_rate=patient_adapter.LIVEKIT_PCM_SAMPLE_RATE, num_channels=1,
+            sample_rate=self._patient_audio_sample_rate, num_channels=1,
         )
         track = rtc.LocalAudioTrack.create_audio_track("patient-voice", self._audio_source)
         await room.local_participant.publish_track(track, rtc.TrackPublishOptions())
@@ -1764,7 +1912,7 @@ class PocAgentSession:
             logger.error(
                 "livekit_agent_session_not_found_at_start session_id=%s job_id=%s", self.session_id, self._job_id,
             )
-            self._trigger_shutdown("session_not_found")
+            await self._shutdown_and_signal("session_not_found")
             return
 
         # Phase 4 (Step 2): computed ONCE here, from config, before the
@@ -1817,7 +1965,21 @@ class PocAgentSession:
             self.session_id, self._resolution_timers_enabled,
         )
 
-        self._send_agent_ready()
+        if self._realtime_engine_active:
+            realtime_session = await self._maybe_start_realtime_session(
+                self._student_identity or "unattached", "unattached",
+            )
+            self._realtime_session_started.set()
+            if realtime_session is None:
+                await self._shutdown_and_signal("realtime_start_failed")
+                return
+            self._realtime_ready_task = asyncio.ensure_future(
+                self._await_realtime_ready(realtime_session)
+            )
+        else:
+            # Legacy readiness contract stays exactly as before.
+            self._realtime_session_started.set()
+            self._send_agent_ready()
 
     def _verify_session_exists(self) -> bool:
         db = self._session_factory()
@@ -1844,12 +2006,50 @@ class PocAgentSession:
             self._log_agent_event("livekit_agent_status_publish_failed")
 
     def _send_agent_ready(self) -> None:
+        if self._agent_ready_sent:
+            return
+        self._agent_ready_sent = True
         elapsed_ms = (time.monotonic() - self._started_at) * 1000
         self._log_agent_event("livekit_agent_ready_sent", elapsed_ms=elapsed_ms)
         # Phase 4 (Step 7/8): additive field, backward-compatible with any
         # frontend build that doesn't read it (defaults to falsy/undefined
         # there, i.e. legacy browser-authoritative behavior).
         self._publish_control({"type": "agent_ready", "semanticTurnControl": self._semantic_control_active})
+
+    def _maybe_send_realtime_agent_ready(self) -> None:
+        """Compatibility signal, delayed until provider + mic path are real."""
+        if (
+            self._realtime_engine_active
+            and self._realtime_configured_ready
+            and self._realtime_producer_attached
+            and self._realtime_session is not None
+            and self._realtime_session.is_ready
+            and not self._shutdown_called
+        ):
+            self._send_agent_ready()
+
+    async def _await_realtime_ready(self, realtime_session: "RealtimeSession") -> None:
+        ready = await realtime_session.wait_until_ready(_REALTIME_READY_TIMEOUT_SECONDS)
+        if self._realtime_session is not realtime_session or self._shutdown_called:
+            return
+        if not ready:
+            logger.error(
+                "realtime_session_ready_timeout session_id=%s reason=%s",
+                self.session_id, realtime_session.close_reason or "session_updated_timeout",
+            )
+            self._trigger_shutdown("realtime_not_ready")
+            return
+        self._realtime_configured_ready = True
+        self._log_agent_event("realtime_session_configured_ready")
+        self._maybe_send_realtime_agent_ready()
+
+    def _on_realtime_unavailable(self, reason: str) -> None:
+        self._realtime_configured_ready = False
+        logger.error(
+            "realtime_provider_unavailable session_id=%s reason=%s",
+            self.session_id, reason,
+        )
+        self._trigger_shutdown("realtime_provider_unavailable")
 
     def _send_turn_ack(self, client_turn_id: str, *, semantic_ignored: bool = False) -> None:
         self._log_agent_event("livekit_agent_turn_ack_sent", client_turn_id=client_turn_id)
@@ -2017,8 +2217,58 @@ class PocAgentSession:
             return
         self._shutdown_called = True
         logger.info("livekit_agent_job_shutdown session_id=%s reason=%s", self.session_id, reason)
-        self._stop_all_student_audio_ingest(reason="job_shutdown")
+        self._accepting_audio_producers = False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Defensive/test-only fallback: real LiveKit room callbacks execute
+            # on the job loop, but keeping the method total preserves its
+            # established synchronous callback contract for simple room fakes.
+            asyncio.run(self._shutdown_and_signal(reason))
+        else:
+            self._shutdown_task = loop.create_task(self._shutdown_and_signal(reason))
+
+    async def _shutdown_and_signal(self, reason: str) -> None:
+        """Close job-owned resources before asking LiveKit to end the job."""
+        self._shutdown_called = True
+        await self.aclose(reason=reason)
         self._on_shutdown(reason)
+
+    async def aclose(self, *, reason: str = "worker_shutdown") -> None:
+        """Idempotent full worker-session teardown.
+
+        Microphone producer cleanup is awaited first; the one job-owned
+        RealtimeSession is then closed exactly once. AudioStream cleanup never
+        reaches this method on its own.
+        """
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._accepting_audio_producers = False
+            self._release_realtime_speech_waiters(reason=reason)
+            producer_tasks = list(self._student_audio_tasks.values())
+            self._stop_all_student_audio_ingest(reason=reason)
+            if producer_tasks:
+                await asyncio.gather(*producer_tasks, return_exceptions=True)
+            if self._realtime_ready_task is not None and not self._realtime_ready_task.done():
+                if self._realtime_ready_task is not asyncio.current_task():
+                    self._realtime_ready_task.cancel()
+                    await asyncio.gather(self._realtime_ready_task, return_exceptions=True)
+            realtime_session = self._realtime_session
+            if realtime_session is not None:
+                await realtime_session.cancel_active_response()
+                await realtime_session.aclose()
+                if self._realtime_session is realtime_session:
+                    self._realtime_session = None
+            self._native_agent_runtime = None
+            self._realtime_configured_ready = False
+            self._realtime_producer_attached = False
+            self._realtime_producer_track_sid = None
+            logger.info(
+                "livekit_agent_resources_closed session_id=%s reason=%s",
+                self.session_id, reason,
+            )
 
     # --- Phase 1: raw student microphone audio ingestion (parallel path,
     # never drives the conversation) -----------------------------------
@@ -2082,6 +2332,8 @@ class PocAgentSession:
             return
         if track.kind != rtc.TrackKind.KIND_AUDIO:
             return
+        if not self._accepting_audio_producers:
+            return
         sid = publication.sid
         existing = self._student_audio_tasks.get(sid)
         if existing is not None and not existing.done():
@@ -2090,12 +2342,29 @@ class PocAgentSession:
                 self.session_id, identity, sid,
             )
             return
+        producer_generation: int | None = None
+        if self._realtime_engine_active:
+            # Realtime accepts exactly one microphone producer. A replacement
+            # invalidates the old producer synchronously before its task is
+            # cancelled, so even one late frame cannot enter the persistent
+            # provider session.
+            if self._realtime_producer_track_sid == sid:
+                return
+            self._realtime_producer_generation += 1
+            producer_generation = self._realtime_producer_generation
+            old_sid = self._realtime_producer_track_sid
+            self._realtime_producer_track_sid = sid
+            self._realtime_producer_attached = False
+            if old_sid is not None and old_sid != sid:
+                self._stop_student_audio_ingest(old_sid, reason="realtime_producer_replaced")
         logger.info(
             "student_audio_track_subscribed session_id=%s identity=%s track=%s",
             self.session_id, identity, sid,
         )
         self._student_audio_tasks[sid] = asyncio.ensure_future(
-            self._ingest_student_audio(track, identity, sid)
+            self._ingest_student_audio(
+                track, identity, sid, producer_generation=producer_generation,
+            )
         )
 
     def _stop_student_audio_ingest(self, track_sid: str, *, reason: str) -> None:
@@ -2114,6 +2383,7 @@ class PocAgentSession:
         """Called on participant-left and job-shutdown so no ingest task (and
         the AudioStream/FFI resources it holds) is ever left running past the
         life of the room - prevents leaking audio streams after disconnect."""
+        self._release_realtime_speech_waiters(reason=reason)
         for sid in list(self._student_audio_tasks.keys()):
             self._stop_student_audio_ingest(sid, reason=reason)
 
@@ -2294,7 +2564,14 @@ class PocAgentSession:
             on_before_commit=self._cancel_pending_backchannel if backchannel_active else None,
         )
 
-    async def _ingest_student_audio(self, track: "rtc.Track", identity: str, track_sid: str) -> None:
+    async def _ingest_student_audio(
+        self,
+        track: "rtc.Track",
+        identity: str,
+        track_sid: str,
+        *,
+        producer_generation: int | None = None,
+    ) -> None:
         """Phase 1 proof-of-reach: continuously consumes the student's
         microphone frames and observes participant identity, track SID,
         sample rate, channel count, frame count, and elapsed audio duration -
@@ -2314,21 +2591,54 @@ class PocAgentSession:
         turn pipeline."""
         import livekit.rtc as rtc
 
-        # Requests _VAD_STT_SAMPLE_RATE (16kHz) mono directly from LiveKit's
-        # native FFI resampler at the SOURCE - Silero VAD, Deepgram STT, AND
-        # (Phase 3) SmartTurnDetector all need exactly this rate, so doing
-        # it ONCE here means none of them has to resample the same frame
-        # again internally (each already tolerates a mismatched rate via
-        # its own resampler - see _VAD_STT_SAMPLE_RATE's comment - so this
-        # is purely a "do the one resample as early/once as possible"
-        # optimization, not a behavior change).
-        stream = rtc.AudioStream(track, sample_rate=_VAD_STT_SAMPLE_RATE, num_channels=1)
+        # POC engine selection (default legacy). When the OpenAI Realtime engine
+        # is active for this session it REPLACES the whole legacy VAD/STT/Smart
+        # Turn stack (they are mutually exclusive turn-taking brains), and the
+        # ingest stream is requested at Realtime's native 24kHz instead of the
+        # legacy 16kHz - so exactly ONE consumer is fed and the audio is decoded
+        # once at the rate that consumer needs. When Realtime is off (the
+        # default), this is byte-for-byte the previous behavior: 16kHz mono into
+        # the legacy _StudentVadSttPipeline.
+        if self._realtime_engine_active:
+            await self._realtime_session_started.wait()
+            realtime_session = self._realtime_session
+        else:
+            realtime_session = None
+        if self._realtime_engine_active and realtime_session is None:
+            logger.error(
+                "student_audio_realtime_unavailable session_id=%s identity=%s track=%s",
+                self.session_id, identity, track_sid,
+            )
+            return
+        if realtime_session is not None:
+            ingest_sample_rate = realtime_session.input_sample_rate
+            vad_stt_pipeline = None
+        else:
+            # Requests _VAD_STT_SAMPLE_RATE (16kHz) mono directly from LiveKit's
+            # native FFI resampler at the SOURCE - Silero VAD, Deepgram STT, AND
+            # (Phase 3) SmartTurnDetector all need exactly this rate, so doing
+            # it ONCE here means none of them has to resample the same frame
+            # again internally (each already tolerates a mismatched rate via
+            # its own resampler - see _VAD_STT_SAMPLE_RATE's comment - so this
+            # is purely a "do the one resample as early/once as possible"
+            # optimization, not a behavior change).
+            ingest_sample_rate = _VAD_STT_SAMPLE_RATE
+            vad_stt_pipeline = await self._maybe_start_vad_stt_pipeline(identity, track_sid)
+        stream = rtc.AudioStream(track, sample_rate=ingest_sample_rate, num_channels=1)
+        if realtime_session is not None:
+            if (
+                producer_generation != self._realtime_producer_generation
+                or track_sid != self._realtime_producer_track_sid
+            ):
+                await stream.aclose()
+                return
+            self._realtime_producer_attached = True
+            self._maybe_send_realtime_agent_ready()
         frame_count = 0
         sample_rate = 0
         num_channels = 0
         total_duration_s = 0.0
         last_log_at = time.monotonic()
-        vad_stt_pipeline = await self._maybe_start_vad_stt_pipeline(identity, track_sid)
         try:
             async for event in stream:
                 frame = event.frame
@@ -2336,6 +2646,16 @@ class PocAgentSession:
                 sample_rate = frame.sample_rate
                 num_channels = frame.num_channels
                 total_duration_s += frame.duration
+                # Phase A: forward the SAME frame's raw PCM to the Realtime
+                # session (listen-only - it never yet drives a patient turn).
+                if realtime_session is not None:
+                    if (
+                        producer_generation != self._realtime_producer_generation
+                        or track_sid != self._realtime_producer_track_sid
+                        or self._realtime_session is not realtime_session
+                    ):
+                        break
+                    realtime_session.push_audio_bytes(bytes(frame.data))
                 if vad_stt_pipeline is not None:
                     vad_stt_pipeline.push_frame(frame)
                 now = time.monotonic()
@@ -2361,6 +2681,14 @@ class PocAgentSession:
                 "frames=%d sample_rate=%d channels=%d elapsed=%.1fs",
                 self.session_id, identity, track_sid, frame_count, sample_rate, num_channels, total_duration_s,
             )
+            if realtime_session is not None:
+                if (
+                    producer_generation == self._realtime_producer_generation
+                    and track_sid == self._realtime_producer_track_sid
+                ):
+                    self._release_realtime_speech_waiters(reason="audio_ingest_stopped")
+                    self._realtime_producer_attached = False
+                    self._realtime_producer_track_sid = None
             if vad_stt_pipeline is not None:
                 await vad_stt_pipeline.aclose()
             try:
@@ -2369,7 +2697,525 @@ class PocAgentSession:
                 logger.exception(
                     "student_audio_stream_close_failed session_id=%s track=%s", self.session_id, track_sid,
                 )
-            self._student_audio_tasks.pop(track_sid, None)
+            if self._student_audio_tasks.get(track_sid) is asyncio.current_task():
+                self._student_audio_tasks.pop(track_sid, None)
+
+    async def _maybe_start_realtime_session(
+        self, identity: str, track_sid: str
+    ) -> "RealtimeSession | None":
+        """POC OpenAI Realtime engine (Phase A): returns a running, LISTEN-ONLY
+        RealtimeSession, or None if the engine is off/unconfigured/fails to
+        start. In EVERY None case the caller (_ingest_student_audio) falls back
+        to the legacy VAD/STT path exactly as before, so an unset flag, a
+        missing OPENAI_API_KEY, or a construction-time error are all equally
+        safe, silent no-ops. Never raises (same fail-safe discipline as
+        _maybe_start_vad_stt_pipeline)."""
+        settings = get_settings()
+        if not settings.realtime_engine_active:
+            return None
+        if self._realtime_session is not None:
+            return self._realtime_session
+        try:
+            from app.livekit_agent.realtime_client import OpenAIRealtimeClient
+            from app.livekit_agent.realtime_session import RealtimeSession
+
+            native_runtime = None
+            if settings.realtime_native_agent_active:
+                from app.livekit_agent.native_agent_runtime import NativeRealtimeAgentRuntime
+
+                native_runtime = NativeRealtimeAgentRuntime(
+                    session_id=self.session_id,
+                    case_id=self.case_id,
+                    model_name=settings.openai_realtime_native_agent_model,
+                    db_factory=self._session_factory,
+                    reserve_generation=self._reserve_native_generation,
+                    generation_is_current=lambda epoch: epoch == self._generation_epoch,
+                    generation_authority=self._generation_authority_lock,
+                    on_audio=self._publish_realtime_pcm,
+                    on_speaking_started=self._on_native_speaking_started,
+                    on_patient_final=self._on_native_patient_final,
+                    on_student_persisted=self._on_native_student_persisted,
+                    on_status=self._on_native_status,
+                )
+            client = OpenAIRealtimeClient(
+                api_key=settings.openai_api_key,
+                model=(
+                    settings.openai_realtime_native_agent_model
+                    if native_runtime is not None
+                    else settings.openai_realtime_model
+                ),
+            )
+            realtime_session = RealtimeSession(
+                session_id=self.session_id, case_id=self.case_id, identity=identity,
+                track_sid=track_sid, client=client, settings=settings,
+                # Phase B: Realtime's own semantic_vad decides WHEN the student
+                # turn is complete; the controller hands us exactly one
+                # deduplicated (clientTurnId, transcript) per turn.
+                on_turn_complete=(None if native_runtime is not None else self._accept_realtime_turn),
+                # P0-3: raw speech boundaries control only candidate audio and
+                # low-latency cutoff. Accepted transcription controls epochs.
+                on_speech_started=self._on_realtime_speech_started,
+                on_speech_stopped=self._on_realtime_speech_stopped,
+                on_unavailable=self._on_realtime_unavailable,
+                native_agent=native_runtime,
+            )
+            # Publish ownership before starting the task, so a duplicate call
+            # cannot construct a second provider connection.
+            self._realtime_session = realtime_session
+            self._native_agent_runtime = native_runtime
+            await realtime_session.start()
+        except Exception:
+            if self._realtime_session is locals().get("realtime_session"):
+                self._realtime_session = None
+                self._native_agent_runtime = None
+            logger.exception(
+                "realtime_session_start_failed session_id=%s identity=%s track=%s",
+                self.session_id, identity, track_sid,
+            )
+            return None
+        # Phase D: remember it so _run_realtime_turn can speak the approved
+        # patient text through it (one Realtime session per interview).
+        logger.info(
+            "realtime_engine_active session_id=%s identity=%s track=%s",
+            self.session_id, identity, track_sid,
+        )
+        return realtime_session
+
+    def _reserve_native_generation(self, client_turn_id: str) -> int:
+        """Native equivalent of P0-3's synchronous authoritative boundary."""
+        self._in_flight_turn_ids.add(client_turn_id)
+        with self._generation_authority_lock:
+            self._generation_epoch += 1
+            generation = self._generation_epoch
+        speaking = self._speaking_client_turn_id
+        if speaking is not None and speaking != client_turn_id:
+            self._cutoff_realtime_patient_audio(speaking, reason="native_new_turn_accepted")
+        self._log_agent_event("native_generation_reserved", client_turn_id=client_turn_id)
+        return generation
+
+    def _on_native_student_persisted(self, client_turn_id: str, epoch: int, text: str) -> None:
+        self._send_transcript_sync(
+            "student_transcript", client_turn_id, epoch=epoch, text=text,
+        )
+
+    def _on_native_speaking_started(self, client_turn_id: str, approved_text: str) -> None:
+        self._speaking_client_turn_id = client_turn_id
+        self._speaking_patient_text = approved_text
+        self._realtime_cutoff_turn_id = None
+        self._send_turn_status(client_turn_id, "speaking_started")
+
+    def _on_native_patient_final(
+        self, client_turn_id: str, epoch: int, persisted: "Any", reason: str,
+    ) -> None:
+        self._send_transcript_sync(
+            "patient_text_ready",
+            client_turn_id,
+            epoch=epoch,
+            text=persisted.patient_text,
+            patient_turn_id=persisted.patient_turn_id,
+        )
+        self._send_transcript_sync(
+            "patient_text_final",
+            client_turn_id,
+            epoch=epoch,
+            text=persisted.patient_text,
+            patient_turn_id=persisted.patient_turn_id,
+            reason=reason,
+        )
+
+    def _on_native_status(self, client_turn_id: str, status: str) -> None:
+        self._send_turn_status(client_turn_id, status)
+        if status in ("speaking_ended", "interrupted", "failed"):
+            if self._speaking_client_turn_id == client_turn_id:
+                self._speaking_client_turn_id = None
+                self._speaking_patient_text = None
+                self._realtime_cutoff_turn_id = None
+            self._in_flight_turn_ids.discard(client_turn_id)
+            self._mark_turn_completed(client_turn_id)
+
+    def _on_realtime_speech_started(self) -> None:
+        """Low-latency audio signal, never authoritative turn evidence."""
+        if self._realtime_student_speech_active:
+            self._log_agent_event(
+                "realtime_candidate_speech_duplicate",
+                client_turn_id=self._speaking_client_turn_id or self._active_client_turn_id or "",
+            )
+            return
+        self._realtime_student_speech_active = True
+        self._realtime_student_speech_stopped.clear()
+        speaking = self._speaking_client_turn_id
+        active = self._active_client_turn_id
+        self._log_agent_event(
+            "realtime_candidate_speech_started", client_turn_id=speaking or active or "",
+        )
+        if speaking is not None:
+            self._cutoff_realtime_patient_audio(speaking, reason="candidate_speech_started")
+
+    def _on_realtime_speech_stopped(self) -> None:
+        """Release pre-speech waiters when actual student audio stops."""
+        if not self._realtime_student_speech_active:
+            return
+        self._realtime_student_speech_active = False
+        self._realtime_student_speech_stopped.set()
+        self._log_agent_event("realtime_candidate_speech_stopped")
+
+    def _release_realtime_speech_waiters(self, *, reason: str) -> None:
+        """Lifecycle-safe release used whenever Realtime ingest is torn down."""
+        was_active = self._realtime_student_speech_active
+        self._realtime_student_speech_active = False
+        self._realtime_student_speech_stopped.set()
+        if was_active:
+            logger.info(
+                "realtime_candidate_speech_released session_id=%s reason=%s",
+                self.session_id, reason,
+            )
+
+    def _cutoff_realtime_patient_audio(self, client_turn_id: str, *, reason: str) -> None:
+        """Immediately and idempotently cut one actually-speaking Realtime turn."""
+        if (
+            not client_turn_id
+            or self._speaking_client_turn_id != client_turn_id
+            or self._realtime_cutoff_turn_id == client_turn_id
+        ):
+            return
+        self._realtime_cutoff_turn_id = client_turn_id
+        # Native mode must quarantine the response synchronously. The provider
+        # cancel is awaited by a scheduled task below, but the receive loop may
+        # already have another audio delta buffered before that task runs.
+        if self._realtime_native_agent_active and self._realtime_session is not None:
+            self._realtime_session.quarantine_active_native_response()
+        if self._audio_source is not None:
+            try:
+                self._audio_source.clear_queue()
+            except Exception:
+                logger.exception("realtime_barge_in_clear_queue_failed session_id=%s", self.session_id)
+        if self._realtime_session is not None:
+            asyncio.ensure_future(self._realtime_session.cancel_active_response())
+        self._log_agent_event("realtime_patient_audio_cutoff", client_turn_id=client_turn_id)
+        logger.info(
+            "realtime_patient_audio_cutoff session_id=%s client_turn_id=%s reason=%s",
+            self.session_id, client_turn_id, reason,
+        )
+
+    def _accept_realtime_turn(self, client_turn_id: str, transcript: str) -> "Awaitable[None] | None":
+        """Reserve generation synchronously, then return unscheduled work."""
+        if not transcript.strip():
+            self._log_agent_event("realtime_empty_turn_ignored", client_turn_id=client_turn_id)
+            return None
+        if client_turn_id in self._completed_turn_ids or client_turn_id in self._in_flight_turn_ids:
+            self._log_agent_event("realtime_duplicate_turn_received", client_turn_id=client_turn_id)
+            return None
+        self._in_flight_turn_ids.add(client_turn_id)
+        with self._generation_authority_lock:
+            self._generation_epoch += 1
+            my_generation = self._generation_epoch
+        self._log_agent_event("realtime_generation_reserved", client_turn_id=client_turn_id)
+        logger.info(
+            "realtime_generation_reserved session_id=%s client_turn_id=%s generation=%d",
+            self.session_id, client_turn_id, my_generation,
+        )
+        # Close the generating->speaking race: A may have begun speaking after
+        # B's raw speech_started but before B's transcript became authoritative.
+        speaking = self._speaking_client_turn_id
+        if speaking is not None and speaking != client_turn_id:
+            self._cutoff_realtime_patient_audio(speaking, reason="new_generation_accepted")
+        return self._handle_realtime_turn(
+            client_turn_id, transcript, my_generation=my_generation, reserved=True,
+        )
+
+    async def _handle_realtime_turn(
+        self,
+        client_turn_id: str,
+        transcript: str,
+        my_generation: int | None = None,
+        *,
+        reserved: bool = False,
+    ) -> None:
+        """The ONE entry point a completed Realtime student turn reaches the
+        backend through (see RealtimeTurnController - it already guarantees
+        exactly-once, non-empty delivery with a stable, unique clientTurnId).
+
+        A genuinely new student utterance must NEVER be dropped just because
+        an older patient response is still generating. Its generation is
+        reserved synchronously by _accept_realtime_turn before this coroutine
+        is scheduled, so B/C ownership cannot be reordered by task scheduling.
+        A direct call is retained as a test/internal compatibility entry point
+        and routes through that same reservation seam exactly once."""
+        if not reserved:
+            processing = self._accept_realtime_turn(client_turn_id, transcript)
+            if processing is not None:
+                await processing
+            return
+        if my_generation is None:
+            raise RuntimeError("reserved Realtime turn is missing its generation")
+        self._log_agent_event("realtime_student_turn_received", client_turn_id=client_turn_id)
+        logger.info(
+            "realtime_student_turn_received session_id=%s client_turn_id=%s transcript=%r "
+            "turn_source=%s",
+            self.session_id, client_turn_id, transcript, TurnSource.SERVER_SEMANTIC.value,
+        )
+        try:
+            async with self._turn_lock:
+                if my_generation != self._generation_epoch:
+                    # A newer utterance superseded us while we waited for the
+                    # lock - abandon before doing anything (never a stale
+                    # generation, never stale audio). Marked completed so the
+                    # id is never reprocessed.
+                    logger.info(
+                        "realtime_turn_superseded_before_start session_id=%s client_turn_id=%s "
+                        "my_generation=%d current_generation=%d",
+                        self.session_id, client_turn_id, my_generation, self._generation_epoch,
+                    )
+                    self._mark_turn_completed(client_turn_id)
+                    return
+                self._active_turn_task = asyncio.current_task()
+                self._active_client_turn_id = client_turn_id
+                try:
+                    await self._run_realtime_turn(transcript, client_turn_id, my_generation)
+                finally:
+                    if self._active_client_turn_id == client_turn_id:
+                        self._active_turn_task = None
+                        self._active_client_turn_id = None
+        finally:
+            self._in_flight_turn_ids.discard(client_turn_id)
+
+    async def _run_realtime_turn(self, text: str, client_turn_id: str, my_epoch: int) -> None:
+        """The Realtime engine's OWN turn runner - separate from the legacy
+        _run_turn (ElevenLabs), which stays byte-for-byte untouched. Runs the
+        EXISTING authoritative patient pipeline (generation -> validation ->
+        disclosure gating -> persistence, via generate_and_persist_turn, ZERO
+        bypass), then speaks the APPROVED text in native voice (Phase D).
+
+        Phase F guards, all keyed on `my_epoch` vs the live generation epoch:
+          - The generation-epoch predicate is passed INTO
+            generate_and_persist_turn, so if this turn was superseded during
+            its (uncancellable) OpenAI call, GenerationStaleError is raised
+            BEFORE any DB/disclosure write - nothing is persisted.
+          - A pre-speak re-check covers the narrow window between the persist
+            gate and speaking; if superseded there, the persisted row is
+            finalized as not-delivered and native voice never starts.
+          - An interrupt DURING native speech (Case 1) returns interrupted from
+            speak(); the row is finalized to only the portion actually voiced."""
+        loop = asyncio.get_running_loop()
+        self._log_agent_event("realtime_turn_processing_started", client_turn_id=client_turn_id)
+        result = None
+        try:
+            try:
+                result = await loop.run_in_executor(
+                    None, self._generate_realtime_turn_sync, text, client_turn_id,
+                    lambda: my_epoch == self._generation_epoch,
+                )
+            except patient_adapter.GenerationStaleError:
+                # Case 2: superseded while generating - nothing was persisted,
+                # disclosure untouched. Abandon silently: no speak, no status,
+                # no frontend speaking state (the newer turn drives instead).
+                logger.info(
+                    "realtime_turn_stale_before_persist session_id=%s client_turn_id=%s my_epoch=%d",
+                    self.session_id, client_turn_id, my_epoch,
+                )
+                return
+            logger.info(
+                "realtime_patient_response_approved session_id=%s client_turn_id=%s "
+                "patient_turn_id=%s voice_key=%s generated_char_count=%d replayed=%s",
+                self.session_id, client_turn_id, result.patient_turn_id, result.voice_key,
+                len(result.patient_text), result.replayed,
+            )
+            # Phase G: the student turn is now persisted (generate_and_persist_turn
+            # wrote both rows before returning), so surface the authoritative
+            # student text. Emitted even for a turn about to be found stale below
+            # so the visible transcript matches the DB (the student DID say it).
+            self._send_transcript_sync(
+                "student_transcript", client_turn_id, epoch=my_epoch, text=text,
+            )
+            if self._realtime_session is None:
+                logger.error(
+                    "realtime_turn_no_session_to_speak session_id=%s client_turn_id=%s",
+                    self.session_id, client_turn_id,
+                )
+                self._send_turn_status(client_turn_id, "failed")
+                return
+            # Raw speech is non-authoritative, but Carly must not begin over
+            # an active continuation. Every teardown path sets this event, so
+            # a stopped session cannot strand a task at this boundary.
+            await self._realtime_student_speech_stopped.wait()
+            # Pre-speak stale check: a new utterance may have arrived in the
+            # tiny window after the persist gate passed. Do NOT speak; the row
+            # is persisted but Carly never voiced it, so finalize it as
+            # not-delivered (the DB must not imply audio the student never heard).
+            if my_epoch != self._generation_epoch:
+                logger.info(
+                    "realtime_turn_stale_before_speak session_id=%s client_turn_id=%s my_epoch=%d "
+                    "current_epoch=%d",
+                    self.session_id, client_turn_id, my_epoch, self._generation_epoch,
+                )
+                await self._finalize_realtime_partial(result, "", client_turn_id, reason="interrupted")
+                return
+            # Phase G: approved patient text goes out BEFORE speech starts, so
+            # the frontend can render it immediately rather than waiting for
+            # audio to (nearly) finish. Carries patientTurnId + epoch for
+            # correlation/stale-drop.
+            self._send_transcript_sync(
+                "patient_text_ready", client_turn_id, epoch=my_epoch,
+                text=result.patient_text, patient_turn_id=result.patient_turn_id,
+            )
+            self._send_turn_status(client_turn_id, "speaking_started")
+            # Marks the ONLY window in which a barge-in cancels native audio
+            # (see _on_realtime_speech_started), mirroring legacy _run_turn.
+            self._speaking_client_turn_id = client_turn_id
+            self._speaking_patient_text = result.patient_text
+            self._realtime_cutoff_turn_id = None
+            speak_result = await self._realtime_session.speak(
+                client_turn_id=client_turn_id, text=result.patient_text,
+                on_audio=self._publish_realtime_pcm,
+            )
+            # Verbatim-fidelity check (Phase D): what Realtime actually SPOKE
+            # vs the backend-approved text - a material divergence is logged as
+            # a candidate blocker, never silently accepted.
+            self._check_voice_fidelity(client_turn_id, result.patient_text, speak_result.spoken_transcript)
+            if speak_result.interrupted:
+                # Case 1: finalize to only the portion actually voiced, so the
+                # transcript never claims Carly said text the student never heard,
+                # then reconcile the frontend to that SAME delivered portion.
+                await self._finalize_realtime_partial(
+                    result, speak_result.spoken_transcript, client_turn_id, reason="interrupted",
+                )
+                self._send_transcript_sync(
+                    "patient_text_final", client_turn_id, epoch=my_epoch,
+                    text=speak_result.spoken_transcript.strip(),
+                    patient_turn_id=result.patient_turn_id, reason="interrupted",
+                )
+                self._send_turn_status(client_turn_id, "interrupted")
+            elif speak_result.completed:
+                # Normal completion: DB content == approved text; confirm the
+                # final authoritative content to the frontend uniformly.
+                self._send_transcript_sync(
+                    "patient_text_final", client_turn_id, epoch=my_epoch,
+                    text=result.patient_text, patient_turn_id=result.patient_turn_id,
+                    reason="complete",
+                )
+                self._send_turn_status(client_turn_id, "speaking_ended")
+            else:
+                await self._finalize_realtime_partial(
+                    result, speak_result.spoken_transcript, client_turn_id, reason="delivery_failed",
+                )
+                self._send_transcript_sync(
+                    "patient_text_final", client_turn_id, epoch=my_epoch,
+                    text=speak_result.spoken_transcript.strip(),
+                    patient_turn_id=result.patient_turn_id, reason="delivery_failed",
+                )
+                self._send_turn_status(client_turn_id, "failed")
+            logger.info(
+                "realtime_turn_spoken session_id=%s client_turn_id=%s audio_bytes=%d completed=%s "
+                "interrupted=%s",
+                self.session_id, client_turn_id, speak_result.audio_bytes, speak_result.completed,
+                speak_result.interrupted,
+            )
+        except patient_adapter.LiveKitPocSessionNotFoundError:
+            logger.error(
+                "realtime_turn_session_not_found session_id=%s client_turn_id=%s",
+                self.session_id, client_turn_id,
+            )
+        except Exception:
+            logger.exception(
+                "realtime_turn_generation_failed session_id=%s client_turn_id=%s job_id=%s room_id=%s",
+                self.session_id, client_turn_id, self._job_id, self._room_id,
+            )
+            self._log_agent_event("realtime_turn_processing_failed", client_turn_id=client_turn_id)
+        finally:
+            if self._speaking_client_turn_id == client_turn_id:
+                self._speaking_client_turn_id = None
+                self._speaking_patient_text = None
+                self._realtime_cutoff_turn_id = None
+            self._mark_turn_completed(client_turn_id)
+
+    def _generate_realtime_turn_sync(
+        self, text: str, client_turn_id: str, is_generation_valid: "Callable[[], bool]"
+    ) -> "patient_adapter.PocTurnResult":
+        """Realtime-only executor body: the SAME generate_and_persist_turn the
+        legacy path uses, plus the Phase F generation-epoch predicate that gates
+        persistence/disclosure. Kept separate from the legacy _generate_turn_sync
+        so that path's signature/behavior is completely unchanged."""
+        db = self._session_factory()
+        try:
+            return patient_adapter.generate_and_persist_turn(
+                db, session_id=self.session_id, case_id=self.case_id,
+                question=text, client_turn_id=client_turn_id,
+                is_generation_valid=is_generation_valid,
+                generation_authority=self._generation_authority_lock,
+            )
+        finally:
+            db.close()
+
+    async def _finalize_realtime_partial(
+        self, result: "patient_adapter.PocTurnResult", spoken_text: str,
+        client_turn_id: str, *, reason: str,
+    ) -> None:
+        """Reconcile a persisted patient row down to only the text whose native
+        audio genuinely reached the student (empty when interrupted before any
+        audio). Reuses the EXISTING _finalize_partial_patient_delivery_sync /
+        patient_adapter.finalize_partial_patient_delivery path - the same
+        transcript semantics the legacy interruption flow uses - so assessment
+        reads a truthful record."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, self._finalize_partial_patient_delivery_sync,
+            result.patient_turn_id, spoken_text.strip(), reason,
+        )
+        logger.info(
+            "realtime_turn_finalized_partial session_id=%s client_turn_id=%s patient_turn_id=%s "
+            "reason=%s generated_char_count=%d delivered_char_count=%d",
+            self.session_id, client_turn_id, result.patient_turn_id, reason,
+            len(result.patient_text), len(spoken_text.strip()),
+        )
+
+    async def _publish_realtime_pcm(self, pcm: bytes) -> None:
+        """Phase D: publish one chunk of Realtime's 24kHz native-voice PCM to
+        the outbound LiveKit AudioSource. Separate from the legacy _publish_pcm
+        (which frames at 16kHz for ElevenLabs) so neither path can use the
+        wrong rate - frames here are built at self._patient_audio_sample_rate,
+        which start() set to 24kHz for the Realtime engine."""
+        import livekit.rtc as rtc
+
+        if self._audio_source is None or not pcm:
+            return
+        rate = self._patient_audio_sample_rate
+        frame_bytes = int(rate * _FRAME_SECONDS) * 2
+        for i in range(0, len(pcm), frame_bytes):
+            chunk = pcm[i : i + frame_bytes]
+            if len(chunk) < 2:
+                break
+            frame = rtc.AudioFrame(
+                data=chunk, sample_rate=rate, num_channels=1,
+                samples_per_channel=len(chunk) // 2,
+            )
+            await self._audio_source.capture_frame(frame)
+
+    def _check_voice_fidelity(self, client_turn_id: str, approved: str, spoken: str) -> None:
+        """Phase D verbatim-fidelity check: does the native voice's OWN
+        transcript match the backend-approved text? Compared on a normalized
+        (lowercased, punctuation/whitespace-stripped) basis so trivial STT
+        punctuation differences don't false-alarm. A real divergence is logged
+        as a WARNING (a candidate blocker per the Phase D requirement) - never
+        silently ignored, but also never used to fabricate/alter the persisted
+        transcript (the DB row remains the backend-approved text)."""
+        if not spoken:
+            logger.warning(
+                "realtime_voice_fidelity_no_transcript session_id=%s client_turn_id=%s",
+                self.session_id, client_turn_id,
+            )
+            return
+        norm_approved = _normalize_for_fidelity(approved)
+        norm_spoken = _normalize_for_fidelity(spoken)
+        if norm_approved == norm_spoken:
+            logger.info(
+                "realtime_voice_fidelity_ok session_id=%s client_turn_id=%s", self.session_id, client_turn_id,
+            )
+        else:
+            logger.warning(
+                "realtime_voice_fidelity_mismatch session_id=%s client_turn_id=%s "
+                "approved=%r spoken=%r",
+                self.session_id, client_turn_id, approved, spoken,
+            )
 
     def _get_speaking_client_turn_id(self) -> str | None:
         """Phase 5A: the `is_patient_speaking` callback wired into
@@ -3043,6 +3889,34 @@ class PocAgentSession:
         breakdown = " ".join(f"{name}=+{round((t - t0) * 1000)}ms" for name, t in stages[1:])
         logger.info("livekit_agent_turn_timing client_turn_id=%s %s", client_turn_id, breakdown)
 
+    def _send_transcript_sync(
+        self, event_type: str, client_turn_id: str, *, epoch: int, text: str,
+        patient_turn_id: str | None = None, reason: str | None = None,
+    ) -> None:
+        """Phase G: publish one transcript-sync event (see TRANSCRIPT_SYNC_TOPIC)
+        targeted at the student, carrying the generation epoch so the frontend
+        can reject a stale/out-of-order event. Never raises - a failed publish
+        here must never break turn processing (the DB row is already the
+        authoritative record regardless)."""
+        body: dict = {"type": event_type, "clientTurnId": client_turn_id, "epoch": epoch, "text": text}
+        if patient_turn_id is not None:
+            body["patientTurnId"] = patient_turn_id
+        if reason is not None:
+            body["reason"] = reason
+        payload = json.dumps(body).encode("utf-8")
+        try:
+            asyncio.ensure_future(
+                self._room.local_participant.publish_data(
+                    payload, reliable=True, topic=TRANSCRIPT_SYNC_TOPIC,
+                    destination_identities=self._destination_identities(),
+                )
+            )
+        except Exception:
+            logger.exception(
+                "realtime_transcript_sync_publish_failed session_id=%s client_turn_id=%s event=%s",
+                self.session_id, client_turn_id, event_type,
+            )
+
     def _send_turn_status(self, client_turn_id: str, status: str) -> None:
         payload = json.dumps({"clientTurnId": client_turn_id, "status": status}).encode("utf-8")
         try:
@@ -3127,6 +4001,7 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     done = asyncio.Event()
+    poc_session: PocAgentSession | None = None
 
     def _on_session_shutdown(reason: str) -> None:
         ctx.shutdown(reason=reason)
@@ -3135,8 +4010,10 @@ async def entrypoint(ctx: JobContext) -> None:
     async def _on_ctx_shutdown(reason: str) -> None:
         # Safety net: if the framework itself ends the job for a reason our
         # own participant_disconnected handler never saw (e.g. a drain/
-        # timeout), make sure entrypoint() still returns instead of hanging
-        # forever on done.wait().
+        # timeout), close the job-owned Realtime session before entrypoint
+        # returns.
+        if poc_session is not None:
+            await poc_session.aclose(reason=reason or "context_shutdown")
         done.set()
 
     ctx.add_shutdown_callback(_on_ctx_shutdown)
@@ -3151,6 +4028,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # ends the job, so this await is what keeps the interview's room/track
     # alive until the student leaves (or the framework shuts us down).
     await done.wait()
+    await poc_session.aclose(reason="entrypoint_finished")
 
 
 def _build_worker_options() -> WorkerOptions:

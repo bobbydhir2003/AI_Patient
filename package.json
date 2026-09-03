@@ -16,7 +16,7 @@
     "test:voice": "tsc src/hooks/voiceStateMachine.ts src/services/interruptionJudge.ts src/services/voicePlaybackState.ts src/services/patientVoiceService.ts src/services/streamingQueueState.ts --ignoreConfig --outDir .test-build --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --types vite/client && node --test scripts/test-voice-state.mjs scripts/test-interruption-judge.mjs scripts/test-voice-playback.mjs scripts/test-progressive-playback.mjs scripts/test-atomic-voice-fallback.mjs scripts/test-streaming-queue.mjs",
     "test:mobileaudio": "tsc src/services/mediaErrors.ts src/services/mobileAudio.ts src/hooks/voiceStateMachine.ts --ignoreConfig --outDir .test-build --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --types vite/client && node --test scripts/test-mobile-audio.mjs",
     "test:interviewui": "node --test scripts/test-interview-ui.mjs",
-    "test:livekitpoc": "tsc src/services/livekit/livekitPocEngine.ts src/hooks/useLiveKitInterviewVoice.ts --ignoreConfig --outDir .test-build/livekit --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --types vite/client && node --experimental-test-module-mocks --test scripts/test-livekit-poc.mjs"
+    "test:livekitpoc": "tsc src/services/livekit/livekitPocEngine.ts src/services/livekit/liveKitTranscriptMessages.ts src/hooks/useLiveKitInterviewVoice.ts --ignoreConfig --outDir .test-build/livekit --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --types vite/client && node --experimental-test-module-mocks --test scripts/test-livekit-poc.mjs"
   },
   "dependencies": {
     "livekit-client": "^2.22.0",

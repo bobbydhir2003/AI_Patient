@@ -95,6 +95,8 @@ export type VoiceEvent =
   | "livekit_turn_status_received"
   | "livekit_turn_status_matched"
   | "livekit_turn_status_ignored"
+  | "livekit_transcript_sync_ignored"
+  | "livekit_transcript_sync_stale_dropped"
   | "livekit_thinking_timeout_started"
   | "livekit_thinking_timeout_cancelled"
   | "livekit_thinking_timeout_fired"
@@ -351,6 +353,7 @@ const TELEMETRY_EVENTS = new Set<VoiceEvent>([
   "livekit_patient_audio_failed",
   "livekit_turn_status_received",
   "livekit_turn_status_matched", "livekit_turn_status_ignored",
+  "livekit_transcript_sync_ignored", "livekit_transcript_sync_stale_dropped",
   "livekit_thinking_timeout_started", "livekit_thinking_timeout_cancelled",
   "livekit_thinking_timeout_fired", "livekit_audio_element_attached",
   "livekit_audio_playing", "livekit_audio_play_failed", "livekit_engine_error",

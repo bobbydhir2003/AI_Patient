@@ -270,6 +270,37 @@ class Settings(BaseSettings):
     # - the flag has real teeth, not just documentation value.
     voice_engine: str = "legacy"
 
+    # --- OpenAI Realtime native-voice engine (POC - see
+    # app/livekit_agent/realtime_client.py / realtime_session.py). A dedicated,
+    # DEFAULT-OFF master switch, deliberately independent of the legacy Phase
+    # 2-7 semantic flags above (server STT / Smart Turn / Phase 7 timers): the
+    # Realtime engine REPLACES that whole input turn-taking stack for a session,
+    # it does not layer on top of it. When false (the default), the worker
+    # behaves byte-for-byte as today - the legacy Silero/Deepgram/SmartTurn/
+    # ElevenLabs stack is untouched and remains the only path. Requires a real
+    # OPENAI_API_KEY to actually engage (see realtime_engine_active below).
+    # Conceptually this is the "VOICE_ENGINE=openai_realtime" selection, kept as
+    # its own boolean so it can never change the existing voice_engine enum's
+    # student-token-minting semantics.
+    livekit_realtime_engine_enabled: bool = False
+    # Selects which OpenAI Realtime architecture the worker uses.  The
+    # existing backend-controlled pipeline remains the default.  "native_agent"
+    # enables the tool-authorized conversational agent without changing token
+    # minting or the legacy LiveKit/ElevenLabs selection.
+    openai_realtime_engine_mode: str = "controlled"
+    # GA Realtime model + native voice. "gpt-realtime" is the current GA model;
+    # "marin"/"cedar" are OpenAI's recommended voices. Single voice for the POC.
+    openai_realtime_model: str = "gpt-realtime"
+    openai_realtime_native_agent_model: str = "gpt-realtime-2.1-mini"
+    openai_realtime_voice: str = "marin"
+    # Input-audio transcription model for the authoritative student transcript
+    # (Realtime transcribes the student's speech; see Phase G reconciliation).
+    openai_realtime_transcription_model: str = "gpt-4o-mini-transcribe"
+    # semantic_vad eagerness: "low" waits longest through thinking pauses (best
+    # fit for the "When your pain started, were you... [pause] ...walking or
+    # sitting?" case). One of low/medium/high/auto.
+    openai_realtime_semantic_eagerness: str = "low"
+
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     log_level: str = "INFO"
@@ -517,6 +548,16 @@ class Settings(BaseSettings):
             raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES is unreasonably large (max 30 days).")
         return value
 
+    @field_validator("openai_realtime_engine_mode", mode="before")
+    @classmethod
+    def _validate_realtime_engine_mode(cls, value: object) -> object:
+        normalized = str(value or "controlled").strip().lower()
+        if normalized not in ("controlled", "native_agent"):
+            raise ValueError(
+                "OPENAI_REALTIME_ENGINE_MODE must be 'controlled' or 'native_agent'"
+            )
+        return normalized
+
     @property
     def is_strict_environment(self) -> bool:
         return self.environment.strip().lower() in STRICT_ENVIRONMENTS
@@ -717,6 +758,20 @@ class Settings(BaseSettings):
         happen to both layer on top of the same turn-CONTROL prerequisite.
         See _warn_semantic_resolution_timers_misconfig above."""
         return self.livekit_semantic_resolution_timers_enabled and self.semantic_turn_control_active
+
+    @property
+    def realtime_engine_active(self) -> bool:
+        """POC OpenAI Realtime native-voice engine: true only when explicitly
+        enabled AND a real OpenAI key is configured. When false (the default),
+        the worker never opens a Realtime session and the legacy Silero/
+        Deepgram/SmartTurn/Phase7/ElevenLabs stack is the sole path - see
+        worker.py's _maybe_start_realtime_session, which fails safe to None in
+        every off/unconfigured case."""
+        return self.livekit_realtime_engine_enabled and bool(self.openai_api_key)
+
+    @property
+    def realtime_native_agent_active(self) -> bool:
+        return self.realtime_engine_active and self.openai_realtime_engine_mode == "native_agent"
 
     @property
     def cors_origin_list(self) -> list[str]:

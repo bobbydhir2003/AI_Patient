@@ -270,6 +270,10 @@ def test_turn_ack_sent_before_turn_status_for_the_same_turn(monkeypatch, engine)
         session, room, _sid = _make_ready_session(engine, monkeypatch)
         fake_openai = FakeOpenAIClient(text="Hello.")
         monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
+        monkeypatch.setattr(
+            patient_adapter, "get_elevenlabs_client",
+            lambda: FakeElevenLabsClient(chunks=(b"\x01\x02",)),
+        )
 
         async def _drive():
             await session.start()
@@ -567,6 +571,10 @@ def test_two_sessions_deliver_status_to_their_own_room_only(monkeypatch, engine)
         session_b, room_b, _sid_b = _make_ready_session(engine, monkeypatch, remote_identities={"student-b": object()})
         fake_openai = FakeOpenAIClient(text="Independent answer.")
         monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
+        monkeypatch.setattr(
+            patient_adapter, "get_elevenlabs_client",
+            lambda: FakeElevenLabsClient(chunks=(b"\x01\x02",)),
+        )
 
         async def _drive():
             await session_a.start()
