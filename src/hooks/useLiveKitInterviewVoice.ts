@@ -1,11 +1,9 @@
 /**
- * Phase B: wraps the SAME LiveKitPocEngine the admin POC page uses (see
+ * Wraps the SAME LiveKitPocEngine the admin POC page uses (see
  * livekitPocEngine.ts - not a second/parallel LiveKit implementation) for
- * the REAL student InterviewPage. Exposes a result shape deliberately
- * compatible with useVoiceConversation's (state/errorMessage/supported/
- * active/startConversation/stopConversation/interruptPatient/retry/reset/
- * cancelPatientSpeech/submitExternal) so InterviewPage.tsx can pick ONE of
- * the two hooks per render and drive the rest of its UI unchanged.
+ * the REAL student InterviewPage. This is the sole voice hook InterviewPage
+ * uses (state/errorMessage/supported/active/startConversation/
+ * stopConversation/interruptPatient/retry/reset/submitExternal).
  *
  * What's deliberately different from the admin POC page:
  * - Token source: fetchStudentLiveKitToken (require_session_access-gated),
@@ -15,22 +13,22 @@
  *   never touched by the engine directly (it is embedded server-side by
  *   livekit_token_service.py's dispatch metadata, from the SAME session
  *   row - see backend/app/services/livekit_token_service.py).
- * - Patient TEXT is never invented client-side: onTurnCompleted only
- *   signals "a turn just finished" - the page re-fetches the authoritative
- *   transcript from the backend (the same DB rows the agent already wrote),
- *   exactly like the existing "resume an in-progress session" code path
- *   already does. This avoids adding a second, parallel text-delivery
- *   protocol to worker.py/patient_turn_status.
+ * - Patient TEXT is never invented client-side: Realtime transcript_sync
+ *   events surface backend-approved persisted text immediately, then
+ *   onTurnCompleted causes the page to re-fetch the same authoritative DB
+ *   rows. Both paths share ConversationTurn.id, so they reconcile naturally.
  *
- * NEVER calls speechSynthesis, patientVoiceService, or any legacy playback
- * primitive - see livekitPocEngine.ts's own docstring/tests for that
- * guarantee; this hook only adds React lifecycle around it.
+ * NEVER calls speechSynthesis or any browser playback primitive - see
+ * livekitPocEngine.ts's own docstring/tests for that guarantee; this hook
+ * only adds React lifecycle around it.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   LiveKitPocEngine,
   fetchStudentLiveKitToken,
   type PocState,
+  type PatientTextMeta,
+  type StudentTextMeta,
 } from "../services/livekit/livekitPocEngine";
 import { isSpeechRecognitionSupported } from "../services/speechRecognitionService";
 import { isConversationActive, type VoiceConversationState } from "./voiceStateMachine";
@@ -89,14 +87,32 @@ function mapPocState(state: PocState): LiveKitVoiceUIState {
 export interface UseLiveKitInterviewVoiceOptions {
   sessionId: string | null;
   enabled: boolean;
-  /** Interim (non-final) recognized text, for display only - mirrors
-   * useVoiceConversation's onInterim. Called with "" once a final result is
-   * sent, matching the legacy hook's own draft-clearing behavior. */
+  /** Interim (non-final) recognized text, for display only. Called with ""
+   * once a final result is sent, to clear the draft. */
   onInterim: (transcript: string) => void;
   /** Fires once per completed turn (the agent's "speaking_ended"). Carries
    * NO text - the page is expected to re-fetch the session's transcript,
    * the single source of truth, rather than trust a client-held copy. */
   onTurnCompleted: () => void;
+  /** P0-1: the backend-APPROVED patient text for a Realtime turn, delivered
+   * as soon as it is persisted (`final:false`, before/at speech start) and
+   * reconciled on completion/interruption (`final:true`, with `reason`).
+   * Keyed by `patientTurnId` (the DB ConversationTurn id) so the page can
+   * render Carly's text immediately and later reconcile with the authoritative
+   * DB refetch WITHOUT duplicating the message. Optional/no-op in legacy mode
+   * (transcript_sync never arrives there). */
+  onPatientText?: (
+    text: string,
+    meta: PatientTextMeta,
+  ) => void;
+  /** prompt_agent mode: a FINAL student transcript persisted server-side,
+   * keyed by `studentTurnId` (the DB ConversationTurn id) so the page can
+   * render it immediately and reconcile with the authoritative DB refetch
+   * WITHOUT duplicating the message. Optional/no-op in every other mode. */
+  onStudentText?: (
+    text: string,
+    meta: StudentTextMeta,
+  ) => void;
 }
 
 export interface UseLiveKitInterviewVoiceResult {
@@ -109,7 +125,6 @@ export interface UseLiveKitInterviewVoiceResult {
   interruptPatient: () => void;
   retry: () => void;
   reset: () => void;
-  cancelPatientSpeech: () => void;
   submitExternal: (text: string) => void;
 }
 
@@ -158,6 +173,18 @@ export function useLiveKitInterviewVoice(
       onTurnCompleted: () => {
         if (engineRef.current !== engine) return;
         optionsRef.current.onTurnCompleted();
+      },
+      // P0-1: forward the Realtime approved/final patient text so the page can
+      // render Carly immediately (no page refresh needed).
+      onPatientText: (text, meta) => {
+        if (engineRef.current !== engine) return;
+        optionsRef.current.onPatientText?.(text, meta);
+      },
+      // prompt_agent mode: forward the FINAL student transcript so the page can
+      // insert it into the conversation window with a stable DB id.
+      onStudentText: (text, meta) => {
+        if (engineRef.current !== engine) return;
+        optionsRef.current.onStudentText?.(text, meta);
       },
       // POC-only diagnostics/room-name surfacing - the real InterviewPage
       // has no admin diagnostic panel and never displays a room name.
@@ -222,11 +249,6 @@ export function useLiveKitInterviewVoice(
     engineRef.current?.interruptPatient();
   }, []);
 
-  /** No engine-level equivalent of "cancel the in-flight patient turn"
-   * exists beyond interruptPatient (SPEAKING-only, see above) - a no-op,
-   * never a silent fallback. */
-  const cancelPatientSpeech = useCallback(() => {}, []);
-
   /** Typed input while LiveKit mode is active: sends through the SAME
    * engine.sendText() a spoken final transcript would use - same
    * "listening only" guard inside the engine, so a message typed while
@@ -259,7 +281,6 @@ export function useLiveKitInterviewVoice(
     interruptPatient,
     retry,
     reset,
-    cancelPatientSpeech,
     submitExternal,
   };
 }

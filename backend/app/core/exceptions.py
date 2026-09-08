@@ -147,39 +147,6 @@ class PatientResponseUnavailableError(AppError):
         super().__init__("The patient response could not be generated. Please try again.")
 
 
-class StreamingDisabledError(AppError):
-    """The streaming patient-response pipeline is feature-flagged off. The
-    frontend treats this as a signal to use the stable non-streaming path."""
-
-    status_code = 409
-    code = "streaming_disabled"
-
-    def __init__(self) -> None:
-        super().__init__("Streaming patient responses are not enabled on this server.")
-
-
-class VoiceNotAvailableError(AppError):
-    """ElevenLabs voice is disabled, unconfigured, or the case has no voice ID.
-    The frontend treats this as a signal to use the browser-TTS fallback."""
-
-    status_code = 409
-    code = "voice_unavailable"
-
-    def __init__(self, message: str = "Realistic voice is not available for this patient.") -> None:
-        super().__init__(message)
-
-
-class VoiceSynthesisError(AppError):
-    """ElevenLabs call failed (timeout, API error). Message is always safe for
-    the frontend - no upstream details, headers, or keys are ever included."""
-
-    status_code = 502
-    code = "voice_synthesis_failed"
-
-    def __init__(self) -> None:
-        super().__init__("The patient voice could not be generated right now.")
-
-
 class LiveKitNotConfiguredError(AppError):
     """Phase 1 LiveKit POC only. Raised when LIVEKIT_URL/API_KEY/API_SECRET or
     the livekit_poc_enabled flag are not set - never in the production voice

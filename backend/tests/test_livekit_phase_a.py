@@ -1,11 +1,7 @@
-"""Tests for Phase A: the VOICE_ENGINE feature flag and the student-safe
-LiveKit token endpoint (POST /api/interviews/{session_id}/livekit-token).
-
-Nothing here touches the real InterviewPage or changes any student-facing
-behavior - no frontend code was modified in Phase A, and this endpoint is not
-called by anything yet. These tests exist to prove the flag/endpoint are
-correct and safely inert by default, ready for a later phase to actually
-wire a UI to them.
+"""Tests for the VOICE_ENGINE feature flag and the student-safe LiveKit token
+endpoint (POST /api/interviews/{session_id}/livekit-token) - the production
+interview voice path (InterviewPage mints this token via
+useLiveKitInterviewVoice on session start).
 
 Real JWT signing (livekit-api), no network calls - same discipline as
 test_livekit_poc.py.
@@ -52,17 +48,20 @@ def _owned_session_id(client, case_id="carly") -> str:
 
 
 # ------------------------------------------------------------- VOICE_ENGINE flag
-def test_voice_engine_defaults_to_legacy():
-    """Default MUST remain legacy - no env var, no override."""
-    assert Settings(_env_file=None).voice_engine == "legacy"
+def test_voice_engine_defaults_to_livekit():
+    """"livekit" (LiveKit + OpenAI Realtime prompt_agent) is the only
+    supported interview voice architecture now - the legacy browser
+    SpeechRecognition + ElevenLabs path has been retired."""
+    assert Settings(_env_file=None).voice_engine == "livekit"
 
 
-def test_invalid_voice_engine_falls_back_to_legacy_safely():
-    """An unrecognized VOICE_ENGINE value must never crash the app and must
-    never silently activate the unvalidated engine - it fails safe to the
-    known-good default."""
-    assert Settings(_env_file=None, voice_engine="not-a-real-engine").voice_engine == "legacy"
-    assert Settings(_env_file=None, voice_engine="").voice_engine == "legacy"
+def test_invalid_voice_engine_falls_back_to_livekit_safely():
+    """An unrecognized VOICE_ENGINE value (including the retired "legacy")
+    must never crash the app and must never silently activate an
+    unvalidated engine - it fails safe to the only supported default."""
+    assert Settings(_env_file=None, voice_engine="not-a-real-engine").voice_engine == "livekit"
+    assert Settings(_env_file=None, voice_engine="").voice_engine == "livekit"
+    assert Settings(_env_file=None, voice_engine="legacy").voice_engine == "livekit"
     assert Settings(_env_file=None, voice_engine="LIVEKIT").voice_engine == "livekit"  # case-insensitive, valid
 
 
@@ -71,13 +70,15 @@ def test_voice_engine_livekit_is_accepted_verbatim():
 
 
 # ------------------------------------------------- student-safe token endpoint
-def test_student_token_disabled_by_default_even_with_livekit_cloud_configured(engine, monkeypatch):
+def test_student_token_disabled_when_voice_engine_is_not_livekit(engine, monkeypatch):
     """TEST (item 2/7): even with real-looking LiveKit Cloud credentials and
     LIVEKIT_POC_ENABLED=true, the student-safe endpoint stays closed unless
     VOICE_ENGINE is ALSO explicitly "livekit" - the flag has real teeth, not
-    just documentation value. Default production config (VOICE_ENGINE=legacy)
-    must never let a student obtain a LiveKit token."""
-    _enable_livekit_for_students(monkeypatch, voice_engine="legacy")  # the actual production default
+    just documentation value. "legacy" can no longer arise from real config
+    loading (see test_invalid_voice_engine_falls_back_to_livekit_safely), but
+    this proves the endpoint's OWN gate defensively checks the value rather
+    than assuming it."""
+    _enable_livekit_for_students(monkeypatch, voice_engine="legacy")
     client = _student_client(engine)
     session_id = _owned_session_id(client)
 

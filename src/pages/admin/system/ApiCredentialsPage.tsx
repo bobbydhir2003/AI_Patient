@@ -119,7 +119,7 @@ export function ApiCredentialsPage() {
       <div className="pt-page-header">
         <div>
           <h1 className="pt-h1" style={{ margin: 0 }}>API Credentials</h1>
-          <p className="pt-page-sub">Securely manage OpenAI and ElevenLabs keys. Full keys are never shown.</p>
+          <p className="pt-page-sub">Securely manage the OpenAI API key. Full keys are never shown.</p>
         </div>
       </div>
 

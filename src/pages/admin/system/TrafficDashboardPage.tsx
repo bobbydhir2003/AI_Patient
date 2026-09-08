@@ -165,7 +165,6 @@ export function TrafficDashboardPage() {
         <TC label="Live Interviews" value={ov.interviews.active} chip={badge("green", "Active")} sub={`${ov.interviews.waiting_for_ai} waiting for AI`} />
         <TC label="Requests / min" value={ov.http.requests_per_minute} sub={`${ov.http.in_flight} in flight`} />
         <TC label="OpenAI Active" value={ov.openai.active} sub={`${ov.openai.requests_per_minute}/min`} />
-        <TC label="ElevenLabs Active" value={ov.elevenlabs.active} sub={`${ov.elevenlabs.requests_per_minute}/min`} />
         <TC label="Capacity State" value={ov.openai_capacity.capacity_state} chip={badge(capacityTone(ov.openai_capacity.capacity_state), `${(ov.openai_capacity.utilization_pct * 100).toFixed(0)}%`)} />
         <TC label="Server Status" value={ov.server.available ? (ov.status === "healthy" ? "Healthy" : ov.status[0].toUpperCase() + ov.status.slice(1)) : "N/A"} chip={badge(serverTone, ov.server.available ? "Live" : "psutil off")} />
       </div>
@@ -240,7 +239,6 @@ export function TrafficDashboardPage() {
               ["TPM", `${cap.tpm_used.toLocaleString()} / ${cap.tpm_limit.toLocaleString()}`],
               ["RPM", `${cap.rpm_used} / ${cap.rpm_limit}`],
             ]} />
-            <ProviderPanel title="ElevenLabs" p={ov.elevenlabs} />
           </div>
         </div>
 
@@ -293,7 +291,6 @@ export function TrafficDashboardPage() {
             <Protect label="Rate Limiting" value={capacity.protection.rate_limiting.enabled ? "Enabled" : "Disabled"} tone={capacity.protection.rate_limiting.enabled ? "green" : "gray"} detail={`interview ${capacity.protection.rate_limiting.interview} · voice ${capacity.protection.rate_limiting.voice} · assessment ${capacity.protection.rate_limiting.assessment} · scope ${capacity.protection.rate_limiting.scope}`} />
             <Protect label="Login Throttle" value={capacity.protection.login_throttle.enabled ? "Enabled" : "Disabled"} tone={capacity.protection.login_throttle.enabled ? "green" : "gray"} detail={`${capacity.protection.login_throttle.max_failed_attempts} attempts → ${capacity.protection.login_throttle.lockout_seconds}s lockout`} />
             <Protect label="AI Interview Concurrency" value={`${capacity.protection.interview_concurrency.active} / ${capacity.protection.interview_concurrency.limit}`} tone="green" detail="Bounded semaphore; controlled 503 when saturated" />
-            <Protect label="TTS Concurrency" value={`${capacity.protection.tts_concurrency.active} / ${capacity.protection.tts_concurrency.limit}`} tone="green" detail="Degrades to text-only when saturated" />
             <Protect label="Assessment Execution" value={capacity.protection.assessment_execution === "background_queue" ? "Background queue" : "Synchronous"} tone="green" detail={`${capacity.assessment_workers} workers`} />
             <Protect label="Retry / Backoff" value={capacity.protection.retry_backoff.enabled ? "Active" : "Off"} tone="green" detail={`max ${capacity.protection.retry_backoff.max_retries} retries · exp backoff + jitter · honors Retry-After`} />
             <Protect label="Circuit Breaker" value="Not configured" tone="gray" detail="Telemetry + retry cover current failure patterns" />
@@ -341,7 +338,6 @@ export function TrafficDashboardPage() {
             <Health label="Deployment" value={capacity.deployment_mode.replace(/_/g, " ")} tone="gray" />
             <Health label="App Workers" value={String(capacity.app_workers)} tone="gray" />
             <Health label="Max AI Interviews" value={String(capacity.max_ai_interview_concurrency)} tone="gray" />
-            <Health label="Max TTS" value={String(capacity.max_tts_concurrency)} tone="gray" />
             <Health label="Assessment Workers" value={String(capacity.assessment_workers)} tone="gray" />
             <Health label="Rate Limiter Scope" value={capacity.rate_limiter_scope.replace(/_/g, " ")} tone="amber" />
           </div>
@@ -356,8 +352,7 @@ export function TrafficDashboardPage() {
           </p>
           <div className="pt-protect-list">
             <div className="pt-protect-row"><div className="pt-protect-main"><span>1 · Live patient interview</span>{badge("green", "Highest")}</div><div className="pt-muted pt-protect-detail">Interview generation keeps its own (larger) concurrency budget.</div></div>
-            <div className="pt-protect-row"><div className="pt-protect-main"><span>2 · TTS / ElevenLabs</span>{badge("amber", "Medium")}</div><div className="pt-muted pt-protect-detail">Degrades to text-only when saturated; never fails the interview.</div></div>
-            <div className="pt-protect-row"><div className="pt-protect-main"><span>3 · Assessment</span>{badge("gray", "Backs off")}</div><div className="pt-muted pt-protect-detail">Adaptive workers reduce/pause as OpenAI capacity tightens (current: {ov.assessment.throttle_mode}).</div></div>
+            <div className="pt-protect-row"><div className="pt-protect-main"><span>2 · Assessment</span>{badge("gray", "Backs off")}</div><div className="pt-muted pt-protect-detail">Adaptive workers reduce/pause as OpenAI capacity tightens (current: {ov.assessment.throttle_mode}).</div></div>
           </div>
         </div>
       </div>

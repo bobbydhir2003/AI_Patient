@@ -354,7 +354,6 @@ class Telemetry:
     def __init__(self) -> None:
         self.http = RollingWindow()
         self.openai = ProviderMetrics("openai")
-        self.elevenlabs = ProviderMetrics("elevenlabs")
         self.live = LiveRegistry()
         self.alerts = AlertLog()
         self.history = HistorySampler()
@@ -362,9 +361,6 @@ class Telemetry:
         self.interview_in_flight = Gauge()
         self.interview_waiting = Gauge()          # requests currently waiting for a slot
         self.interview_wait = RollingWindow()      # wait-time samples + "timeout" counter
-        self.tts_in_flight = Gauge()
-        self.tts_waiting = Gauge()                 # requests currently waiting for a TTS slot
-        self.tts_wait = RollingWindow()             # wait-time samples + acquired/waited/timeout counters
         self.assessment_in_flight = Gauge()
         self.started_at = time.time()
         # Lifetime (since process start) count of HTTP requests handled by THIS
@@ -413,7 +409,6 @@ class Telemetry:
                         "active_users": self.live.active_users(active_window_seconds),
                         "http_rpm": self.http.rate_per_min("requests", 60),
                         "openai_rpm": self.openai.window.rate_per_min("requests", 60),
-                        "elevenlabs_rpm": self.elevenlabs.window.rate_per_min("requests", 60),
                         "rate_limited": self.http.sum("429", 60),
                     })
                 except Exception:  # never let the sampler kill the process

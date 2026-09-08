@@ -28,10 +28,6 @@ _LENIENT_NUMERIC_FIELDS = (
     "openai_assessment_timeout_seconds",
     "openai_max_output_tokens",
     "openai_max_retries",
-    "patient_streaming_first_audio_target_ms",
-    "elevenlabs_timeout_seconds",
-    "elevenlabs_max_text_chars",
-    "elevenlabs_cache_max_entries",
     # NOTE: access_token_expire_minutes is intentionally NOT lenient - a bad
     # token-lifetime value is security-critical and must fail loudly, never
     # silently fall back to a default.
@@ -86,48 +82,19 @@ class Settings(BaseSettings):
     # it has no runtime effect. Retry behavior is governed by provider_max_retries.
     openai_max_retries: int = 1  # DEAD CONFIG - see note above (unused)
 
-    # --- Low-latency streaming patient responses (feature-flagged) ---
-    # Master switch for the streamed OpenAI text + sentence pipeline. When
-    # false (default), the /messages/stream endpoint returns 409 and the
-    # frontend uses the original atomic-response path. Disable instantly by
-    # setting OPENAI_PATIENT_STREAMING_ENABLED=false and restarting uvicorn.
+    # --- Legacy typed-chat streaming flag (DORMANT) ---
+    # The old typed HTTP patient path (/messages, /messages/stream) and its
+    # ElevenLabs TTS have been removed; the patient conversation now runs only
+    # through LiveKit + OpenAI Realtime. This flag no longer gates any live
+    # request path and is retained only so existing .env files / the load-test
+    # harness do not error on an unknown key.
     openai_patient_streaming_enabled: bool = False
-    # Sentence-level TTS pipelining (frontend speaks approved sentences as
-    # they arrive). If false while streaming is on, text still streams but
-    # the frontend synthesizes audio only after the final commit.
-    patient_sentence_pipelining_enabled: bool = True
-    # Reserved: ElevenLabs WebSocket streaming input. The current design uses
-    # per-sentence HTTP over the shared keep-alive client (see VOICE docs).
-    elevenlabs_streaming_input_enabled: bool = False
-    # Development target for question-submitted -> first audible word.
-    patient_streaming_first_audio_target_ms: int = 2000
 
-    # --- ElevenLabs text-to-speech (patient voice) ---
-    # The key stays on the backend ONLY. The browser calls FastAPI, and FastAPI
-    # calls ElevenLabs. Never expose this key to the React frontend.
-    elevenlabs_api_key: str = ""
-    elevenlabs_enabled: bool = True
-    elevenlabs_default_model: str = "eleven_multilingual_v2"
-    elevenlabs_output_format: str = "mp3_44100_128"
-    elevenlabs_timeout_seconds: float = 20.0
-    # Patient replies are capped at MAX_PATIENT_RESPONSE_CHARS (900); this adds
-    # headroom but blocks arbitrary long-text synthesis through the endpoint.
-    elevenlabs_max_text_chars: int = 1200
-    elevenlabs_cache_max_entries: int = 24
-    # HTTPX connection-pool sizing for the shared ElevenLabs client. The pool
-    # must never be smaller than the configured TTS concurrency (a request
-    # that already won a TTS semaphore slot must not then queue again inside
-    # httpx for a connection) - see elevenlabs_client.get_http_client(). This
-    # is a floor; the effective pool is max(max_concurrent_tts_requests, this).
-    elevenlabs_pool_min_connections: int = 8
-    # A request that passed the TTS semaphore should fail fast, not hang,
-    # if the internal connection pool is somehow still exhausted.
-    elevenlabs_pool_timeout_seconds: float = 10.0
-
-    # --- LiveKit (Phase 1/2 POC only - see app/livekit_agent/, app/api/livekit.py) ---
-    # NOT used by any production interview/voice path. All blank/disabled by
-    # default; the token endpoint reports itself unavailable until an operator
-    # supplies real LiveKit Cloud credentials via environment variables. The
+    # --- LiveKit (production interview voice path - see app/livekit_agent/) ---
+    # The student's spoken (and typed-during-interview) conversation runs over
+    # LiveKit + OpenAI Realtime. All blank/disabled by default; the token
+    # endpoint reports itself unavailable until an operator supplies real
+    # LiveKit Cloud credentials via environment variables. The
     # API secret stays backend-only, exactly like ELEVENLABS_API_KEY above.
     livekit_url: str = ""
     livekit_api_key: str = ""
@@ -143,103 +110,59 @@ class Settings(BaseSettings):
     # bug) - changing this requires updating both sides together.
     livekit_agent_name: str = "ptai-patient-agent"
 
-    # --- Phase 2 raw-audio VAD/STT (parallel, OBSERVATIONAL only - see
-    # app/livekit_agent/worker.py's _StudentVadSttPipeline). This NEVER
-    # drives the conversation - browser SpeechRecognition remains the sole
-    # trigger for student_text/patient generation; server VAD/STT only emits
-    # diagnostic log events. Disabled unless BOTH this flag is true AND a
-    # real Deepgram credential is set - either alone leaves the pipeline off
-    # (fails open, matching livekit_poc_enabled's own all-or-nothing gating
-    # above). Get a key at https://console.deepgram.com/.
-    livekit_server_stt_enabled: bool = False
-    deepgram_api_key: str = ""
+    # --- Voice engine selection. "livekit" (LiveKit + OpenAI Realtime
+    # prompt_agent) is the only supported interview voice architecture now -
+    # the legacy browser SpeechRecognition + ElevenLabs path has been
+    # retired. Kept as a field (rather than removed outright) so an
+    # explicitly-set unsupported value fails loudly instead of silently
+    # selecting a different engine. See student_livekit_enabled() in
+    # livekit_token_service.py, which also requires this to be "livekit"
+    # before it will ever mint a student token.
+    voice_engine: str = "livekit"
 
-    # --- Phase 3 semantic turn detection (EXPERIMENTAL, OBSERVATIONAL only -
-    # see app/livekit_agent/turn_detector.py and worker.py's
-    # _CandidateTurnCoordinator). A HOLD/END decision here NEVER triggers
-    # patient generation, never publishes student_text, never touches
-    # conversation/assessment history - it only ever logs
-    # student_turn_detector_decision. Requires livekit_server_stt_enabled
-    # above (the VAD/STT events this feeds on) - enabling this WITHOUT that
-    # is a no-op with a logged warning, never a startup failure (see
-    # _warn_semantic_turn_detection_misconfig below).
-    livekit_semantic_turn_detection_enabled: bool = False
-
-    # --- Phase 4 semantic turn CONTROL (EXPERIMENTAL - see worker.py's
-    # PocAgentSession._semantic_control_active/_handle_semantic_turn_end).
-    # Unlike Phase 3 above (observational only), this flag - once genuinely
-    # active - makes Smart Turn's HOLD/END decision the thing that submits
-    # the student's turn into the SAME patient-generation pipeline browser
-    # student_text uses, and makes browser student_text non-authoritative for
-    # the session (still accepted/acked, never processed - see
-    # semantic_turn_browser_text_ignored). Requires BOTH
-    # livekit_server_stt_enabled AND livekit_semantic_turn_detection_enabled
-    # above - see semantic_turn_control_active and
-    # _warn_semantic_turn_control_misconfig below for the same fail-safe,
-    # never-fail-startup discipline as Phase 3.
-    livekit_semantic_turn_control_enabled: bool = False
-
-    # --- Phase 5A semantic barge-in (EXPERIMENTAL - see worker.py's
-    # _CandidateTurnCoordinator barge-in buffer/PocAgentSession.
-    # _on_semantic_barge_in). Lets genuine student interruption speech
-    # (classified TRUE_BARGE_IN, see turn_detector.py's classify_barge_in)
-    # stop patient audio mid-turn, reusing the SAME cancellation primitive
-    # the manual interrupt_patient control message already uses - see
-    # PocAgentSession._cancel_active_patient_turn. Meaningless without
-    # semantic turn CONTROL already active (barge-in decides whether the
-    # PATIENT should yield the floor to the student's ALREADY-authoritative
-    # server-side turn pipeline) - see semantic_barge_in_active and
-    # _warn_semantic_barge_in_misconfig below for the same fail-safe,
-    # never-fail-startup discipline as Phase 3/4.
-    livekit_semantic_barge_in_enabled: bool = False
-
-    # --- Phase 5B spoken-transcript sync (EXPERIMENTAL - see
-    # patient_adapter.py's split_into_sentences/finalize_partial_patient_
-    # delivery and worker.py's PocAgentSession._run_turn per-sentence
-    # branch). Fixes a transcript-integrity bug present since Phase 1: the
-    # full patient response is persisted to the DB the instant OpenAI
-    # responds, BEFORE any audio has played - if the student then
-    # interrupts (manual button OR Phase 5A semantic barge-in), the DB
-    # still shows the entire (never-heard) response. When this flag is
-    # true, patient audio publishes sentence-by-sentence and an
-    # interruption/mid-response TTS failure corrects the ALREADY-persisted
-    # row back down to only the sentences that genuinely finished
-    # publishing - see generate_and_persist_turn's docstring for why the
-    # insert/commit timing and idempotency there are otherwise completely
-    # unchanged. Independent of Phase 4/5A (LIVEKIT_SEMANTIC_TURN_CONTROL_
-    # ENABLED/LIVEKIT_SEMANTIC_BARGE_IN_ENABLED) - the manual interrupt
-    # button already works without either of those, so this fix is useful
-    # on its own. No prerequisites, no misconfig warning needed.
-    livekit_spoken_transcript_sync_enabled: bool = False
-
-    # --- Phase 6 patient backchanneling (EXPERIMENTAL - see worker.py's
-    # PocAgentSession._on_semantic_hold/_schedule_backchannel/
-    # _play_backchannel). Lets the patient say a short, semantically-neutral
-    # acknowledgement ("Mm-hmm.") during a student's HOLD-classified
-    # thinking pause - a PATIENT_BACKCHANNEL, never a PATIENT_RESPONSE: it
-    # never calls OpenAI, never persists a transcript row, never touches
-    # the student's candidate transcript/turn id, and is cancelled
-    # immediately the instant the student resumes speaking. Requires
-    # semantic turn CONTROL already active (a backchannel only makes sense
-    # once Smart Turn's HOLD/END decision is authoritative for student turn
-    # completion) - deliberately does NOT require semantic barge-in
-    # (LIVEKIT_SEMANTIC_BARGE_IN_ENABLED); backchannel cancellation uses its
-    # own independent, simpler mechanism (VAD speech_started), not Phase
-    # 5A's interruption classifier. See patient_backchannel_active and
-    # _warn_patient_backchannel_misconfig below for the same fail-safe,
-    # never-fail-startup discipline as every other experimental flag here.
-    livekit_patient_backchannel_enabled: bool = False
-
-    # --- Voice engine selection (Phase A: flag + student-safe token endpoint
-    # only - the real InterviewPage does NOT read this yet; it still always
-    # uses the legacy patientVoiceService/api/voice path unconditionally).
-    # "legacy" (default) preserves today's production behavior exactly.
-    # "livekit" is validated below but has no student-facing effect until a
-    # later phase wires InterviewPage to branch on it. See
-    # student_livekit_enabled() in livekit_token_service.py, which ALSO
-    # requires this to be "livekit" before it will ever mint a student token
-    # - the flag has real teeth, not just documentation value.
-    voice_engine: str = "legacy"
+    # --- OpenAI Realtime native-voice engine (POC - see
+    # app/livekit_agent/realtime_client.py / realtime_session.py). A dedicated,
+    # DEFAULT-OFF master switch, deliberately independent of the legacy Phase
+    # 2-7 semantic flags above (server STT / Smart Turn / Phase 7 timers): the
+    # Realtime engine REPLACES that whole input turn-taking stack for a session,
+    # it does not layer on top of it. When false (the default), the worker
+    # behaves byte-for-byte as today - the legacy Silero/Deepgram/SmartTurn/
+    # ElevenLabs stack is untouched and remains the only path. Requires a real
+    # OPENAI_API_KEY to actually engage (see realtime_engine_active below).
+    # Conceptually this is the "VOICE_ENGINE=openai_realtime" selection, kept as
+    # its own boolean so it can never change the existing voice_engine enum's
+    # student-token-minting semantics.
+    livekit_realtime_engine_enabled: bool = False
+    # Selects which OpenAI Realtime architecture the worker uses. "prompt_agent"
+    # is the only supported mode: it hands the whole conversation to OpenAI
+    # Realtime (hosted prompt per patient, server_vad, native create_response)
+    # and only persists/streams the final transcripts - see
+    # app/livekit_agent/realtime_prompt_agent.py. The old backend-controlled
+    # pipeline (patient_adapter-driven generation + semantic-vad turn control)
+    # has been retired; this field is kept (rather than removed outright) so an
+    # explicitly-set unsupported value fails loudly instead of silently
+    # selecting a different engine.
+    openai_realtime_engine_mode: str = "prompt_agent"
+    # prompt_agent hosted-prompt IDs, one per canonical case_id. These are
+    # SECRETS supplied per environment (never hardcoded, never sent to the
+    # frontend) and resolved server-side from the interview's trusted case_id
+    # (see realtime_patient_configs.resolve_patient_config). Empty => that
+    # patient is not yet configured and its interview fails to start loudly.
+    openai_realtime_carly_prompt_id: str = ""
+    openai_realtime_camden_prompt_id: str = ""
+    openai_realtime_sofia_prompt_id: str = ""
+    openai_realtime_jayden_prompt_id: str = ""
+    # GA Realtime model + native voice. "gpt-realtime" is the current GA model;
+    # "marin"/"cedar" are OpenAI's recommended voices. Single voice for the POC.
+    openai_realtime_model: str = "gpt-realtime"
+    openai_realtime_voice: str = "marin"
+    # Input-audio transcription model for the authoritative student transcript
+    # (Realtime transcribes the student's speech; see Phase G reconciliation).
+    openai_realtime_transcription_model: str = "gpt-4o-mini-transcribe"
+    # semantic_vad eagerness: "low" waits longest through thinking pauses (best
+    # fit for the "When your pain started, were you... [pause] ...walking or
+    # sitting?" case). One of low/medium/high/auto.
+    openai_realtime_semantic_eagerness: str = "low"
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
@@ -293,22 +216,11 @@ class Settings(BaseSettings):
     telemetry_sample_interval_seconds: int = 15  # live-chart history sampling cadence
     live_session_idle_prune_seconds: int = 900   # drop live-session rows after inactivity
 
-    # Concurrency guards. These are GLOBAL (fleet-wide) limits when Redis is
-    # configured (see redis_url below) - one shared OpenAI budget and one
-    # separate shared TTS budget across all uvicorn workers, not per-process.
+    # Concurrency guards. This is a GLOBAL (fleet-wide) limit when Redis is
+    # configured (see redis_url below) - one shared OpenAI budget across all
+    # uvicorn workers, not per-process.
     max_concurrent_ai_interviews: int = 20
     ai_interview_wait_seconds: float = 2.0       # bounded wait before a 503 overload
-    # Default sized for the planned eleven_flash_v2_5 TTS setup. This is a
-    # tuning knob, not a guaranteed provider limit - adjust to match real
-    # ElevenLabs concurrency headroom. Raised from 10: at ~10 concurrent
-    # students the old value left zero headroom for any overlap at all, so a
-    # normal burst immediately exhausted every slot.
-    max_concurrent_tts_requests: int = 15
-    # Bounded queueing window before a caller degrades to browser TTS. Raised
-    # from 0.5s (which gave almost no time to queue through a brief burst) to
-    # a window long enough to absorb normal overlap while still being a small
-    # fraction of a typical request timeout - never an unbounded wait.
-    tts_wait_seconds: float = 5.0
 
     # --- Redis (fleet-wide concurrency control across multiple uvicorn workers) ---
     # Empty by default (single-worker/local-dev safe). REQUIRED in production/
@@ -392,13 +304,12 @@ class Settings(BaseSettings):
     deployment_mode: str = "single_instance"     # single_instance | multi_worker | multi_node
     app_workers: int = 1                         # uvicorn/gunicorn worker count (informational)
 
-    # Mock provider mode (for load testing WITHOUT spending OpenAI/ElevenLabs).
+    # Mock provider mode (for load testing WITHOUT spending OpenAI credits).
     # Never enable in production; normal behavior is unchanged when false. This is
     # the STARTUP default; the load-test controller can set a runtime DB override
     # (system_settings["mock_ai"]) for the duration of a Simulated-AI test.
     mock_ai: bool = False
     mock_model_latency_ms: int = 800
-    mock_tts_latency_ms: int = 300
 
     # --- Load & Capacity Testing (J) ---
     load_test_enabled: bool = True
@@ -462,19 +373,19 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_voice_engine(cls, value: object) -> object:
         """Fail safe, never fail loud: an unrecognized VOICE_ENGINE value
-        (typo, stray whitespace, leftover placeholder) must never crash the
-        app AND must never silently activate an experimental engine - it
-        falls back to the safe default ('legacy') with a visible warning,
-        the same discipline _coerce_lenient_numeric already applies to
-        non-critical tuning knobs above."""
-        valid = ("legacy", "livekit")
-        normalized = str(value).strip().lower() if value is not None else "legacy"
+        (typo, stray whitespace, leftover placeholder, or the retired
+        "legacy") must never crash the app - it falls back to the only
+        supported engine ('livekit') with a visible warning, the same
+        discipline _coerce_lenient_numeric already applies to non-critical
+        tuning knobs above."""
+        valid = ("livekit",)
+        normalized = str(value).strip().lower() if value is not None else "livekit"
         if normalized in valid:
             return normalized
         logger.warning(
-            "Config VOICE_ENGINE=%r is not one of %s; falling back to 'legacy'.", value, valid,
+            "Config VOICE_ENGINE=%r is not one of %s; falling back to 'livekit'.", value, valid,
         )
-        return "legacy"
+        return "livekit"
 
     @field_validator("access_token_expire_minutes")
     @classmethod
@@ -487,6 +398,14 @@ class Settings(BaseSettings):
         if value > 60 * 24 * 30:  # 30 days
             raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES is unreasonably large (max 30 days).")
         return value
+
+    @field_validator("openai_realtime_engine_mode", mode="before")
+    @classmethod
+    def _validate_realtime_engine_mode(cls, value: object) -> object:
+        normalized = str(value or "prompt_agent").strip().lower()
+        if normalized != "prompt_agent":
+            raise ValueError("OPENAI_REALTIME_ENGINE_MODE must be 'prompt_agent'")
+        return normalized
 
     @property
     def is_strict_environment(self) -> bool:
@@ -562,105 +481,24 @@ class Settings(BaseSettings):
             )
         return self
 
-    @model_validator(mode="after")
-    def _warn_semantic_turn_detection_misconfig(self) -> "Settings":
-        """Phase 3 (EXPERIMENTAL): semantic turn detection is layered on top
-        of Phase 2's server-side VAD/STT events - enabling it while
-        livekit_server_stt_enabled is off has nothing to observe. Per Step 11
-        this must fail SAFE, not fail the app: log once and let
-        worker.py's own per-job factory (_maybe_start_turn_detector) treat it
-        as effectively disabled - never a ConfigError, never blocked at
-        startup (this experimental flag has no bearing on the main API
-        server's ability to start)."""
-        if self.livekit_semantic_turn_detection_enabled and not self.livekit_server_stt_enabled:
-            logger.warning(
-                "LIVEKIT_SEMANTIC_TURN_DETECTION_ENABLED=true but "
-                "LIVEKIT_SERVER_STT_ENABLED=false - semantic turn detection has no VAD/STT "
-                "events to observe and will stay OFF until server-side STT is also enabled."
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _warn_semantic_turn_control_misconfig(self) -> "Settings":
-        """Phase 4 (EXPERIMENTAL): semantic turn CONTROL requires both Phase 2
-        (server STT) and Phase 3 (semantic detection) to be genuinely active -
-        see semantic_turn_control_active below, the single source of truth
-        worker.py actually reads. Same fail-SAFE discipline as Phase 3's own
-        warning above: log once, never block startup - worker.py's per-job
-        code treats an inconsistent config as control simply staying off."""
-        if self.livekit_semantic_turn_control_enabled and not self.semantic_turn_control_active:
-            logger.warning(
-                "LIVEKIT_SEMANTIC_TURN_CONTROL_ENABLED=true but LIVEKIT_SERVER_STT_ENABLED "
-                "and/or LIVEKIT_SEMANTIC_TURN_DETECTION_ENABLED is false - semantic turn "
-                "control has no HOLD/END decisions to act on and will stay OFF (browser "
-                "student_text remains authoritative) until both prerequisites are also enabled."
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _warn_semantic_barge_in_misconfig(self) -> "Settings":
-        """Phase 5A (EXPERIMENTAL): barge-in is layered on top of semantic
-        turn CONTROL, not just detection - enabling it while
-        semantic_turn_control_active is False has no authoritative student
-        turn pipeline to hand the floor back to. Same fail-SAFE discipline:
-        log once, never block startup - worker.py's per-job code treats an
-        inconsistent config as barge-in simply staying off."""
-        if self.livekit_semantic_barge_in_enabled and not self.semantic_turn_control_active:
-            logger.warning(
-                "LIVEKIT_SEMANTIC_BARGE_IN_ENABLED=true but semantic turn CONTROL is not "
-                "active (requires LIVEKIT_SERVER_STT_ENABLED, "
-                "LIVEKIT_SEMANTIC_TURN_DETECTION_ENABLED, and "
-                "LIVEKIT_SEMANTIC_TURN_CONTROL_ENABLED all true) - semantic barge-in has no "
-                "authoritative student turn pipeline to hand the floor to and will stay OFF."
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _warn_patient_backchannel_misconfig(self) -> "Settings":
-        """Phase 6 (EXPERIMENTAL): backchanneling is layered on top of
-        semantic turn CONTROL, not barge-in - enabling it while
-        semantic_turn_control_active is False has no authoritative HOLD/END
-        decisions to schedule a backchannel around. Same fail-SAFE
-        discipline: log once, never block startup."""
-        if self.livekit_patient_backchannel_enabled and not self.semantic_turn_control_active:
-            logger.warning(
-                "LIVEKIT_PATIENT_BACKCHANNEL_ENABLED=true but semantic turn CONTROL is not "
-                "active (requires LIVEKIT_SERVER_STT_ENABLED, "
-                "LIVEKIT_SEMANTIC_TURN_DETECTION_ENABLED, and "
-                "LIVEKIT_SEMANTIC_TURN_CONTROL_ENABLED all true) - patient backchanneling has "
-                "no HOLD/END decisions to act on and will stay OFF."
-            )
-        return self
+    @property
+    def realtime_engine_active(self) -> bool:
+        """OpenAI Realtime voice engine: true only when explicitly enabled AND
+        a real OpenAI key is configured. When false (the default), the worker
+        never opens a Realtime session - see worker.py's
+        _maybe_start_realtime_session, which fails safe to None in every
+        off/unconfigured case."""
+        return self.livekit_realtime_engine_enabled and bool(self.openai_api_key)
 
     @property
-    def semantic_turn_control_active(self) -> bool:
-        """The single source of truth worker.py reads to decide whether
-        Smart Turn's HOLD/END decision is authoritative for a session - true
-        only when all three Phase 2/3/4 flags agree. Never crashes/raises;
-        a partial/inconsistent config simply evaluates to False (see
-        _warn_semantic_turn_control_misconfig above for the accompanying log)."""
-        return (
-            self.livekit_semantic_turn_control_enabled
-            and self.livekit_server_stt_enabled
-            and self.livekit_semantic_turn_detection_enabled
-        )
-
-    @property
-    def semantic_barge_in_active(self) -> bool:
-        """Phase 5A: true only when barge-in is enabled AND semantic turn
-        control is already active - barge-in can never be "more active"
-        than the turn-control pipeline it depends on. See
-        _warn_semantic_barge_in_misconfig above for the accompanying log."""
-        return self.livekit_semantic_barge_in_enabled and self.semantic_turn_control_active
-
-    @property
-    def patient_backchannel_active(self) -> bool:
-        """Phase 6: true only when backchanneling is enabled AND semantic
-        turn control is already active. Deliberately independent of
-        semantic_barge_in_active - backchannel cancellation uses its own
-        mechanism (VAD speech_started), not the Phase 5A barge-in
-        classifier. See _warn_patient_backchannel_misconfig above."""
-        return self.livekit_patient_backchannel_enabled and self.semantic_turn_control_active
+    def realtime_prompt_agent_active(self) -> bool:
+        """prompt_agent engine: OpenAI Realtime owns the whole conversation
+        (hosted prompt per patient). True whenever the Realtime engine is
+        enabled/keyed - "prompt_agent" is the only mode `openai_realtime_
+        engine_mode` can validate to now, so this is equivalent to
+        `realtime_engine_active` but kept as its own property since callers
+        read it as "is the (only) Realtime engine active" for clarity."""
+        return self.realtime_engine_active and self.openai_realtime_engine_mode == "prompt_agent"
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -30,6 +30,7 @@ from app.core.config import get_settings
 from app.core.constants import (
     ASSESSMENT_PROMPT_VERSION,
     MIN_STUDENT_TURNS_FOR_ASSESSMENT,
+    RUBRIC_DOMAINS,
     SESSION_STATUS_COMPLETED,
 )
 from app.core.exceptions import (
@@ -143,6 +144,63 @@ def _evidence_count(extraction) -> int:
     return sum(len(d.evidence_items) for d in extraction.domains)
 
 
+def _missing_domains(combined) -> list[str]:
+    """Required rubric domains absent from a combined result (order-preserving).
+
+    The strengthened json-schema forces exactly four domain objects, each with a
+    domain from the canonical enum - but json-schema cannot express "all four
+    DISTINCT", so a response can still repeat one domain and omit another. This
+    is the single check both the recovery retry and the final validator care
+    about.
+    """
+    present = {d.rubric_domain for d in combined.domains}
+    return [d for d in RUBRIC_DOMAINS if d not in present]
+
+
+def _recover_missing_domains(
+    budget, combined, transcript_text, rubrics, case_reference, session_id, assessment_id,
+):
+    """ONE bounded recovery attempt when CALL 1 came back missing a required
+    rubric domain (the confirmed production failure: got ['OARS Communication']).
+
+    Deterministic, non-looping: at most one extra logical call, only if the
+    per-assessment call budget still allows it. The correction feedback names the
+    exact missing domains and demands all four. If no budget remains, or the
+    retry still doesn't cover all four, we return the best result we have and let
+    the final validator fail the run cleanly rather than retry forever.
+    """
+    missing = _missing_domains(combined)
+    if not missing:
+        return combined
+    logger.warning(
+        "assessment_missing_domains session_id=%s assessment_id=%s missing=%s",
+        session_id, assessment_id, missing,
+    )
+    if not budget.can_call():
+        return combined  # no budget for recovery; validator will fail cleanly
+    feedback = [
+        "The previous draft was missing required rubric domain(s): "
+        + ", ".join(missing)
+        + ". Return a COMPLETE assessment containing ALL FOUR rubric domains, "
+        "exactly once each: " + ", ".join(RUBRIC_DOMAINS) + "."
+    ]
+    logger.info(
+        "assessment_domain_recovery_requested session_id=%s assessment_id=%s missing=%s",
+        session_id, assessment_id, missing,
+    )
+    recovered = combined_assessment.generate_combined(
+        budget, transcript_text, rubrics, case_reference,
+        stage="assessment_domain_recovery", correction_feedback=feedback,
+    )
+    # Adopt the recovery only if it covers strictly more domains; otherwise keep
+    # whichever result carries more domain objects (never fewer).
+    if not _missing_domains(recovered):
+        return recovered
+    if len(_missing_domains(recovered)) < len(missing):
+        return recovered
+    return recovered if len(recovered.domains) >= len(combined.domains) else combined
+
+
 def execute_pipeline(db: Session, run, session, client: OpenAIPatientClient) -> AssessmentOut:
     """Redesigned standard pipeline: 2 OpenAI calls normally, 3 at the absolute
     maximum (one bounded combined correction). All four rubric domains, grounded
@@ -189,6 +247,11 @@ def execute_pipeline(db: Session, run, session, client: OpenAIPatientClient) -> 
         # ---- CALL 1: combined structured generation ----------------------
         combined = combined_assessment.generate_combined(
             budget, prepared.text, rubrics, case_reference, stage="assessment_generate",
+        )
+        # Recover a missing rubric domain with ONE targeted retry BEFORE any
+        # validation (the confirmed production failure was a one-domain result).
+        combined = _recover_missing_domains(
+            budget, combined, prepared.text, rubrics, case_reference, session_id, run.id,
         )
         raw_evidence = _evidence_count(combined.to_extraction())
 

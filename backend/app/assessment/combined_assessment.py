@@ -22,8 +22,13 @@ _PROMPT = Path(__file__).resolve().parent / "prompts" / "combined_assessment_pro
 
 # Generous default output budget: the combined response carries evidence +
 # evaluation for four domains plus the overall block, so it needs materially more
-# room than any single old per-domain call.
-_DEFAULT_MAX_OUTPUT_TOKENS = 8000
+# room than any single old per-domain call. Raised from 8000 -> 12000 after a
+# production run returned only one domain: four fully-evidenced domains + the
+# overall block can legitimately approach ~8-9k tokens, so 8000 left no margin
+# and risked silent under-generation/truncation. 12000 gives headroom without an
+# arbitrary blow-up (an admin can still override via
+# settings.openai_standard_assessment_max_output_tokens).
+_DEFAULT_MAX_OUTPUT_TOKENS = 12000
 
 
 def generate_combined(

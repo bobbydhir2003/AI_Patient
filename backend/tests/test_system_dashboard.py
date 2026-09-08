@@ -1,21 +1,18 @@
 """Tests for the technical System Dashboard endpoints.
 
 Verifies admin-only access, that every value is real (not fabricated), that
-secrets/voice-ids are never leaked, honest 'not configured' states, real audit
-writes, and that the academic dashboard is untouched.
+secrets are never leaked, honest 'not configured' states, real audit writes, and
+that the academic dashboard is untouched.
+
+Patient interview voice is now provided by OpenAI Realtime, so the dashboard no
+longer surfaces ElevenLabs status, per-case voices, an audio queue/cache, or a
+TTS concurrency lane.
 """
 import json
 
-import pytest
-from sqlalchemy.orm import sessionmaker
-
 from app.core.config import get_settings
-from app.database.connection import get_db
 from app.services.system_service import mask_secret
-from app.voice.elevenlabs_client import get_elevenlabs_client
-from tests.conftest import make_client
 from tests.test_auth import auth_header, login_token, make_admin, register
-from tests.test_voice import FakeElevenLabsClient
 
 
 def admin_token(client, engine):
@@ -50,46 +47,20 @@ def test_overview_reports_real_health(client, engine):
     assert d["database"]["dbType"] == "sqlite"  # the ACTIVE test database
     assert isinstance(d["database"]["latencyMs"], int)
 
-    # No fabricated queue: honest unavailable state.
-    assert d["audioQueue"]["available"] is False
-    assert d["audioQueue"]["status"] == "unavailable"
-
     # Real storage numbers.
     assert d["storage"]["percentUsed"] is not None
-    assert d["storage"]["audioCacheMaxEntries"] is not None
 
 
 def test_service_status_is_configured_not_connected(client, engine):
-    """OpenAI/ElevenLabs must never claim 'connected' just because a key exists."""
+    """OpenAI must never claim 'connected' just because a key exists."""
     tok = admin_token(client, engine)
     d = client.get("/api/admin/system/overview", headers=auth_header(tok)).json()
     assert d["openai"]["status"] in ("configured", "not_configured")
-    assert d["elevenlabs"]["status"] in ("configured", "not_configured")
     assert d["openai"]["status"] != "connected"
-
-
-# ------------------------------------------------------------------ voices
-def test_voices_include_camden_mother_only_and_mask_ids(client, engine):
-    tok = admin_token(client, engine)
-    d = client.get("/api/admin/system/overview", headers=auth_header(tok)).json()
-    voices = d["voices"]
-    labels = [v["speakerLabel"] for v in voices]
-
-    # Camden exposes a SINGLE voice speaker: his mother (sourced from the case
-    # file). There is no separate Camden child ("patient") voice entry.
-    assert "Camden's Mother" in labels
-    assert "Camden (Patient)" not in labels
-    mother = next(v for v in voices if v["speakerLabel"] == "Camden's Mother")
-    assert mother["status"] == "active"
-    assert mother["maskedVoiceId"] and "••••" in mother["maskedVoiceId"]
-
-
-def test_full_voice_ids_never_leak(client, engine):
-    tok = admin_token(client, engine)
-    body = json.dumps(client.get("/api/admin/system/overview", headers=auth_header(tok)).json())
-    # Full configured voice IDs from the case files must not appear anywhere.
-    for full_id in ("x86DtpnPPuq2BpEiKPRy", "aj0fZfXTBc7E3By4X8L2", "MKlLqCItoCkvdhrxgtLv"):
-        assert full_id not in body
+    # ElevenLabs is fully removed from the dashboard.
+    assert "elevenlabs" not in d
+    assert "voices" not in d
+    assert "audioQueue" not in d
 
 
 # ------------------------------------------------------------------ credentials
@@ -104,73 +75,15 @@ def test_credentials_are_masked_and_full_key_never_returned(client, engine):
         else:
             assert cred["maskedValue"] is None
             assert cred["status"] == "not_configured"
-    # Whatever the real keys are, the full value must never be in the payload.
-    for key in (settings.openai_api_key, settings.elevenlabs_api_key):
-        if key:
-            assert key not in body
+    # Whatever the real key is, the full value must never be in the payload.
+    if settings.openai_api_key:
+        assert settings.openai_api_key not in body
 
 
 def test_mask_secret_reveals_only_head_and_tail():
     assert mask_secret("sk-proj-ABCDEFGH1234") == "sk-p••••1234"
     assert "ABCDEFGH" not in mask_secret("sk-proj-ABCDEFGH1234")
     assert mask_secret("") == ""
-
-
-# ------------------------------------------------------------------ real audit
-def test_clear_audio_cache_is_real_and_audited(client, engine):
-    tok = admin_token(client, engine)
-    r = client.post("/api/admin/system/audio-cache/clear", headers=auth_header(tok))
-    assert r.status_code == 200
-    assert r.json()["success"] is True
-
-    # The action must appear in the real activity feed (from the audit log).
-    d = client.get("/api/admin/system/overview", headers=auth_header(tok)).json()
-    actions = " ".join(a["action"].lower() for a in d["activity"])
-    assert "audio cache" in actions
-    assert any(a["admin"] == "sysadmin@school.edu" for a in d["activity"])
-
-
-# ------------------------------------------------------------------ voice preview
-def _admin_client_with_elevenlabs(engine, fake):
-    from app.main import create_app
-
-    app = create_app()
-    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-
-    def override_db():
-        db = factory()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[get_elevenlabs_client] = lambda: fake
-    from fastapi.testclient import TestClient
-
-    return TestClient(app)
-
-
-def test_voice_preview_returns_real_audio(engine, monkeypatch):
-    monkeypatch.setenv("ELEVENLABS_API_KEY", "sk_test_preview")
-    monkeypatch.setenv("ELEVENLABS_ENABLED", "true")
-    get_settings.cache_clear()
-    try:
-        fake = FakeElevenLabsClient(chunks=(b"ID3preview", b"audio"))
-        c = _admin_client_with_elevenlabs(engine, fake)
-        make_admin(engine, email="prev@school.edu", password="adminpass1")
-        tok = login_token(c, "prev@school.edu", "adminpass1")
-
-        r = c.post("/api/admin/system/voices/camden/preview", headers=auth_header(tok))
-        assert r.status_code == 200
-        assert r.content  # real audio bytes were streamed
-        # Camden is voiced by his mother, so the preview auditions HER fixed sample.
-        assert fake.calls and fake.calls[0]["text"] == "Hi, I'm Camden's mother. I can help answer your questions."
-
-        # Unknown case -> 404, not a fabricated success.
-        assert c.post("/api/admin/system/voices/nobody/preview", headers=auth_header(tok)).status_code == 404
-    finally:
-        get_settings.cache_clear()
 
 
 # ------------------------------------------------------------------ untouched
@@ -199,11 +112,10 @@ def test_overview_concurrency_uses_real_limits(client, engine):
     tok = admin_token(client, engine)
     d = client.get("/api/admin/system/overview", headers=auth_header(tok)).json()
     conc = d["concurrency"]
-    # Denominators come from live settings (20 / 10 by default), not from the
-    # screenshot's example 300 numbers.
+    # Denominators come from live settings, not example numbers. TTS lane is gone.
     assert conc["openai"]["limit"] == get_settings().max_concurrent_ai_interviews
-    assert conc["tts"]["limit"] == get_settings().max_concurrent_tts_requests
     assert conc["openai"]["active"] >= 0
+    assert "tts" not in conc
 
 
 def test_realtime_checks_reflect_real_state(client, engine):
@@ -214,6 +126,8 @@ def test_realtime_checks_reflect_real_state(client, engine):
     assert checks["postgres"]["status"] == "healthy"
     assert checks["redis"]["status"] == "not_configured"
     assert checks["heartbeat"]["status"] == "not_configured"
+    # No ElevenLabs infra check anymore.
+    assert "elevenlabs" not in checks
 
 
 def test_live_endpoint_is_lean_and_admin_only(client, engine):

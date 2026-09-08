@@ -1,10 +1,6 @@
-import { useState, type ReactNode } from "react";
+import { type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { useAuth } from "../../../state/AuthContext";
-import { ApiError } from "../../../services/api";
 import {
-  clearAudioCache,
-  fetchVoicePreview,
   type AiConfiguration,
   type Concurrency,
   type ConcurrencyLane,
@@ -13,19 +9,16 @@ import {
   type SystemActivity,
   type SystemAlert,
   type SystemOverview,
-  type VoiceRow,
   type WorkerFleet,
   type WorkerRow,
 } from "../../../services/systemApi";
-import { ConfirmModal, EmptyState, useToast } from "../../../portal/ui";
+import { EmptyState, useToast } from "../../../portal/ui";
 import {
   IconAlert,
   IconCloud,
   IconCpu,
   IconDatabase,
   IconKey,
-  IconMic,
-  IconPlay,
   IconPulse,
   IconServer,
 } from "../../../components/admin/icons";
@@ -104,7 +97,7 @@ function HealthCard({
 }
 
 export function SystemHealthOverview({ data }: { data: SystemOverview }) {
-  const { backend, database, openai, elevenlabs, audioQueue, storage } = data;
+  const { backend, database, openai, storage } = data;
   return (
     <section className="pt-section" aria-labelledby="sys-health-h">
       <h2 id="sys-health-h" className="pt-panel-title" style={{ marginBottom: "var(--space-4)" }}>
@@ -142,40 +135,15 @@ export function SystemHealthOverview({ data }: { data: SystemOverview }) {
           ]}
         />
         <HealthCard
-          icon={<IconMic />}
-          title="ElevenLabs"
-          status={elevenlabs.status}
-          rows={[
-            ["Model", elevenlabs.model || "—"],
-            ["Last success", fmtTime(elevenlabs.lastSuccessAt) === "—" ? "Never" : fmtTime(elevenlabs.lastSuccessAt)],
-            ["Last error", elevenlabs.lastError ?? "None recorded"],
-          ]}
-        />
-        <HealthCard
-          icon={<IconPulse />}
-          title="Audio Queue"
-          status={audioQueue.status}
-          rows={[
-            ["Available", audioQueue.available ? "Yes" : "No"],
-            ["Note", audioQueue.available ? `${audioQueue.pending ?? 0} pending` : "Not applicable"],
-          ]}
-        />
-        <HealthCard
           icon={<IconCloud />}
           title="Storage"
           status={storage.status}
           rows={[
             ["Disk used", storage.percentUsed != null ? `${storage.percentUsed}%` : "—"],
             ["Free", fmtBytes(storage.freeBytes)],
-            ["Audio cache", `${storage.audioCacheEntries ?? 0} / ${storage.audioCacheMaxEntries ?? 0}`],
           ]}
         />
       </div>
-      {!audioQueue.available && audioQueue.message && (
-        <p className="pt-muted" style={{ fontSize: "0.8rem", marginTop: "var(--space-2)" }}>
-          Audio queue: {audioQueue.message}
-        </p>
-      )}
     </section>
   );
 }
@@ -226,7 +194,7 @@ function WorkerCard({ w, ttl }: { w: WorkerRow; ttl: number | null }) {
         <div><dt>Requests handled</dt><dd>{val(w.requestsTotal)}</dd></div>
         <div><dt>Req/min</dt><dd>{val(w.requestsPerMinute)}</dd></div>
         <div><dt>In-flight (HTTP)</dt><dd>{val(w.httpInFlight)}</dd></div>
-        <div><dt>Interview / TTS</dt><dd>{val(w.interviewInFlight)} / {val(w.ttsInFlight)}</dd></div>
+        <div><dt>Interview</dt><dd>{val(w.interviewInFlight)}</dd></div>
         <div><dt>Memory</dt><dd>{w.memoryMb != null ? `${w.memoryMb} MB` : "Unavailable"}</dd></div>
         <div><dt>Current task</dt><dd>{w.currentTask ?? "Unavailable"}</dd></div>
       </dl>
@@ -272,7 +240,7 @@ export function WorkerArchitectureSection({
           lines={[`Redis: ${concurrency.redis.status}`, `DB: ${database.status}`]}
         />
         <span className="pt-arch-arrow">→</span>
-        <ArchNode title="OpenAI / ElevenLabs" lines={["External providers"]} note="See concurrency below" />
+        <ArchNode title="OpenAI Realtime" lines={["Patient voice + text"]} note="See concurrency below" />
       </div>
 
       {fleet.note && <p className="pt-muted" style={{ fontSize: "0.82rem", marginTop: "var(--space-2)" }}>{fleet.note}</p>}
@@ -321,7 +289,6 @@ export function GlobalConcurrencySection({ concurrency }: { concurrency: Concurr
         <span className="pt-muted" style={{ fontSize: "0.8rem" }}>Scope: {concurrency.scope}</span>
       </div>
       <ConcurrencyBar lane={concurrency.openai} />
-      <ConcurrencyBar lane={concurrency.tts} />
       <ConcurrencyBar lane={concurrency.assessment} />
       <p className="pt-muted" style={{ fontSize: "0.78rem", marginTop: "var(--space-2)" }}>
         Active counts are fleet-wide via the Redis semaphore when scope is “global”; otherwise per-process. Denominators are the live configured limits.
@@ -348,94 +315,6 @@ export function RealtimeChecksSection({ checks }: { checks: InfraCheck[] }) {
   );
 }
 
-// ------------------------------------------------------------- patient voices
-export function PatientVoicesSection({ voices }: { voices: VoiceRow[] }) {
-  const { token } = useAuth();
-  const toast = useToast();
-  const [playing, setPlaying] = useState<string | null>(null);
-
-  async function preview(v: VoiceRow) {
-    if (!token) return;
-    setPlaying(v.caseId + v.speakerId);
-    try {
-      const url = await fetchVoicePreview(token, v.caseId);
-      const audio = new Audio(url);
-      audio.onended = () => URL.revokeObjectURL(url);
-      await audio.play();
-      toast.success(`Playing ${v.speakerLabel} preview`);
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Voice preview failed.");
-    } finally {
-      setPlaying(null);
-    }
-  }
-
-  return (
-    <section className="pt-panel" aria-labelledby="sys-voices-h">
-      <div className="pt-panel-head">
-        <h2 id="sys-voices-h" className="pt-panel-title"><IconMic /> Patient Voices</h2>
-        <Link to="/admin/system/voices" className="pt-panel-link">Edit</Link>
-      </div>
-      <div className="pt-table-wrap" style={{ overflowX: "auto" }}>
-        <table className="pt-table">
-          <thead>
-            <tr>
-              <th scope="col">Patient</th>
-              <th scope="col">Speaker</th>
-              <th scope="col">Voice ID (masked)</th>
-              <th scope="col">Model</th>
-              <th scope="col">Status</th>
-              <th scope="col">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {voices.map((v) => (
-              <tr key={v.caseId + v.speakerId}>
-                <td>
-                  <div className="pt-row" style={{ gap: "var(--space-2)", flexWrap: "nowrap" }}>
-                    <img
-                      src={v.image}
-                      alt=""
-                      width={30}
-                      height={30}
-                      style={{ borderRadius: "50%", objectFit: "cover", objectPosition: "center top" }}
-                    />
-                    <span style={{ color: "var(--color-text-primary)" }}>{v.patientName}</span>
-                  </div>
-                </td>
-                <td>{v.speakerLabel}</td>
-                <td>{v.maskedVoiceId ?? <span className="pt-muted">Not configured</span>}</td>
-                <td>{v.model ?? "—"}</td>
-                <td><StatusBadge status={v.status} /></td>
-                <td>
-                  {v.status === "active" ? (
-                    <button
-                      type="button"
-                      className="pt-btn pt-btn-secondary pt-btn-sm"
-                      onClick={() => preview(v)}
-                      disabled={playing === v.caseId + v.speakerId}
-                      aria-label={`Preview ${v.speakerLabel} voice`}
-                    >
-                      <IconPlay width={14} height={14} />{" "}
-                      {playing === v.caseId + v.speakerId ? "Loading…" : "Preview"}
-                    </button>
-                  ) : (
-                    <span className="pt-muted" style={{ fontSize: "0.8rem" }}>No preview</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <p className="pt-muted" style={{ fontSize: "0.78rem", marginTop: "var(--space-3)" }}>
-        Preview plays a fixed sample sentence generated by the real ElevenLabs voice. Voice IDs are
-        masked and the ElevenLabs key never leaves the backend.
-      </p>
-    </section>
-  );
-}
-
 // ---------------------------------------------------------- ai configuration
 function KvBlock({ title, rows }: { title: string; rows: [string, string][] }) {
   return (
@@ -454,7 +333,7 @@ function KvBlock({ title, rows }: { title: string; rows: [string, string][] }) {
 }
 
 export function AiConfigurationSection({ config }: { config: AiConfiguration }) {
-  const { openai, elevenlabs, conversation } = config;
+  const { openai } = config;
   return (
     <section className="pt-panel" aria-labelledby="sys-ai-h">
       <div className="pt-panel-head">
@@ -466,34 +345,13 @@ export function AiConfigurationSection({ config }: { config: AiConfiguration }) 
           title={`OpenAI — ${openai.status === "configured" ? "Configured" : "Not configured"}`}
           rows={[
             ["Model", openai.model || "—"],
-            ["Streaming", openai.streamingEnabled ? "Enabled" : "Disabled"],
             ["Timeout", openai.timeoutSeconds != null ? `${openai.timeoutSeconds}s` : "—"],
             ["Max tokens", openai.maxOutputTokens != null ? String(openai.maxOutputTokens) : "—"],
           ]}
         />
-        <KvBlock
-          title={`ElevenLabs — ${elevenlabs.status === "configured" ? "Configured" : "Not configured"}`}
-          rows={[
-            ["Model", elevenlabs.model || "—"],
-            ["Output format", elevenlabs.outputFormat || "—"],
-            ["Timeout", elevenlabs.timeoutSeconds != null ? `${elevenlabs.timeoutSeconds}s` : "—"],
-            ["Enabled", elevenlabs.enabled ? "Yes" : "No"],
-          ]}
-        />
       </div>
-      <h3 style={{ fontSize: "0.95rem", margin: "var(--space-5) 0 var(--space-2)" }}>
-        Conversation settings
-      </h3>
-      <dl className="pt-kv">
-        <dt>Sentence-level streaming</dt><dd>{conversation.sentenceLevelStreaming}</dd>
-        <dt>Patient streaming</dt><dd>{conversation.patientStreaming}</dd>
-        <dt>Disclosure control</dt><dd>{conversation.disclosureControl}</dd>
-        <dt>Motivational interviewing</dt><dd>{conversation.motivationalInterviewing}</dd>
-        <dt>Age-appropriate language</dt><dd>{conversation.ageAppropriateLanguage}</dd>
-        <dt>Caregiver routing</dt><dd>{conversation.caregiverRouting}</dd>
-        <dt>Max patient response</dt><dd>{conversation.maxPatientResponseChars} chars</dd>
-      </dl>
       <p className="pt-muted" style={{ fontSize: "0.78rem", marginTop: "var(--space-3)" }}>
+        The patient interview voice is provided by OpenAI Realtime (hosted prompts + OpenAI voice).
         These values reflect the backend's active configuration (read-only). Editing requires a
         server configuration change.
       </p>
@@ -608,10 +466,7 @@ export function QuickActionsSection({
   onRefresh: () => void;
   refreshing: boolean;
 }) {
-  const { token } = useAuth();
   const toast = useToast();
-  const [confirmClear, setConfirmClear] = useState(false);
-  const [busy, setBusy] = useState(false);
 
   function exportReport() {
     const blob = new Blob([JSON.stringify(overview, null, 2)], { type: "application/json" });
@@ -622,21 +477,6 @@ export function QuickActionsSection({
     a.click();
     URL.revokeObjectURL(url);
     toast.success("System report exported.");
-  }
-
-  async function doClear() {
-    if (!token) return;
-    setBusy(true);
-    try {
-      const res = await clearAudioCache(token);
-      toast.success(res.message || "Audio cache cleared.");
-      onRefresh();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : "Could not clear the audio cache.");
-    } finally {
-      setBusy(false);
-      setConfirmClear(false);
-    }
   }
 
   return (
@@ -651,24 +491,10 @@ export function QuickActionsSection({
         <button type="button" className="pt-btn pt-btn-secondary" onClick={exportReport}>
           Export System Report
         </button>
-        <button type="button" className="pt-btn pt-btn-secondary" onClick={() => setConfirmClear(true)}>
-          Clear Audio Cache
-        </button>
       </div>
       <p className="pt-muted" style={{ fontSize: "0.78rem", marginTop: "var(--space-3)" }}>
-        Only safe, real actions are shown. Clearing the audio cache is non-destructive (it only
-        drops cached synthesized clips) and is recorded in the admin activity log.
+        Only safe, real actions are shown.
       </p>
-      {confirmClear && (
-        <ConfirmModal
-          title="Clear audio cache?"
-          body="This drops all cached synthesized patient audio. Future replies will be re-synthesized on demand. This action is logged."
-          confirmLabel="Clear cache"
-          busy={busy}
-          onConfirm={doClear}
-          onCancel={() => setConfirmClear(false)}
-        />
-      )}
     </section>
   );
 }

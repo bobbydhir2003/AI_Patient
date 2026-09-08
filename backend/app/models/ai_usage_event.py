@@ -37,7 +37,7 @@ class AiUsageEvent(Base):
     student_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     case_id: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
 
-    provider: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # openai|elevenlabs
+    provider: Mapped[str] = mapped_column(String(20), nullable=False, index=True)  # openai (historical rows may include elevenlabs)
     model: Mapped[str] = mapped_column(String(60), nullable=False, default="")
 
     # What produced this call, for distinguishing spend on the dashboard, e.g.

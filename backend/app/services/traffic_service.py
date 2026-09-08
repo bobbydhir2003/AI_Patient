@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.core.concurrency import interview_capacity, tts_capacity
+from app.core.concurrency import interview_capacity
 from app.core.config import get_settings
 from app.core.telemetry import get_telemetry
 
@@ -139,10 +139,9 @@ def overview(db: Session) -> dict:
         },
         "http": http_block(),
         "openai": {**provider_block(tele.openai), "active": tele.openai.active.value},
-        "elevenlabs": {**provider_block(tele.elevenlabs), "active": tele.elevenlabs.active.value},
         "openai_capacity": capacity_info,
         "assessment": assessment_block(db, capacity_info["capacity_state"]),
-        "concurrency": {"interview": interview_capacity(), "tts": tts_capacity()},
+        "concurrency": {"interview": interview_capacity()},
         "server": {**health, "db_pool": db_pool_stats()},
     }
     payload["alerts"] = evaluate_alerts(payload)
@@ -175,7 +174,7 @@ def live_sessions() -> list[dict]:
 def history(minutes: int) -> dict:
     seconds = max(1, minutes) * 60
     samples = get_telemetry().history.recent(seconds)
-    keys = ("active_users", "http_rpm", "openai_rpm", "elevenlabs_rpm", "rate_limited")
+    keys = ("active_users", "http_rpm", "openai_rpm", "rate_limited")
     return {
         "minutes": minutes,
         "points": [{"t": s["t"], **{k: s.get(k) for k in keys}} for s in samples],
@@ -190,16 +189,11 @@ def providers(db: Session) -> dict:
         openai_model = runtime_config_service.openai_runtime().model
     except Exception:
         openai_model = get_settings().openai_model
-    try:
-        el_model = runtime_config_service.elevenlabs_runtime().default_model
-    except Exception:
-        el_model = get_settings().elevenlabs_default_model
     from app.core import capacity as cap
 
     return {
         "openai": {**provider_block(tele.openai), "active": tele.openai.active.value,
                    "model": openai_model, "capacity": cap.openai_capacity()},
-        "elevenlabs": {**provider_block(tele.elevenlabs), "active": tele.elevenlabs.active.value, "model": el_model},
     }
 
 
@@ -213,7 +207,6 @@ def capacity() -> dict:
         "deployment_mode": s.deployment_mode,
         "app_workers": s.app_workers,
         "max_ai_interview_concurrency": s.max_concurrent_ai_interviews,
-        "max_tts_concurrency": s.max_concurrent_tts_requests,
         "assessment_workers": s.assessment_worker_concurrency,
         "rate_limiter_scope": "per_process",
         "concurrency_scope": concurrency_scope,
@@ -221,9 +214,9 @@ def capacity() -> dict:
         "notes": {
             "global_rate_limiting": "Global limits across workers/instances require shared state such as Redis (not configured).",
             "global_concurrency": (
-                "OpenAI/TTS/assessment concurrency limits are enforced fleet-wide via Redis."
+                "OpenAI/assessment concurrency limits are enforced fleet-wide via Redis."
                 if redis["status"] == "connected"
-                else "Redis is not connected - OpenAI/TTS/assessment concurrency limits are "
+                else "Redis is not connected - OpenAI/assessment concurrency limits are "
                      "per-process (effective limit = configured x worker count) unless "
                      "redis_required is true, in which case admission fails closed instead."
             ),
@@ -254,7 +247,6 @@ def protection() -> dict:
             "lockout_seconds": s.login_lockout_seconds,
         },
         "interview_concurrency": interview_capacity(),
-        "tts_concurrency": tts_capacity(),
         "concurrency_scope": concurrency_scope,
         "redis": redis,
         "assessment_execution": "background_queue" if s.assessment_queue_enabled else "synchronous",
@@ -281,15 +273,11 @@ def evaluate_alerts(ov: dict) -> list[dict]:
         conditions.append(("http_errors", "WARNING", f"API error rate {http['error_rate']:.2%} exceeds {s.alert_error_rate:.0%}"))
     if ov["openai"].get("rate_limits_last_5m", 0) > 0:
         conditions.append(("openai_429", "WARNING", "OpenAI 429 rate-limit responses detected"))
-    if ov["elevenlabs"].get("rate_limits_last_5m", 0) > 0:
-        conditions.append(("elevenlabs_429", "WARNING", "ElevenLabs 429 rate-limit responses detected"))
     ic = ov["concurrency"]["interview"]
     if ic["limit"] and ic["active"] / ic["limit"] >= s.alert_ai_concurrency_pct:
         conditions.append(("ai_concurrency", "WARNING", f"AI interview concurrency at {ic['active']}/{ic['limit']}"))
     if ov["assessment"].get("pending", 0) > s.alert_assessment_queue:
         conditions.append(("assessment_queue", "WARNING", f"Assessment queue depth {ov['assessment']['pending']} exceeds {s.alert_assessment_queue}"))
-    if ov["elevenlabs"].get("failure_last_5m", 0) > 0 and ov["elevenlabs"].get("success_last_5m", 0) == 0:
-        conditions.append(("tts_down", "INFO", "ElevenLabs failing; interviews continue with text-only fallback"))
     server = ov["server"]
     if server.get("available"):
         if server.get("cpu_percent", 0) >= s.alert_cpu_pct * 100:
@@ -340,10 +328,6 @@ def operator_insights(ov: dict) -> list[dict]:
         out.append({"tone": "yellow", "message": f"Assessment worker capacity reduced to {assess.get('effective_workers')} to protect live interviews."})
     elif assess.get("pending", 0) == 0 and assess.get("processing", 0) == 0:
         out.append({"tone": "green", "message": "Assessment queue is empty; all workers are available."})
-
-    # TTS degradation
-    if ov["elevenlabs"].get("failure_last_5m", 0) > 0 and ov["elevenlabs"].get("success_last_5m", 0) == 0:
-        out.append({"tone": "info", "message": "TTS is degrading to text-only due to provider saturation."})
 
     # Idle / healthy summary
     if state == "NORMAL" and interviews == 0 and http.get("error_rate", 0) == 0:

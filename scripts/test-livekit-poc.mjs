@@ -400,6 +400,9 @@ const { LiveKitPocEngine, fetchAdminPocLiveKitToken, fetchStudentLiveKitToken } 
 const { useLiveKitInterviewVoice } = await import(
   path.join(repoRoot, ".test-build", "livekit", "hooks", "useLiveKitInterviewVoice.js")
 );
+const { mapSessionMessages, reconcileLiveKitPatientMessage } = await import(
+  path.join(buildDir, "livekit", "liveKitTranscriptMessages.js")
+);
 
 function makeCallbackRecorder() {
   const states = [];
@@ -407,12 +410,14 @@ function makeCallbackRecorder() {
   const completedTurns = [];
   const diagnostics = [];
   const roomNames = [];
+  const patientTexts = [];
   return {
     states,
     errors,
     completedTurns,
     diagnostics,
     roomNames,
+    patientTexts,
     callbacks: {
       onStateChange: (s) => states.push(s),
       onStudentTranscript: () => {},
@@ -420,6 +425,7 @@ function makeCallbackRecorder() {
       onTurnCompleted: (n) => completedTurns.push(n),
       onDiagnostics: (d) => diagnostics.push({ ...d }),
       onRoomName: (r) => roomNames.push(r),
+      onPatientText: (text, meta) => patientTexts.push({ text, meta }),
     },
   };
 }
@@ -468,6 +474,12 @@ function sendSemanticFallback(room, reason = "test_fallback") {
 
 function sendTurnStatus(room, clientTurnId, status) {
   room.emit(RoomEvent.DataReceived, encode({ clientTurnId, status }), undefined, undefined, "patient_turn_status");
+}
+
+function sendTranscriptSync(room, body) {
+  room.emit(
+    RoomEvent.DataReceived, encode(body), undefined, undefined, "transcript_sync",
+  );
 }
 
 function studentTextPublishes(room) {
@@ -527,6 +539,18 @@ async function startReadySemantic(engine, sessionId, fetchToken) {
   await flushMicrotasks();
   const room = createdRooms.at(-1);
   sendAgentReadySemantic(room);
+  await flushMicrotasks();
+  return room;
+}
+
+/** prompt_agent: agent_ready carries promptAgent:true, meaning OpenAI Realtime
+ * owns speech detection + transcription and the browser recognizer must stay
+ * OFF for the whole session. */
+async function startReadyPromptAgent(engine, sessionId, fetchToken) {
+  await engine.start(sessionId, fetchToken);
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReady(room, { promptAgent: true });
   await flushMicrotasks();
   return room;
 }
@@ -918,62 +942,6 @@ test("STATIC: useLiveKitInterviewVoice.ts source never references speechSynthesi
   }
   // Positive control: it DOES wrap the real, shared LiveKitPocEngine.
   assert.ok(source.includes("LiveKitPocEngine"));
-});
-
-// ---------------------------------------------------------------------------
-// Phase B: InterviewPage.tsx's engine-selection guards, checked statically.
-// This is a TEXT-LEVEL regression guard (this project has no React
-// component-rendering test harness - see the Phase B report), not a
-// behavioral proof that the guards execute correctly at runtime. It exists
-// to catch an accidental removal of a guard, not to replace real-device/
-// manual verification of the actual rendered UI.
-// ---------------------------------------------------------------------------
-test("STATIC (regression guard, not behavioral proof): InterviewPage.tsx textually guards every patientVoiceService call site behind voiceEngine !== \"livekit\"", () => {
-  const source = fs.readFileSync(
-    path.join(repoRoot, "src", "pages", "InterviewPage.tsx"),
-    "utf8",
-  );
-
-  // Every cancelPatientSpeech() call must be preceded on the SAME line by
-  // the voiceEngine guard, EXCEPT the "Speak patient replies" checkbox
-  // toggle - that call site sits inside the Audio Settings panel, which is
-  // itself entirely hidden when voiceEngine === "livekit" (checked below),
-  // so it can never execute in LiveKit mode despite having no guard of its
-  // own on that line.
-  const UNGUARDED_BUT_UNREACHABLE = "if (!e.target.checked) cancelPatientSpeech();";
-  const cancelLines = source.split("\n").map((l) => l.trim()).filter((l) => l.includes("cancelPatientSpeech()"));
-  assert.ok(cancelLines.length >= 3, "expected multiple cancelPatientSpeech() call sites");
-  for (const line of cancelLines) {
-    if (line === UNGUARDED_BUT_UNREACHABLE) continue;
-    assert.ok(
-      line.includes('voiceEngine !== "livekit"'),
-      `cancelPatientSpeech() call site must be guarded: "${line}"`,
-    );
-  }
-
-  // The typed-send speakPatientResponse() call must be gated in the same
-  // condition as the other legacy-only checks.
-  const typedSendGuardIndex = source.indexOf('voiceEnabled && ttsAvailable && caseId && voiceEngine !== "livekit"');
-  assert.ok(typedSendGuardIndex !== -1, "typed-send speakPatientResponse() must be gated on voiceEngine !== \"livekit\"");
-
-  // The legacy recovery banner must be gated the same way.
-  assert.ok(
-    source.includes('recoveryAction && voiceEngine !== "livekit"'),
-    "the legacy recovery banner must be hidden when voiceEngine === \"livekit\"",
-  );
-
-  // The Audio Settings panel (speak-replies/auto-interrupt/sensitivity - all
-  // legacy-only concepts) must also be hidden in LiveKit mode.
-  assert.ok(
-    source.includes('(ttsAvailable || voice.supported) && voiceEngine !== "livekit"'),
-    "the legacy-only Audio Settings panel must be hidden when voiceEngine === \"livekit\"",
-  );
-
-  // Phase C product requirement: no student-facing retry button for LiveKit.
-  assert.ok(
-    source.includes('retryDisabled={voiceEngine === "livekit"}'),
-    "ConversationControl must be told to suppress its retry action in LiveKit mode",
-  );
 });
 
 // ===========================================================================
@@ -2690,5 +2658,312 @@ test("PHASE 4: no duplicate student/patient signaling - exactly one publish and 
   assert.equal(studentTextPublishes(room).length, 0, "still zero browser publishes for the whole turn");
   assert.deepEqual(rec.completedTurns, [1], "onTurnCompleted must fire exactly once, never zero or twice");
 
+  await engine.end();
+});
+
+// ===========================================================================
+// P0-1/P0-2: Realtime transcript rendering and backend-owned turn identity.
+// ===========================================================================
+
+test("P0-1: patient_text_ready reaches InterviewPage through the hook callback", async () => {
+  resetFixtures();
+  const received = [];
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({
+    sessionId: "session-p0-hook",
+    onPatientText: (text, meta) => received.push({ text, meta }),
+  }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReady(room);
+  sendTranscriptSync(room, {
+    type: "patient_text_ready",
+    clientTurnId: "realtime-session-p0-hook-1",
+    patientTurnId: "patient-row-hook-1",
+    epoch: 1,
+    text: "My knee has hurt for two weeks.",
+  });
+
+  assert.deepEqual(received, [{
+    text: "My knee has hurt for two weeks.",
+    meta: {
+      clientTurnId: "realtime-session-p0-hook-1",
+      patientTurnId: "patient-row-hook-1",
+      final: false,
+    },
+  }]);
+  const pageSource = fs.readFileSync(path.join(repoRoot, "src", "pages", "InterviewPage.tsx"), "utf8");
+  assert.ok(pageSource.includes("onPatientText: (text, meta)"));
+  assert.ok(pageSource.includes("reconcileLiveKitPatientMessage(prev, text, meta, formatTimestamp())"));
+  tester.unmount();
+});
+
+test("P0-1: ready renders immediately and complete final updates the same patient message", () => {
+  const ready = reconcileLiveKitPatientMessage([], "Approved full answer", {
+    clientTurnId: "realtime-render-1", patientTurnId: "patient-row-1", final: false,
+  }, "10:00 AM");
+  assert.equal(ready.length, 1);
+  assert.deepEqual(ready[0], {
+    id: "patient-row-1", sender: "patient", text: "Approved full answer",
+    timestamp: "10:00 AM", saveStatus: "pending",
+  });
+
+  const final = reconcileLiveKitPatientMessage(ready, "Approved full answer", {
+    clientTurnId: "realtime-render-1", patientTurnId: "patient-row-1",
+    final: true, reason: "complete",
+  }, "10:01 AM");
+  assert.equal(final.length, 1, "final must update rather than append");
+  assert.equal(final[0].id, ready[0].id);
+  assert.equal(final[0].saveStatus, "saved");
+  assert.equal(final[0].timestamp, "10:00 AM", "an update preserves the original display time");
+});
+
+test("P0-1: interrupted final replaces the full approved text with delivered partial text", () => {
+  const ready = reconcileLiveKitPatientMessage([], "Full answer that was approved", {
+    clientTurnId: "realtime-interrupt-1", patientTurnId: "patient-row-interrupt-1", final: false,
+  }, "10:00 AM");
+  const interrupted = reconcileLiveKitPatientMessage(ready, "Full answer", {
+    clientTurnId: "realtime-interrupt-1", patientTurnId: "patient-row-interrupt-1",
+    final: true, reason: "interrupted",
+  }, "10:01 AM");
+
+  assert.equal(interrupted.length, 1);
+  assert.equal(interrupted[0].text, "Full answer");
+  assert.equal(interrupted[0].saveStatus, "saved");
+});
+
+test("P0-1: authoritative DB refresh uses patientTurnId as ConversationTurn.id and cannot duplicate Carly", () => {
+  const optimistic = reconcileLiveKitPatientMessage([], "Immediate answer", {
+    clientTurnId: "realtime-refresh-1", patientTurnId: "conversation-turn-42", final: false,
+  }, "10:00 AM");
+  assert.equal(optimistic[0].id, "conversation-turn-42");
+
+  const authoritative = mapSessionMessages({
+    messages: [{
+      id: "conversation-turn-42", sender: "patient", text: "Authoritative answer",
+      timestamp: "2026-09-02T15:00:00.000Z",
+    }],
+  });
+  // InterviewPage's completion callback calls setMessages(authoritative), not
+  // append/merge, so replacing the optimistic array yields exactly one row.
+  assert.equal(authoritative.length, 1);
+  assert.equal(authoritative[0].id, optimistic[0].id);
+  assert.equal(authoritative[0].text, "Authoritative answer");
+});
+
+test("P0-1: stale lower-epoch transcript_sync is ignored", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-p0-epoch");
+
+  sendTranscriptSync(room, {
+    type: "patient_text_ready", clientTurnId: "realtime-epoch-2",
+    patientTurnId: "patient-epoch-2", epoch: 2, text: "Current answer",
+  });
+  sendTranscriptSync(room, {
+    type: "patient_text_final", clientTurnId: "realtime-epoch-1",
+    patientTurnId: "patient-epoch-1", epoch: 1, text: "Stale answer", reason: "complete",
+  });
+
+  assert.equal(rec.patientTexts.length, 1);
+  assert.equal(rec.patientTexts[0].text, "Current answer");
+  await engine.end();
+});
+
+test("P0-1: a new engine connection resets the transcript epoch watermark", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const firstRoom = await startReady(engine, "session-p0-reset");
+  sendTranscriptSync(firstRoom, {
+    type: "patient_text_ready", clientTurnId: "realtime-old-1",
+    patientTurnId: "patient-old-1", epoch: 9, text: "Old connection",
+  });
+  await engine.end();
+
+  const secondRoom = await startReady(engine, "session-p0-reset");
+  sendTranscriptSync(secondRoom, {
+    type: "patient_text_ready", clientTurnId: "realtime-new-1",
+    patientTurnId: "patient-new-1", epoch: 0, text: "New connection",
+  });
+
+  assert.deepEqual(rec.patientTexts.map((event) => event.text), ["Old connection", "New connection"]);
+  await engine.end();
+});
+
+test("P0-2: authoritative Realtime speaking lifecycle is accepted and completion refetch signal fires", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-p0-complete");
+  const turnId = "realtime-session-p0-complete-1";
+  sendTranscriptSync(room, {
+    type: "patient_text_ready", clientTurnId: turnId,
+    patientTurnId: "patient-complete-1", epoch: 1, text: "Answer",
+  });
+
+  sendTurnStatus(room, turnId, "speaking_started");
+  assert.equal(engine.getState(), "speaking");
+  sendTurnStatus(room, turnId, "speaking_ended");
+  assert.equal(engine.getState(), "listening");
+  assert.deepEqual(rec.completedTurns, [1], "onTurnCompleted drives InterviewPage's DB refetch");
+  await engine.end();
+});
+
+test("P0-2: Realtime interrupted is accepted and a final arriving after terminal still reconciles", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-p0-interrupted");
+  const turnId = "realtime-session-p0-interrupted-1";
+  sendTranscriptSync(room, {
+    type: "patient_text_ready", clientTurnId: turnId,
+    patientTurnId: "patient-interrupted-1", epoch: 3, text: "Full approved answer",
+  });
+  sendTurnStatus(room, turnId, "speaking_started");
+  engine.interruptPatient();
+  assert.equal(interruptPublishes(room).at(-1).body.clientTurnId, turnId,
+    "Realtime ready identity must also power manual interruption");
+  sendTurnStatus(room, turnId, "interrupted");
+  assert.equal(engine.getState(), "listening");
+
+  sendTranscriptSync(room, {
+    type: "patient_text_final", clientTurnId: turnId,
+    patientTurnId: "patient-interrupted-1", epoch: 3,
+    text: "Full approved", reason: "interrupted",
+  });
+  assert.equal(rec.patientTexts.at(-1).text, "Full approved");
+  assert.equal(rec.patientTexts.at(-1).meta.final, true);
+  await engine.end();
+});
+
+test("P0-2: Realtime failed status is accepted", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-p0-failed");
+  const turnId = "realtime-session-p0-failed-1";
+  sendTranscriptSync(room, {
+    type: "patient_text_ready", clientTurnId: turnId,
+    patientTurnId: "patient-failed-1", epoch: 1, text: "Partial answer",
+  });
+  sendTurnStatus(room, turnId, "failed");
+  assert.equal(engine.getState(), "error");
+  assert.match(rec.errors.at(-1), /failed/i);
+  await engine.end();
+});
+
+test("P0-2: foreign Realtime IDs and late terminal duplicates are rejected", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-p0-correlation");
+  const staleTurnId = "realtime-session-p0-correlation-1";
+  sendTranscriptSync(room, {
+    type: "patient_text_ready", clientTurnId: staleTurnId,
+    patientTurnId: "patient-correlation-1", epoch: 1, text: "Answer",
+  });
+  const turnId = "realtime-session-p0-correlation-2";
+  sendTranscriptSync(room, {
+    type: "patient_text_ready", clientTurnId: turnId,
+    patientTurnId: "patient-correlation-2", epoch: 2, text: "New answer",
+  });
+
+  sendTurnStatus(room, "realtime-foreign-99", "speaking_started");
+  assert.equal(engine.getState(), "listening");
+  sendTurnStatus(room, staleTurnId, "speaking_started");
+  assert.equal(engine.getState(), "listening", "a superseded prior Realtime id must be rejected");
+  sendTurnStatus(room, turnId, "speaking_started");
+  sendTurnStatus(room, turnId, "speaking_ended");
+  sendTurnStatus(room, turnId, "speaking_ended");
+  assert.equal(engine.getTurnCount(), 1);
+  assert.deepEqual(rec.completedTurns, [1]);
+  await engine.end();
+});
+
+test("P0-2: legacy browser-owned status correlation remains unchanged", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-p0-legacy");
+  await engine.sendText("Typed legacy-correlated question", { source: "manual_typed" });
+  await flushMicrotasks();
+  const browserTurnId = latestStudentTurnId(room);
+
+  sendTurnStatus(room, "realtime-not-authoritative", "speaking_started");
+  assert.equal(engine.getState(), "thinking");
+  sendTurnAck(room, browserTurnId);
+  sendTurnStatus(room, browserTurnId, "speaking_started");
+  sendTurnStatus(room, browserTurnId, "speaking_ended");
+  assert.equal(engine.getState(), "listening");
+  assert.deepEqual(rec.completedTurns, [1]);
+  await engine.end();
+});
+
+// ---------------------------------------------------------------------------
+// prompt_agent: OpenAI Realtime owns speech detection + transcription, so the
+// browser SpeechRecognition recognizer must never start (barge-in/latency fix).
+// ---------------------------------------------------------------------------
+test("prompt_agent: browser SpeechRecognition never starts (agent_ready.promptAgent=true)", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReadyPromptAgent(engine, "session-prompt-agent");
+
+  // Reached LISTENING via agent_ready + mic, but the recognizer stayed OFF.
+  assert.equal(engine.getState(), "listening");
+  assert.equal(
+    FakeSpeechRecognition.instances.length, 0,
+    "prompt_agent must not construct/start any browser SpeechRecognition",
+  );
+
+  // Backend-authoritative transcript still flows in via transcript_sync (the
+  // recognizer being off must not break student/patient text rendering).
+  sendTranscriptSync(room, {
+    type: "student_transcript", clientTurnId: "rt-1", epoch: 1,
+    text: "How long has this been going on?", studentTurnId: "db-stu-1",
+  });
+  await flushMicrotasks();
+  assert.equal(
+    FakeSpeechRecognition.instances.length, 0,
+    "prompt_agent must still never start recognition after a transcript_sync",
+  );
+  await engine.end();
+});
+
+test("prompt_agent: a patient turn does not spin up a recognizer on resume", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReadyPromptAgent(engine, "session-prompt-agent-2");
+
+  // Simulate a full backend-owned patient turn (no patient_turn_status is sent
+  // in prompt_agent; state simply stays "listening"). Even the turn-completion
+  // resume path must not construct a recognizer.
+  sendTranscriptSync(room, {
+    type: "patient_text_final", clientTurnId: "rt-2", epoch: 2,
+    text: "It started about a week ago.", patientTurnId: "db-pat-1",
+  });
+  await flushMicrotasks();
+
+  assert.equal(engine.getState(), "listening");
+  assert.equal(FakeSpeechRecognition.instances.length, 0);
+  // No browser student_text was ever published (Realtime owns turns).
+  assert.equal(studentTextPublishes(room).length, 0);
+  await engine.end();
+});
+
+test("legacy mode unchanged: recognizer still starts when promptAgent is absent", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await startReady(engine, "session-legacy-recognizer");
+  assert.equal(
+    FakeSpeechRecognition.instances.length, 1,
+    "legacy/controlled/native agent_ready (no promptAgent) must keep starting recognition",
+  );
   await engine.end();
 });

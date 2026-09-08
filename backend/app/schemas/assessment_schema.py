@@ -3,7 +3,12 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from app.core.constants import CONFIDENCE_LEVELS, EVIDENCE_TYPES, PERFORMANCE_LEVELS
+from app.core.constants import (
+    CONFIDENCE_LEVELS,
+    EVIDENCE_TYPES,
+    PERFORMANCE_LEVELS,
+    RUBRIC_DOMAINS,
+)
 from app.schemas.base import CamelModel
 from app.schemas.referral_assessment_schema import ReferralOut
 
@@ -247,10 +252,20 @@ COMBINED_ASSESSMENT_JSON_SCHEMA = {
     "properties": {
         "domains": {
             "type": "array",
+            # Force the model to emit exactly one object per required rubric
+            # domain. Without these bounds the API considered a single-domain
+            # array structurally valid, so a lazy/under-generated response
+            # (observed in production: got ['OARS Communication']) reached the
+            # validator and failed the whole run. `rubric_domain` is pinned to
+            # the canonical enum so the four objects must BE the four domains.
+            # (Distinctness is not expressible in json-schema; the pipeline's
+            # missing-domain recovery retry + the validator are the backstops.)
+            "minItems": len(RUBRIC_DOMAINS),
+            "maxItems": len(RUBRIC_DOMAINS),
             "items": {
                 "type": "object",
                 "properties": {
-                    "rubric_domain": {"type": "string"},
+                    "rubric_domain": {"type": "string", "enum": list(RUBRIC_DOMAINS)},
                     "performance_level": {"type": "string", "enum": list(PERFORMANCE_LEVELS)},
                     "summary": {"type": "string"},
                     "narrative": {"type": "string"},

@@ -3,9 +3,6 @@
 These cover PART 16 of the Admin + System Dashboard consolidation:
 - authorization: student blocked / admin allowed across every admin surface;
 - roles: only student/admin accepted; legacy super_admin folds into admin;
-- voice settings: every field saves and the LIVE runtime VoiceProfile uses the
-  saved values (including the previously-dropped `speed`), and persists across a
-  new DB session;
 - credential security: keys never returned unmasked; student cannot change them;
 - workers: heartbeat reports a live worker, an expired one is not reported, and
   the dashboard invents nothing without Redis records.
@@ -16,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
 
 from app.core.security import hash_password
-from app.models import PatientVoiceSetting, User
+from app.models import User
 from tests.conftest import FakeOpenAIClient, bearer, make_client
 from tests.test_auth import login_token, register
 
@@ -53,7 +50,6 @@ ADMIN_GET_ENDPOINTS = [
     "/api/admin/users",                           # user management
     "/api/admin/system/overview",                 # system dashboard data
     "/api/admin/system/live",                     # live worker/architecture view
-    "/api/admin/runtime/voices",                  # voice configuration
     "/api/admin/runtime/credentials",             # API credentials
     "/api/admin/runtime/history",                 # configuration history
     "/api/admin/system/load-tests/config",        # load testing
@@ -155,78 +151,6 @@ def test_admin_frontend_receives_correct_role(engine):
         ah = _admin(c, engine, email="role_check@school.edu")
         me = c.get("/api/auth/me", headers=ah).json()
         assert me["role"] == "admin"
-
-
-# ============================ VOICE SETTINGS (11-20) ============================
-VOICE_PATCH = {
-    "voiceId": "RCVoiceID0001",
-    "modelId": "eleven_turbo_v2_5",
-    "stability": 0.33,
-    "similarityBoost": 0.66,
-    "style": 0.22,
-    "speed": 1.15,
-    "speakerBoost": False,
-}
-
-
-def test_all_voice_fields_save_and_persist(engine):
-    with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
-        ah = _admin(c, engine)
-        r = c.patch("/api/admin/runtime/voices/sofia/patient", json=VOICE_PATCH, headers=ah)
-        assert r.status_code == 200, r.text
-
-        # Persisted in a FRESH DB session (proves it is not per-process state).
-        db = _factory(engine)()
-        try:
-            row = db.query(PatientVoiceSetting).filter_by(case_id="sofia", speaker_id="patient").one()
-            assert row.voice_id == "RCVoiceID0001"
-            assert row.model_id == "eleven_turbo_v2_5"
-            assert abs(row.stability - 0.33) < 1e-6
-            assert abs(row.similarity_boost - 0.66) < 1e-6
-            assert abs(row.style - 0.22) < 1e-6
-            assert abs(row.speed - 1.15) < 1e-6
-            assert row.speaker_boost is False
-        finally:
-            db.close()
-
-
-def test_runtime_voice_profile_uses_saved_speed_and_voice_id(tmp_path, monkeypatch):
-    """The live resolver (used by a real interview) must copy the saved voice_id
-    AND speed into the runtime VoiceProfile. Regression guard for the speed bug:
-    previously `speed` was dropped so a saved pace change had no runtime effect.
-    Uses the app's own engine/session factory against a temp DB (no monkeypatched
-    internals), matching how a real request resolves the voice."""
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'voice.db'}")
-    from app.core.config import get_settings
-    from app.database.base import Base
-    from app.database.connection import get_engine, get_session_factory, reset_engine
-
-    get_settings.cache_clear()
-    reset_engine()
-    try:
-        Base.metadata.create_all(get_engine())
-        db = get_session_factory()()
-        from app.services import runtime_config_service as rc
-        rc.set_voice(db, case_id="sofia", speaker_id="patient", patch={
-            "voice_id": "RCVoiceID0001", "model_id": "eleven_turbo_v2_5",
-            "stability": 0.33, "similarity_boost": 0.66, "style": 0.22,
-            "speed": 1.15, "speaker_boost": False,
-        }, admin_email="a@x")
-        db.commit(); db.close()
-
-        monkeypatch.setattr(get_settings(), "elevenlabs_api_key", "k")
-        monkeypatch.setattr(get_settings(), "elevenlabs_enabled", True)
-
-        from app.voice.voice_profile_loader import load_voice_profile
-        resolved = load_voice_profile("sofia", "patient")
-        assert resolved.available is True
-        assert resolved.profile.voice_id == "RCVoiceID0001"
-        assert abs(resolved.profile.speed - 1.15) < 1e-6   # speed must flow through
-        assert abs(resolved.profile.stability - 0.33) < 1e-6
-        assert resolved.profile.speaker_boost is False
-    finally:
-        get_settings.cache_clear()
-        reset_engine()
 
 
 # ============================ CREDENTIAL SECURITY (21-23) ============================

@@ -1,6 +1,5 @@
 import type { CaseCatalog, PatientCase } from "../types/case";
 import type { Assessment, AssessmentTurn, Rubric } from "../types/assessment";
-import type { PatientSpeechStyle } from "../types/interview";
 
 /**
  * API client for the FastAPI backend. The backend is REQUIRED: this module
@@ -59,34 +58,6 @@ export interface ApiSession {
   messages: ApiMessage[];
 }
 
-export interface ApiTurn {
-  turnId: string;
-  patientText: string;
-  status: string;
-  sessionStatus: string;
-  /** Controlled delivery labels for TTS (null on replays / when omitted). */
-  speech: PatientSpeechStyle | null;
-  /** Multi-participant speaker of the primary segment. */
-  speakerId?: string;
-  speakerLabel?: string;
-  /** Ordered segments when more than one participant answered ("both"). */
-  responses?: {
-    turnId: string;
-    speakerId: string;
-    speakerLabel: string;
-    text: string;
-    speech: PatientSpeechStyle | null;
-  }[];
-}
-
-/** Whether the realistic (ElevenLabs) patient voice is available for a case.
- * Never contains voice IDs or key material. */
-export interface VoiceStatus {
-  caseId: string;
-  available: boolean;
-  provider: "elevenlabs" | "browser";
-  fallbackRate: number;
-}
 
 export class ApiError extends Error {
   status: number;
@@ -178,68 +149,6 @@ export function completeSession(sessionId: string): Promise<ApiSession> {
   return request<ApiSession>(`/sessions/${encodeURIComponent(sessionId)}/complete`, {
     method: "POST",
   });
-}
-
-/**
- * Send a student message. `caseId` is the case shown in the UI; the backend
- * rejects the request (409 case_session_mismatch) if it does not match the
- * session's case. `clientTurnId` makes the exchange idempotent: retries with
- * the same id return the already-saved turns instead of regenerating.
- */
-export function sendStudentMessage(
-  sessionId: string,
-  text: string,
-  caseId: string,
-  clientTurnId: string,
-  source: "typed" | "speech" = "typed",
-): Promise<ApiTurn> {
-  return request<ApiTurn>(`/interviews/${encodeURIComponent(sessionId)}/messages`, {
-    method: "POST",
-    body: JSON.stringify({ text, caseId, clientTurnId, source }),
-  });
-}
-
-/** Voice availability for a case (used to pick elevenlabs vs. browser TTS). */
-export function fetchVoiceStatus(caseId: string): Promise<VoiceStatus> {
-  return request<VoiceStatus>(`/voice/status/${encodeURIComponent(caseId)}`);
-}
-
-/** Which voice architecture the real InterviewPage should use. Always
- * narrowed to exactly these two values on the client too (see
- * fetchInterviewConfig) - an unrecognized backend value fails safe to
- * "legacy", mirroring Settings.voice_engine's own backend-side validator. */
-export type VoiceEngine = "legacy" | "livekit";
-
-/** Student-safe interview feature flags (streaming patient responses). */
-export interface InterviewConfig {
-  streamingEnabled: boolean;
-  sentencePipeliningEnabled: boolean;
-  voiceEngine: VoiceEngine;
-}
-
-let interviewConfigCache: InterviewConfig | null = null;
-
-/** Fetch (and cache) the backend's interview feature flags. Unknown/failed
- * fetches report streaming disabled AND voiceEngine "legacy" so the stable,
- * proven path is always the default when config can't be reached. */
-export async function fetchInterviewConfig(): Promise<InterviewConfig> {
-  if (interviewConfigCache) return interviewConfigCache;
-  try {
-    const cfg = await request<InterviewConfig & { voiceEngine?: unknown }>("/interviews/config");
-    interviewConfigCache = {
-      streamingEnabled: cfg.streamingEnabled === true,
-      sentencePipeliningEnabled: cfg.sentencePipeliningEnabled === true,
-      voiceEngine: cfg.voiceEngine === "livekit" ? "livekit" : "legacy",
-    };
-  } catch {
-    return { streamingEnabled: false, sentencePipeliningEnabled: false, voiceEngine: "legacy" }; // not cached
-  }
-  return interviewConfigCache;
-}
-
-/** Test/dev hook: clear the cached interview config. */
-export function clearInterviewConfigCache(): void {
-  interviewConfigCache = null;
 }
 
 export interface SavedTurn {

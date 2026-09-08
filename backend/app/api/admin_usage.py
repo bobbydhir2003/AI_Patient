@@ -97,5 +97,4 @@ def _provider_health(db: Session) -> dict:
 
     return {
         "openai": {"configured": configured.get("openai", False), "last_event_at": _last("openai")},
-        "elevenlabs": {"configured": configured.get("elevenlabs", False), "last_event_at": _last("elevenlabs")},
     }

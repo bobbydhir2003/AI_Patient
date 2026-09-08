@@ -123,7 +123,7 @@ export interface MetricsResponse {
   series: MetricsSample[];
   capacity: CapacityAnalysis | null;
   telemetry: {
-    providers: { openai: ProviderBlock; elevenlabs: ProviderBlock };
+    providers: { openai: ProviderBlock };
     infrastructure: {
       server: Record<string, unknown>;
       dbPool: Record<string, unknown>;

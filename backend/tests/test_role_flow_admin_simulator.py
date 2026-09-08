@@ -49,13 +49,16 @@ def _promote_to_admin(engine, email):
         db.close()
 
 
-def _seed_and_complete(client, token, case_id="camden"):
+def _seed_and_complete(client, engine, token, case_id="camden"):
+    from tests.conftest import seed_exchange
+
     h = bearer(token)
     sid = client.post("/api/sessions", json={"studentName": "Tester", "caseId": case_id}, headers=h)
     assert sid.status_code == 201, sid.text
     session_id = sid.json()["sessionId"]
-    client.post(f"/api/interviews/{session_id}/messages",
-                json={"text": "Hi, how are you today?", "caseId": case_id}, headers=h)
+    # Patient turns come from the trusted generation path (LiveKit + OpenAI
+    # Realtime worker); seed a full exchange directly as that layer does.
+    seed_exchange(engine, session_id, [("Hi, how are you today?", "I'm alright.")])
     done = client.post(f"/api/sessions/{session_id}/complete", headers=h)
     assert done.status_code == 200, done.text
     return session_id
@@ -70,7 +73,7 @@ def test_student_uses_simulator_but_is_blocked_from_admin(engine):
         assert me["role"] == "student" and me["isSystemAdmin"] is False
 
         # Full simulator flow works.
-        _seed_and_complete(c, tok)
+        _seed_and_complete(c, engine, tok)
         assert c.get("/api/students/me/sessions", headers=bearer(tok)).status_code == 200
 
         # Admin surface is denied (403), not merely hidden.
@@ -85,7 +88,7 @@ def test_promoted_admin_runs_practice_and_reaches_dashboard(engine):
         # A real student (their prior session is a real academic record).
         register(c, email="prof@school.edu", number="P200")
         stud_tok = login_token(c, "prof@school.edu", "studpass1")
-        _seed_and_complete(c, stud_tok)  # 1 REAL session for this person
+        _seed_and_complete(c, engine, stud_tok)  # 1 REAL session for this person
 
         # Promote to admin (is_system_admin stays False).
         _promote_to_admin(engine, "prof@school.edu")
@@ -98,8 +101,8 @@ def test_promoted_admin_runs_practice_and_reaches_dashboard(engine):
         assert before["totalSessions"] == 1
 
         # Admin can now run the full simulator (practice sessions).
-        _seed_and_complete(c, adm_tok)
-        _seed_and_complete(c, adm_tok)
+        _seed_and_complete(c, engine, adm_tok)
+        _seed_and_complete(c, engine, adm_tok)
 
         # ...but practice sessions never inflate the academic dashboard.
         after = c.get("/api/admin/dashboard", headers=bearer(adm_tok)).json()

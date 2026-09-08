@@ -26,14 +26,11 @@ from app.schemas.system_schema import (
     ActivityOut,
     AiConfigurationOut,
     AlertOut,
-    AudioQueueHealthOut,
     BackendHealthOut,
     ConcurrencyLaneOut,
     ConcurrencyOut,
-    ConversationSettingsOut,
     CredentialStatusOut,
     DatabaseHealthOut,
-    ElevenLabsConfigOut,
     InfraCheckOut,
     OpenAIConfigOut,
     RedisHealthOut,
@@ -41,12 +38,9 @@ from app.schemas.system_schema import (
     StorageHealthOut,
     SystemLiveOut,
     SystemOverviewOut,
-    VoiceRowOut,
     WorkerFleetOut,
     WorkerOut,
 )
-from app.voice.audio_cache import get_audio_cache
-from app.voice.voice_profile_loader import load_voice_profile
 
 
 def _now_iso() -> str:
@@ -125,35 +119,6 @@ def check_openai(db=None) -> ServiceHealthOut:
     )
 
 
-def check_elevenlabs(db=None) -> ServiceHealthOut:
-    from app.services import runtime_config_service as rc
-
-    rt = rc.elevenlabs_runtime(db)
-    configured = bool(rt.api_key) and rt.enabled
-    return ServiceHealthOut(
-        service="elevenlabs",
-        configured=configured,
-        status="configured" if configured else "not_configured",
-        model=rt.model,  # reflects any runtime override
-        streaming_enabled=get_settings().elevenlabs_streaming_input_enabled,
-        last_success_at=None,
-        last_error=None,
-        checked_at=_now_iso(),
-    )
-
-
-def check_audio_queue() -> AudioQueueHealthOut:
-    """Patient audio is synthesized synchronously per request (streamed straight
-    to the browser). There is no persistent, inspectable job queue, so we report
-    that honestly instead of inventing counts."""
-    return AudioQueueHealthOut(
-        available=False,
-        status="unavailable",
-        message="No persistent audio queue: patient audio is streamed synchronously per request.",
-        checked_at=_now_iso(),
-    )
-
-
 def check_storage() -> StorageHealthOut:
     checked_at = _now_iso()
     try:
@@ -162,7 +127,6 @@ def check_storage() -> StorageHealthOut:
     except Exception:
         return StorageHealthOut(status="unavailable", checked_at=checked_at)
 
-    cache = get_audio_cache()
     status = "warning" if (percent is not None and percent >= STORAGE_WARNING_PERCENT) else "healthy"
     return StorageHealthOut(
         status=status,
@@ -170,64 +134,8 @@ def check_storage() -> StorageHealthOut:
         total_bytes=usage.total,
         free_bytes=usage.free,
         percent_used=percent,
-        audio_cache_entries=len(cache),
-        audio_cache_max_entries=cache.max_entries,
-        audio_cache_bytes=cache.nbytes(),
         checked_at=checked_at,
     )
-
-
-# ----------------------------- voices -----------------------------
-def _patient_voice_row(case_id: str) -> VoiceRowOut:
-    case = case_loader.load_case(case_id)
-    resolved = load_voice_profile(case_id)
-    reason_to_status = {
-        "": "active",
-        "missing_voice_id": "not_configured",
-        "voice_profile_disabled": "disabled",
-        "unsupported_provider": "unavailable",
-        "missing_api_key": "unavailable",
-        "elevenlabs_disabled": "unavailable",
-    }
-    status = reason_to_status.get(resolved.reason, "unavailable")
-    masked = mask_secret(resolved.profile.voice_id) if status == "active" else None
-    return VoiceRowOut(
-        case_id=case_id,
-        speaker_id="patient",
-        patient_name=case.full_name or case.display_name,
-        speaker_label=f"{case.display_name} (Patient)",
-        image=case.image,
-        voice_name=None,  # ElevenLabs display name requires a live API call
-        masked_voice_id=masked,
-        model=resolved.model_id if status == "active" else None,
-        status=status,
-        reason=resolved.reason,
-    )
-
-
-def list_voices(db=None) -> list[VoiceRowOut]:
-    """Voice rows via the runtime service, so dashboard reflects overrides."""
-    from app.services import runtime_config_service as rc
-
-    if db is None:
-        return []
-    out: list[VoiceRowOut] = []
-    for v in rc.list_voice_rows(db):
-        out.append(
-            VoiceRowOut(
-                case_id=v["case_id"],
-                speaker_id=v["speaker_id"],
-                patient_name=v["patient_name"],
-                speaker_label=v["speaker_label"],
-                image=v["image"],
-                voice_name=v["voice_name"],
-                masked_voice_id=v["masked_voice_id"],
-                model=v["model"],
-                status=v["status"],
-                reason=v["source"],
-            )
-        )
-    return out
 
 
 # ----------------------------- ai configuration -----------------------------
@@ -236,10 +144,10 @@ def get_ai_configuration(db=None) -> AiConfigurationOut:
     from app.services import runtime_config_service as rc
 
     if db is None:
-        d = {"openai": {}, "elevenlabs": {}, "conversation": {}}
+        d = {"openai": {}}
     else:
         d = rc.ai_configuration(db)
-    o, e, c = d["openai"], d["elevenlabs"], d["conversation"]
+    o = d["openai"]
     openai = OpenAIConfigOut(
         configured=o.get("configured", False),
         model=o.get("model", ""),
@@ -248,24 +156,7 @@ def get_ai_configuration(db=None) -> AiConfigurationOut:
         max_output_tokens=o.get("max_output_tokens"),
         status=o.get("status", "not_configured"),
     )
-    elevenlabs = ElevenLabsConfigOut(
-        configured=e.get("configured", False),
-        enabled=e.get("enabled", False),
-        model=e.get("model", ""),
-        output_format=e.get("output_format", ""),
-        timeout_seconds=e.get("timeout_seconds"),
-        status=e.get("status", "not_configured"),
-    )
-    conversation = ConversationSettingsOut(
-        sentence_level_streaming=c.get("sentence_level_streaming", "Disabled"),
-        patient_streaming=c.get("patient_streaming", "Disabled"),
-        disclosure_control=c.get("disclosure_control", "Enabled (built-in)"),
-        motivational_interviewing=c.get("motivational_interviewing", "Standard (built-in)"),
-        age_appropriate_language=c.get("age_appropriate_language", "Enabled (built-in)"),
-        caregiver_routing=c.get("caregiver_routing", "Not implemented"),
-        max_patient_response_chars=c.get("max_patient_response_chars", 900),
-    )
-    return AiConfigurationOut(openai=openai, elevenlabs=elevenlabs, conversation=conversation)
+    return AiConfigurationOut(openai=openai)
 
 
 def get_credentials_status(db=None) -> list[CredentialStatusOut]:
@@ -294,7 +185,6 @@ def get_credentials_status(db=None) -> list[CredentialStatusOut]:
 def build_alerts(
     database: DatabaseHealthOut,
     openai: ServiceHealthOut,
-    elevenlabs: ServiceHealthOut,
     storage: StorageHealthOut,
     redis: RedisHealthOut | None = None,
     fleet: WorkerFleetOut | None = None,
@@ -325,7 +215,7 @@ def build_alerts(
             ))
     # Concurrency near a configured limit (>=90% of the live cap).
     if concurrency is not None:
-        for lane in (concurrency.openai, concurrency.tts):
+        for lane in (concurrency.openai,):
             if lane.limit and lane.active / lane.limit >= 0.9:
                 alerts.append(AlertOut(
                     id=f"concurrency-{lane.name.lower().split()[0]}", severity="warning",
@@ -337,9 +227,6 @@ def build_alerts(
     if not openai.configured:
         alerts.append(AlertOut(id="openai-not-configured", severity="warning", service="OpenAI",
                                message="OpenAI API key is not configured.", detected_at=now))
-    if not elevenlabs.configured:
-        alerts.append(AlertOut(id="elevenlabs-not-configured", severity="warning", service="ElevenLabs",
-                               message="ElevenLabs is not configured or disabled.", detected_at=now))
     if storage.status == "warning" and storage.percent_used is not None:
         alerts.append(AlertOut(id="storage-high", severity="warning", service="Storage",
                                message=f"Disk usage is {storage.percent_used}% "
@@ -405,7 +292,6 @@ def _worker_row(rec: dict, ttl_seconds: int) -> WorkerOut:
         requests_per_minute=rec.get("requests_per_minute"),
         http_in_flight=rec.get("http_in_flight"),
         interview_in_flight=rec.get("interview_in_flight"),
-        tts_in_flight=rec.get("tts_in_flight"),
         assessment_in_flight=rec.get("assessment_in_flight"),
         memory_mb=rec.get("memory_mb"),
         current_task=None,  # not recorded per-worker in this deployment
@@ -478,12 +364,11 @@ def concurrency_snapshot(db: Session | None = None) -> ConcurrencyOut:
     """Real global concurrency across all workers. `active` is fleet-wide
     (Redis semaphore ZCARD) when scope is 'global'; the denominators are the
     live configured limits. Nothing here is an example number."""
-    from app.core.concurrency import interview_capacity, tts_capacity
+    from app.core.concurrency import interview_capacity
 
     s = get_settings()
     redis = check_redis()
     interview = interview_capacity()
-    tts = tts_capacity()
 
     # Assessment: active in-flight (fleet-wide via its own semaphore) / configured
     # worker cap; queued = real PENDING rows.
@@ -514,13 +399,6 @@ def concurrency_snapshot(db: Session | None = None) -> ConcurrencyOut:
             scope=interview["active_scope"],
             waiting=interview.get("waiting"),
         ),
-        tts=ConcurrencyLaneOut(
-            name="ElevenLabs TTS",
-            active=tts["active"],
-            limit=tts["limit"],
-            scope=tts["active_scope"],
-            waiting=tts.get("waiting"),
-        ),
         assessment=ConcurrencyLaneOut(
             name="Assessment jobs",
             active=assess_active,
@@ -537,7 +415,6 @@ def realtime_checks(
     redis: RedisHealthOut,
     database: DatabaseHealthOut,
     openai: ServiceHealthOut,
-    elevenlabs: ServiceHealthOut,
     fleet: WorkerFleetOut,
 ) -> list[InfraCheckOut]:
     """Each check reflects a REAL result. A green (healthy) state is only ever
@@ -594,11 +471,6 @@ def realtime_checks(
                                 status="healthy" if openai.configured else "misconfigured",
                                 detail="Configured" if openai.configured else "Not configured."))
 
-    # ElevenLabs configured
-    checks.append(InfraCheckOut(key="elevenlabs", label="ElevenLabs key configured",
-                                status="healthy" if elevenlabs.configured else "misconfigured",
-                                detail="Configured" if elevenlabs.configured else "Not configured/disabled."))
-
     return checks
 
 
@@ -610,13 +482,11 @@ def build_live(db: Session, started_perf: float) -> SystemLiveOut:
     database = check_database(db)
     redis = check_redis()
     openai = check_openai(db)
-    elevenlabs = check_elevenlabs(db)
     storage = check_storage()
     fleet = worker_fleet()
     concurrency = concurrency_snapshot(db)
-    checks = realtime_checks(redis=redis, database=database, openai=openai,
-                             elevenlabs=elevenlabs, fleet=fleet)
-    alerts = build_alerts(database, openai, elevenlabs, storage, redis, fleet, concurrency)
+    checks = realtime_checks(redis=redis, database=database, openai=openai, fleet=fleet)
+    alerts = build_alerts(database, openai, storage, redis, fleet, concurrency)
 
     s = get_settings()
     response_time_ms = int((time.perf_counter() - started_perf) * 1000)
@@ -633,7 +503,6 @@ def build_live(db: Session, started_perf: float) -> SystemLiveOut:
         database=database,
         redis=redis,
         openai=openai,
-        elevenlabs=elevenlabs,
         workers=fleet,
         concurrency=concurrency,
         checks=checks,
@@ -645,17 +514,13 @@ def build_overview(db: Session, started_perf: float) -> SystemOverviewOut:
     database = check_database(db)
     redis = check_redis()
     openai = check_openai(db)
-    elevenlabs = check_elevenlabs(db)
-    audio_queue = check_audio_queue()
     storage = check_storage()
     ai_config = get_ai_configuration(db)
     credentials = get_credentials_status(db)
-    voices = list_voices(db)
     fleet = worker_fleet()
     concurrency = concurrency_snapshot(db)
-    checks = realtime_checks(redis=redis, database=database, openai=openai,
-                             elevenlabs=elevenlabs, fleet=fleet)
-    alerts = build_alerts(database, openai, elevenlabs, storage, redis, fleet, concurrency)
+    checks = realtime_checks(redis=redis, database=database, openai=openai, fleet=fleet)
+    alerts = build_alerts(database, openai, storage, redis, fleet, concurrency)
     activity = list_activity(db)
 
     s = get_settings()
@@ -675,12 +540,9 @@ def build_overview(db: Session, started_perf: float) -> SystemOverviewOut:
         database=database,
         redis=redis,
         openai=openai,
-        elevenlabs=elevenlabs,
-        audio_queue=audio_queue,
         storage=storage,
         ai_config=ai_config,
         credentials=credentials,
-        voices=voices,
         alerts=alerts,
         activity=activity,
         workers=fleet,

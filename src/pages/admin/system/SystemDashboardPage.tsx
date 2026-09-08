@@ -5,7 +5,6 @@ import {
   AiConfigurationSection,
   ApiCredentialsSection,
   GlobalConcurrencySection,
-  PatientVoicesSection,
   QuickActionsSection,
   RealtimeChecksSection,
   RecentActivitySection,
@@ -65,7 +64,6 @@ export function SystemDashboardPage() {
       <div className="pt-sys-grid">
         <div className="pt-sys-col">
           <GlobalConcurrencySection concurrency={data.concurrency} />
-          <PatientVoicesSection voices={data.voices} />
           <ApiCredentialsSection credentials={data.credentials} />
           <RecentActivitySection activity={data.activity} />
         </div>

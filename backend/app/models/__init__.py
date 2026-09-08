@@ -8,7 +8,6 @@ from app.models.load_test_job import LoadTestJob
 from app.models.runtime_config import (
     ApiCredential,
     ConfigurationHistory,
-    PatientVoiceSetting,
     SystemSetting,
 )
 from app.models.student import Student
@@ -28,6 +27,5 @@ __all__ = [
     "AssessmentEvidence",
     "ApiCredential",
     "SystemSetting",
-    "PatientVoiceSetting",
     "ConfigurationHistory",
 ]

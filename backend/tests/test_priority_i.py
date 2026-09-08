@@ -1,5 +1,5 @@
-"""Priority I tests: runtime configuration activation (voice / OpenAI / ElevenLabs
-settings + encrypted credentials), effective-source metadata, and secret safety."""
+"""Priority I tests: runtime configuration activation (OpenAI settings +
+encrypted credentials), effective-source metadata, and secret safety."""
 import json
 
 import pytest
@@ -24,85 +24,6 @@ def enc(monkeypatch):
     return True
 
 
-# ============================ VOICE CONFIG ============================
-def test_no_override_uses_case_file_or_none(engine):
-    db = _db(engine)
-    try:
-        rv = rc.resolve_voice(db, "carly", "patient")
-        # Without a DB override the source is the case file (or 'none' if the
-        # checked-in case has no configured voice) - never 'runtime'.
-        assert rv.source in ("case_file", "none")
-    finally:
-        db.close()
-
-
-def test_db_override_takes_precedence(engine):
-    db = _db(engine)
-    try:
-        rc.set_voice(db, case_id="carly", speaker_id="patient",
-                     patch={"voice_id": "OverrideVoiceId1234", "display_name": "Test"},
-                     admin_email="a@x")
-        db.commit()
-        rv = rc.resolve_voice(db, "carly", "patient")
-        assert rv.source == "runtime" and rv.voice_id == "OverrideVoiceId1234"
-    finally:
-        db.close()
-
-
-def test_blank_voice_id_preserves_current(engine):
-    db = _db(engine)
-    try:
-        rc.set_voice(db, case_id="carly", speaker_id="patient",
-                     patch={"voice_id": "KeepThisVoiceId1234"}, admin_email="a@x")
-        db.commit()
-        # A follow-up edit that changes only unrelated fields (no voice_id) must
-        # NOT wipe the stored voice id.
-        rc.set_voice(db, case_id="carly", speaker_id="patient",
-                     patch={"display_name": "Renamed"}, admin_email="a@x")
-        db.commit()
-        assert rc.resolve_voice(db, "carly", "patient").voice_id == "KeepThisVoiceId1234"
-    finally:
-        db.close()
-
-
-def test_camden_mother_voice_from_case_file_then_override(engine):
-    db = _db(engine)
-    try:
-        # Camden's ONLY voice is the mother; it is sourced from the case-file
-        # voice_profile (the single source of truth) with no override yet.
-        row = rc.get_voice_row(db, "camden", "caregiver")
-        assert row["status"] == "active" and row["source"] == "case_file"
-        assert row["masked_voice_id"]  # a real (masked) mother voice id
-        # A runtime override takes priority over the case-file value.
-        rc.set_voice(db, case_id="camden", speaker_id="caregiver",
-                     patch={"voice_id": "MotherVoiceId12345"}, admin_email="a@x")
-        db.commit()
-        after = rc.get_voice_row(db, "camden", "caregiver")
-        assert after["status"] == "active" and after["source"] == "runtime"
-        assert rc.resolve_voice(db, "camden", "caregiver").voice_id == "MotherVoiceId12345"
-        # The child ("patient") speaker is no longer a valid Camden voice.
-        import pytest
-        with pytest.raises(Exception):
-            rc.get_voice_row(db, "camden", "patient")
-    finally:
-        db.close()
-
-
-def test_voice_row_never_exposes_raw_voice_id(engine):
-    db = _db(engine)
-    try:
-        rc.set_voice(db, case_id="carly", speaker_id="patient",
-                     patch={"voice_id": "SecretRawVoiceId999"}, admin_email="a@x")
-        db.commit()
-        from app.schemas.runtime_schema import VoiceRowOut
-        d = dict(rc.get_voice_row(db, "carly", "patient"))
-        d.pop("voice_id", None)  # API layer pops it before serialization
-        payload = VoiceRowOut.model_validate(d).model_dump_json()
-        assert "SecretRawVoiceId999" not in payload  # only masked id is serialized
-    finally:
-        db.close()
-
-
 # ============================ OPENAI CONFIG ============================
 def test_openai_model_db_override_beats_env(engine):
     db = _db(engine)
@@ -124,43 +45,6 @@ def test_openai_key_db_override_beats_env_and_never_leaks(engine, enc):
         status = {c["service"]: c for c in rc.credential_status(db)}["openai"]
         assert status["source"] == "database" and status["configured"] is True
         assert "SECRET" not in json.dumps(status)
-    finally:
-        db.close()
-
-
-# ============================ ELEVENLABS CONFIG ============================
-def test_elevenlabs_model_db_override_and_env_fallback(engine):
-    db = _db(engine)
-    try:
-        # env fallback first
-        assert rc.elevenlabs_runtime(db).model == get_settings().elevenlabs_default_model
-        rc.set_elevenlabs_config(db, admin_email="a@x", patch={"model": "eleven_turbo_v2_5"})
-        db.commit()
-        assert rc.elevenlabs_runtime(db).model == "eleven_turbo_v2_5"
-    finally:
-        db.close()
-
-
-def test_elevenlabs_enabled_db_override(engine):
-    db = _db(engine)
-    try:
-        assert rc.elevenlabs_runtime(db).enabled is True  # env default
-        rc.set_elevenlabs_config(db, admin_email="a@x", patch={"enabled": False})
-        db.commit()
-        assert rc.elevenlabs_runtime(db).enabled is False  # DB override, no restart
-        rc.set_elevenlabs_config(db, admin_email="a@x", patch={"enabled": True})
-        db.commit()
-        assert rc.elevenlabs_runtime(db).enabled is True
-    finally:
-        db.close()
-
-
-def test_elevenlabs_key_db_override(engine, enc):
-    db = _db(engine)
-    try:
-        rc.set_credential(db, service="elevenlabs", new_key="sk_eleven_new_key_123456", admin_email="a@x")
-        db.commit()
-        assert rc.elevenlabs_runtime(db).api_key == "sk_eleven_new_key_123456"
     finally:
         db.close()
 

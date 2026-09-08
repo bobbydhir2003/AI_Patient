@@ -95,7 +95,6 @@ class WorkerHeartbeat:
             "requests_per_minute": tele.http.rate_per_min("requests", 60),
             "http_in_flight": tele.http_in_flight.value,
             "interview_in_flight": tele.interview_in_flight.value,
-            "tts_in_flight": tele.tts_in_flight.value,
             "assessment_in_flight": tele.assessment_in_flight.value,
         }
         if _PROC is not None:

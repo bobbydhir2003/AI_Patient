@@ -171,6 +171,10 @@ const MAX_MIC_RETRIES = 1;
 const STUDENT_TEXT_TOPIC = "student_text";
 const PATIENT_TURN_STATUS_TOPIC = "patient_turn_status";
 const AGENT_CONTROL_TOPIC = "agent_control";
+// Phase G (Realtime engine only): agent->browser transcript-sync events (see
+// worker.py TRANSCRIPT_SYNC_TOPIC). Additive - a legacy session never receives
+// these, so the browser-recognizer path below is completely unaffected.
+const TRANSCRIPT_SYNC_TOPIC = "transcript_sync";
 
 /** Injectable so this ONE engine can serve both the admin POC page and the
  * real student InterviewPage - each passes a function pointing at its own
@@ -252,6 +256,39 @@ interface AgentControlPayload {
   semanticTurnControl?: boolean;
   semanticIgnored?: boolean;
   reason?: string;
+  /** prompt_agent mode: OpenAI Realtime owns speech detection, turn-taking AND
+   * transcription, so the browser must NOT run its own SpeechRecognition. */
+  promptAgent?: boolean;
+}
+
+/** Phase G transcript-sync events (Realtime engine only). Every event carries
+ * the backend generation `epoch` so a stale/out-of-order event from a
+ * superseded generation is dropped (see handleTranscriptSync). */
+interface TranscriptSyncPayload {
+  type?: "student_transcript" | "patient_text_ready" | "patient_text_final";
+  clientTurnId?: string;
+  epoch?: number;
+  patientTurnId?: string;
+  /** prompt_agent mode: the DB ConversationTurn id of a FINAL student turn,
+   * so the page can insert it with a stable identity (see StudentTextMeta). */
+  studentTurnId?: string;
+  text?: string;
+  reason?: string;
+}
+
+export interface PatientTextMeta {
+  clientTurnId?: string;
+  patientTurnId?: string;
+  final: boolean;
+  reason?: string;
+}
+
+/** prompt_agent mode: a FINAL student message that must be inserted into the
+ * conversation window with a stable DB id (studentTurnId), mirroring
+ * PatientTextMeta so the same refetch-reconciliation applies to both roles. */
+export interface StudentTextMeta {
+  clientTurnId?: string;
+  studentTurnId: string;
 }
 
 /** Coarse connection-milestone flags for the POC's diagnostic panel only -
@@ -282,6 +319,23 @@ export interface LiveKitPocCallbacks {
    * surfaced so the tester can copy the EXACT value into the agent worker's
    * --room flag rather than reconstruct it by hand. */
   onRoomName: (roomName: string) => void;
+  /** Phase G (Realtime engine only): backend-APPROVED patient text for a turn,
+   * delivered before/at speech start (`final:false`) and reconciled after
+   * completion/interruption (`final:true`, with `reason`). OPTIONAL so every
+   * existing caller/test is unaffected; a legacy session never fires it. */
+  onPatientText?: (
+    text: string,
+    meta: PatientTextMeta,
+  ) => void;
+  /** prompt_agent mode (OpenAI Realtime owns the conversation): a FINAL student
+   * transcript persisted to a ConversationTurn, carrying its DB id so the page
+   * inserts it into the conversation window with a stable identity. OPTIONAL so
+   * every existing caller/test is unaffected; only fires when the backend sends
+   * a student_transcript event with a studentTurnId (prompt_agent only). */
+  onStudentText?: (
+    text: string,
+    meta: StudentTextMeta,
+  ) => void;
 }
 
 /** Agent process's fixed participant identity (see worker.py AGENT_IDENTITY). */
@@ -305,6 +359,24 @@ export class LiveKitPocEngine {
   private pendingDeliveryTurnId: string | null = null;
   private pendingProcessingTurnId: string | null = null;
   private deliveryRetryCount = 0;
+  /** Phase G: highest transcript-sync generation epoch seen. A transcript_sync
+   * event with a LOWER epoch is a straggler from a superseded generation and
+   * is dropped (see handleTranscriptSync). Starts below any real epoch (0).
+   * Reset per connection in start() so a NEW Realtime worker session (which
+   * begins again at epoch 0/1) is never rejected by a stale high watermark
+   * from a previous Start/Stop/Resume cycle. */
+  private latestSyncEpoch = -1;
+  /** P0-2: the clientTurnId of the current AUTHORITATIVE Realtime voice turn,
+   * learned from a transcript_sync `patient_text_ready` (server-authoritative,
+   * id `realtime-<session>-<n>`). Lets handleTurnStatus correlate speaking_*
+   * events for a Realtime turn WITHOUT a browser-created SpeechRecognition
+   * clientTurnId (which never exists for a spoken turn). Null in legacy mode
+   * (no transcript_sync arrives), so legacy turn-ID correlation is untouched. */
+  private realtimeActiveTurn: {
+    clientTurnId: string;
+    patientTurnId: string;
+    epoch: number;
+  } | null = null;
   /** Phase 4 (EXPERIMENTAL): learned from agent_ready's additive
    * `semanticTurnControl` field, then a ONE-WAY flag for the lifetime of
    * this engine instance - a later "semantic_fallback" message can flip it
@@ -315,6 +387,12 @@ export class LiveKitPocEngine {
    * server drives that via "semantic_turn_started" instead (see
    * handleSemanticTurnStarted). Reset to false in end(). */
   private semanticTurnControlActive = false;
+  /** prompt_agent mode (from agent_ready.promptAgent): OpenAI Realtime owns
+   * speech detection, turn-taking AND transcription end to end. When true the
+   * engine NEVER starts browser SpeechRecognition - student/patient text arrive
+   * via transcript_sync, and mic audio is pure LiveKit transport to Realtime.
+   * Reset to false in end(). Never affects legacy/controlled/native modes. */
+  private promptAgentMode = false;
   /** Wall-clock time the current turn's text was FIRST sent to the agent -
    * used only to compute duration_ms for diagnostics (real-device latency
    * validation), never persisted or sent anywhere but the telemetry ping. */
@@ -473,6 +551,11 @@ export class LiveKitPocEngine {
     this.micReady = false;
     this.agentReadyReceived = false;
     this.semanticTurnControlActive = false;
+    // P0-2/session reset: transcript-sync epoch + authoritative Realtime turn
+    // are scoped to THIS connection. A fresh worker session starts at a low
+    // epoch, so the watermark must not survive from a previous session.
+    this.latestSyncEpoch = -1;
+    this.realtimeActiveTurn = null;
     this.diagnostics = { ...INITIAL_DIAGNOSTICS };
     this.callbacks.onDiagnostics(this.diagnostics);
     this.setState("connecting");
@@ -494,7 +577,21 @@ export class LiveKitPocEngine {
     });
     this.callbacks.onRoomName(tokenInfo.roomName);
 
-    const room = new Room();
+    // Classroom-safe microphone defaults: explicitly request browser audio
+    // processing rather than relying on browser/device defaults (which vary).
+    // echoCancellation prevents patient speaker audio from being re-captured by
+    // the same device's mic (self-echo). noiseSuppression reduces ambient
+    // classroom noise reaching OpenAI's server_vad. autoGainControl normalises
+    // volume across varying mic distances. These are passed to getUserMedia via
+    // LiveKit's audioCaptureDefaults and apply to every setMicrophoneEnabled(true)
+    // call this Room makes (see LiveKit SDK 2.x AudioCaptureOptions).
+    const room = new Room({
+      audioCaptureDefaults: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
     this.room = room;
 
     room.on(RoomEvent.Disconnected, () => {
@@ -571,6 +668,10 @@ export class LiveKitPocEngine {
       }
       if (topic === AGENT_CONTROL_TOPIC) {
         this.handleAgentControl(payload, generation);
+        return;
+      }
+      if (topic === TRANSCRIPT_SYNC_TOPIC) {
+        this.handleTranscriptSync(payload);
       }
     });
 
@@ -659,9 +760,13 @@ export class LiveKitPocEngine {
       // recorded - this is the value startRecognition()'s onFinal reads for
       // every subsequent recognizer cycle this session.
       this.semanticTurnControlActive = parsed.semanticTurnControl === true;
+      // prompt_agent: Realtime owns transcription too, so the browser recognizer
+      // is disabled for this session (startRecognition() becomes a no-op).
+      this.promptAgentMode = parsed.promptAgent === true;
       logVoiceEvent("livekit_agent_ready_received", {
         startupGeneration: generation, connectionId: this.connectionId ?? undefined,
         semanticTurnControlActive: this.semanticTurnControlActive,
+        promptAgentMode: this.promptAgentMode,
       });
       this.maybeEnterListening(generation);
       return;
@@ -861,6 +966,16 @@ export class LiveKitPocEngine {
    * is the turn-2-never-recognized bug this fixes). */
   private startRecognition(): void {
     this.stopRecognition();
+    // prompt_agent: OpenAI Realtime owns speech detection AND transcription, so
+    // the browser recognizer is deliberately never started. Student/patient
+    // text arrive via transcript_sync; the LiveKit mic track carries the audio
+    // straight to Realtime. This is the single guard that keeps EVERY caller
+    // (maybeEnterListening, turn-completion resumes, watchdog recoveries) from
+    // spinning up a redundant recognizer in this mode.
+    if (this.promptAgentMode) {
+      logVoiceEvent("livekit_recognition_skipped_prompt_agent", { engineState: this.state });
+      return;
+    }
     this.recognizer = createRecognizer({
       onInterim: (text) => {
         if (this.state !== "listening") return; // stale recognizer instance - see onFinal below
@@ -1141,6 +1256,98 @@ export class LiveKitPocEngine {
     }, INTERRUPT_ACK_TIMEOUT_MS);
   }
 
+  /** Phase G (Realtime engine only): render the backend-authoritative student
+   * and patient text promptly, dropping any straggler from a superseded
+   * generation via the monotonic epoch. Never touches the legacy
+   * recognizer/turn-state machinery - it only forwards to display callbacks. */
+  private handleTranscriptSync(payload: Uint8Array): void {
+    let parsed: TranscriptSyncPayload;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(payload)) as TranscriptSyncPayload;
+    } catch {
+      logVoiceEvent("livekit_transcript_sync_ignored", { reason: "parse_error" });
+      return;
+    }
+    if (
+      parsed.type !== "student_transcript" &&
+      parsed.type !== "patient_text_ready" &&
+      parsed.type !== "patient_text_final"
+    ) {
+      logVoiceEvent("livekit_transcript_sync_ignored", { reason: "unsupported_type" });
+      return;
+    }
+    if (!parsed.clientTurnId) {
+      logVoiceEvent("livekit_transcript_sync_ignored", { reason: "missing_client_turn_id" });
+      return;
+    }
+    if (parsed.type !== "student_transcript" && !parsed.patientTurnId) {
+      logVoiceEvent("livekit_transcript_sync_ignored", {
+        reason: "missing_patient_turn_id",
+        correlationId: parsed.clientTurnId,
+      });
+      return;
+    }
+    const epoch = parsed.epoch;
+    if (typeof epoch !== "number" || !Number.isSafeInteger(epoch) || epoch < 0) {
+      logVoiceEvent("livekit_transcript_sync_ignored", { reason: "invalid_epoch" });
+      return;
+    }
+    if (epoch < this.latestSyncEpoch) {
+      // Straggler from an invalidated generation - stale patient/student text
+      // must never overwrite the current turn.
+      logVoiceEvent("livekit_transcript_sync_stale_dropped", {
+        correlationId: parsed.clientTurnId,
+      });
+      return;
+    }
+    this.latestSyncEpoch = epoch;
+    const text = parsed.text ?? "";
+    if (parsed.type === "student_transcript") {
+      // Clear any interim draft (existing behavior for every mode).
+      this.callbacks.onStudentTranscript(text, true);
+      // prompt_agent mode: the FINAL student turn is persisted server-side and
+      // carries its DB id, so insert it into the conversation window with a
+      // stable identity rather than discarding it. Legacy/controlled/native
+      // sessions never send studentTurnId, so this stays a no-op there.
+      if (parsed.studentTurnId) {
+        this.callbacks.onStudentText?.(text, {
+          clientTurnId: parsed.clientTurnId,
+          studentTurnId: parsed.studentTurnId,
+        });
+      }
+      return;
+    }
+    if (parsed.type === "patient_text_ready") {
+      // P0-2: this is the authoritative id for the Realtime voice turn whose
+      // speaking_started/ended will follow on patient_turn_status. Recording it
+      // here is what lets handleTurnStatus accept those events (the browser
+      // never created this id).
+      this.realtimeActiveTurn = {
+        clientTurnId: parsed.clientTurnId,
+        patientTurnId: parsed.patientTurnId!,
+        epoch,
+      };
+      // Realtime turns do not have a browser-created delivery/ack phase. Adopt
+      // the backend identity as the current processing identity so the normal
+      // speaking watchdog and manual-interrupt path remain fully functional.
+      this.pendingProcessingTurnId = parsed.clientTurnId;
+      this.callbacks.onPatientText?.(text, {
+        clientTurnId: parsed.clientTurnId,
+        patientTurnId: parsed.patientTurnId,
+        final: false,
+      });
+      return;
+    }
+    if (parsed.type === "patient_text_final") {
+      this.callbacks.onPatientText?.(text, {
+        clientTurnId: parsed.clientTurnId,
+        patientTurnId: parsed.patientTurnId,
+        final: true,
+        reason: parsed.reason,
+      });
+    }
+  }
+
   private handleTurnStatus(payload: Uint8Array): void {
     let parsed: TurnStatusPayload;
     try {
@@ -1156,7 +1363,11 @@ export class LiveKitPocEngine {
     // an implicit delivery confirmation (see below) rather than ignoring it
     // purely because the ack itself was lost in transit.
     const matchesDelivery = !!turnId && turnId === this.pendingDeliveryTurnId;
-    if (!turnId || (!matchesProcessing && !matchesDelivery)) {
+    // P0-2: a server-authoritative Realtime voice turn (id learned from
+    // transcript_sync patient_text_ready). Only ever non-null in Realtime mode,
+    // so this NEVER weakens the legacy browser-owned clientTurnId correlation.
+    const matchesRealtime = !!turnId && turnId === this.realtimeActiveTurn?.clientTurnId;
+    if (!turnId || (!matchesProcessing && !matchesDelivery && !matchesRealtime)) {
       // Stale (already timed-out/completed) or foreign turn.
       logVoiceEvent("livekit_turn_status_ignored", {
         reason: "client_turn_id_mismatch",
@@ -1203,6 +1414,7 @@ export class LiveKitPocEngine {
       this.turnSentAt = null;
       this.turnCount += 1;
       this.pendingProcessingTurnId = null;
+      this.realtimeActiveTurn = null;  // P0-2: turn done; ignore any late duplicate status
       this.callbacks.onTurnCompleted(this.turnCount);
       this.setState("listening");
       // Resume listening with a FRESH recognizer - this was the missing
@@ -1229,6 +1441,7 @@ export class LiveKitPocEngine {
       this.turnSentAt = null;
       this.turnCount += 1;
       this.pendingProcessingTurnId = null;
+      this.realtimeActiveTurn = null;  // P0-2: interrupted turn resolved
       this.callbacks.onTurnCompleted(this.turnCount);
       this.setState("listening");
       this.startRecognition();
@@ -1240,6 +1453,7 @@ export class LiveKitPocEngine {
       this.clearInterruptWatchdog();
       logVoiceEvent("livekit_patient_audio_failed", { correlationId: turnId, reason: "agent_failed" });
       this.pendingProcessingTurnId = null;
+      this.realtimeActiveTurn = null;  // P0-2: failed turn resolved
       this.turnSentAt = null;
       // Explicit diagnostic state - deliberately NOT a silent fallback to
       // legacy browser TTS (see the module docstring's "no hidden fallback"
@@ -1283,6 +1497,8 @@ export class LiveKitPocEngine {
     this.startupGeneration += 1;
     this.micReady = false;
     this.agentReadyReceived = false;
+    this.semanticTurnControlActive = false;
+    this.promptAgentMode = false;
     this.connectionId = null;
     this.clearMicTimeout();
     this.clearAgentReadyWatchdog();

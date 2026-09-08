@@ -57,7 +57,7 @@ function LineChart({ ts }: { ts: UsageTimeseries | null }) {
 
 /** SVG donut for the cost-by-provider split. Only rendered with real cost > 0. */
 function Donut({ summary }: { summary: UsageSummary }) {
-  const { openai_usd, elevenlabs_usd, openai_pct, elevenlabs_pct } = summary.provider_split;
+  const { openai_usd, openai_pct } = summary.provider_split;
   const total = summary.total_cost_usd;
   if (total <= 0) {
     return <div className={styles.emptyChart}>No cost recorded for this period.</div>;
@@ -78,7 +78,6 @@ function Donut({ summary }: { summary: UsageSummary }) {
       </svg>
       <div className={styles.donutLegend}>
         <div><span className={styles.dotGreen} /> OpenAI <strong>{fmtUsd(openai_usd)}</strong> <em>({openai_pct}%)</em></div>
-        <div><span className={styles.dotPurple} /> ElevenLabs <strong>{fmtUsd(elevenlabs_usd)}</strong> <em>({elevenlabs_pct}%)</em></div>
       </div>
     </div>
   );
@@ -226,14 +225,7 @@ export function AiUsageCostPage() {
                 {s.providers.openai.configured ? "Configured" : "Not configured"}
               </span>
             </li>
-            <li>
-              <span>ElevenLabs API</span>
-              <span className={s.providers.elevenlabs.configured ? styles.ok : styles.warn}>
-                {s.providers.elevenlabs.configured ? "Configured" : "Not configured"}
-              </span>
-            </li>
             <li><span>Last OpenAI event</span><span>{agoLabel(s.providers.openai.last_event_at)}</span></li>
-            <li><span>Last ElevenLabs event</span><span>{agoLabel(s.providers.elevenlabs.last_event_at)}</span></li>
             <li className={styles.projRow}>
               <span>Projected Monthly Cost</span>
               <span>{s.projected_monthly.available ? fmtUsd(s.projected_monthly.projected_usd ?? 0) : "—"}</span>
@@ -250,7 +242,6 @@ export function AiUsageCostPage() {
             <div><dt>Avg OpenAI Input Tokens</dt><dd>{fmtInt(s.avg_input_tokens_per_interview)}</dd></div>
             <div><dt>Avg OpenAI Output Tokens</dt><dd>{fmtInt(s.avg_output_tokens_per_interview)}</dd></div>
             <div><dt>Avg Total OpenAI Tokens</dt><dd>{fmtInt(s.avg_tokens_per_interview)}</dd></div>
-            <div><dt>Avg ElevenLabs Characters</dt><dd>{fmtInt(s.avg_elevenlabs_chars_per_interview)}</dd></div>
             <div><dt>Avg Cost / Interview</dt><dd>{fmtUsd(s.avg_cost_per_interview_usd, 4)}</dd></div>
           </dl>
         </section>
@@ -273,8 +264,8 @@ export function AiUsageCostPage() {
                 <tr>
                   <th>Student</th><th>Patient Case</th><th>Session ID</th>
                   <th className={styles.num}>In Tokens</th><th className={styles.num}>Out Tokens</th>
-                  <th className={styles.num}>Total OpenAI</th><th className={styles.num}>EL Characters</th>
-                  <th className={styles.num}>OpenAI Cost</th><th className={styles.num}>EL Cost</th>
+                  <th className={styles.num}>Total OpenAI</th>
+                  <th className={styles.num}>OpenAI Cost</th>
                   <th className={styles.num}>Total Cost</th><th>Last Updated</th><th>Status</th>
                 </tr>
               </thead>
@@ -287,9 +278,7 @@ export function AiUsageCostPage() {
                     <td className={styles.num}>{fmtInt(row.input_tokens)}</td>
                     <td className={styles.num}>{fmtInt(row.output_tokens)}</td>
                     <td className={styles.num}>{fmtInt(row.total_tokens)}</td>
-                    <td className={styles.num}>{fmtInt(row.elevenlabs_characters)}</td>
                     <td className={styles.num}>{fmtUsd(row.openai_cost_usd, 4)}</td>
-                    <td className={styles.num}>{fmtUsd(row.elevenlabs_cost_usd, 4)}</td>
                     <td className={styles.num}>{fmtUsd(row.total_cost_usd, 4)}</td>
                     <td>{agoLabel(row.last_updated)}</td>
                     <td>
@@ -307,8 +296,8 @@ export function AiUsageCostPage() {
 
       <p className={styles.footer}>
         Costs are ESTIMATED usage costs from provider-reported usage × pricing v{s.pricing.version}
-        {" — "}OpenAI ${s.pricing.openai.default_input_per_1k}/1K input, ${s.pricing.openai.default_output_per_1k}/1K output;
-        {" "}ElevenLabs ${s.pricing.elevenlabs.per_character}/character. Not a provider invoice.
+        {" — "}OpenAI ${s.pricing.openai.default_input_per_1k}/1K input, ${s.pricing.openai.default_output_per_1k}/1K output.
+        Not a provider invoice.
       </p>
     </div>
   );

@@ -12,9 +12,9 @@ prunes expired tokens, then admits a new one only if the live count is under
 capacity. A holder that crashes without releasing simply expires out of the
 set after `lease_ms` - no separate reaper process needed.
 
-Separate limits per provider: construct one `DistributedSemaphore` per name
-("openai_interview", "tts", "assessment") - they use different Redis keys and
-are NEVER shared, matching separate OpenAI/ElevenLabs provider limits.
+Separate limits per lane: construct one `DistributedSemaphore` per name
+("openai_interview", "assessment") - they use different Redis keys and are
+NEVER shared, matching separate OpenAI concurrency budgets.
 
 Fallback (development/test only): when Redis is not configured, or not
 required (`settings.redis_required` is false - the default outside

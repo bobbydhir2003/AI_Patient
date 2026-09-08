@@ -7,7 +7,7 @@ history and audit rows never contain raw secret values.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
@@ -57,34 +57,6 @@ class SystemSetting(Base):
     is_secret: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     apply_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="immediate")
     description: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    updated_by: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
-    )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
-
-
-class PatientVoiceSetting(Base):
-    """Per-speaker voice override. Camden and his mother are SEPARATE rows."""
-
-    __tablename__ = "patient_voice_settings"
-    __table_args__ = (UniqueConstraint("case_id", "speaker_id", name="uq_voice_case_speaker"),)
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
-    case_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
-    speaker_id: Mapped[str] = mapped_column(String(30), nullable=False, default="patient")
-    display_name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
-    voice_id: Mapped[str] = mapped_column(String(120), nullable=False, default="")
-    voice_name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
-    model_id: Mapped[str] = mapped_column(String(60), nullable=False, default="")
-    stability: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
-    similarity_boost: Mapped[float] = mapped_column(Float, nullable=False, default=0.75)
-    style: Mapped[float] = mapped_column(Float, nullable=False, default=0.1)
-    speed: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
-    speaker_boost: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    preview_text: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     updated_by: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now, onupdate=_now

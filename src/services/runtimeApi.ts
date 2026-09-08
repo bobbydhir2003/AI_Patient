@@ -42,40 +42,6 @@ export interface AiConfig {
     status: string;
     modelAllowlist: string[];
   };
-  elevenlabs: {
-    configured: boolean;
-    enabled: boolean;
-    model: string;
-    outputFormat: string;
-    timeoutSeconds: number | null;
-    status: string;
-    modelAllowlist: string[];
-    formatAllowlist: string[];
-  };
-  conversation: Record<string, string | number>;
-}
-
-export interface RuntimeVoice {
-  caseId: string;
-  speakerId: string;
-  patientName: string;
-  speakerLabel: string;
-  image: string;
-  displayName: string;
-  voiceName: string | null;
-  maskedVoiceId: string | null;
-  model: string | null;
-  stability: number;
-  similarityBoost: number;
-  style: number;
-  speed: number;
-  speakerBoost: boolean;
-  previewText: string;
-  status: string;
-  source: string;
-  hasOverride: boolean;
-  updatedAt: string | null;
-  updatedBy: string | null;
 }
 
 export interface RuntimeCredential {
@@ -117,43 +83,6 @@ export interface HistoryItem {
 export const getAiConfig = (t: string) => req<AiConfig>("/admin/runtime/ai-configuration", t);
 export const patchOpenAI = (t: string, body: Record<string, unknown>) =>
   req<ApplyResult>("/admin/runtime/ai-configuration/openai", t, { method: "PATCH", body: JSON.stringify(body) });
-export const patchElevenLabs = (t: string, body: Record<string, unknown>) =>
-  req<ApplyResult>("/admin/runtime/ai-configuration/elevenlabs", t, { method: "PATCH", body: JSON.stringify(body) });
-export const patchConversation = (t: string, body: Record<string, unknown>) =>
-  req<ApplyResult>("/admin/runtime/ai-configuration/conversation", t, { method: "PATCH", body: JSON.stringify(body) });
-
-// ------------------------------ voices ------------------------------
-export const getRuntimeVoices = (t: string) => req<{ voices: RuntimeVoice[] }>("/admin/runtime/voices", t);
-export const patchVoice = (t: string, caseId: string, speakerId: string, body: Record<string, unknown>) =>
-  req<RuntimeVoice>(`/admin/runtime/voices/${caseId}/${speakerId}`, t, { method: "PATCH", body: JSON.stringify(body) });
-export const restoreVoice = (t: string, caseId: string, speakerId: string) =>
-  req<RuntimeVoice>(`/admin/runtime/voices/${caseId}/${speakerId}/restore`, t, { method: "POST" });
-
-/** Preview an UNSAVED voice config. Returns a playable blob URL. */
-export async function previewVoiceConfig(
-  t: string,
-  caseId: string,
-  speakerId: string,
-  body: Record<string, unknown>,
-): Promise<string> {
-  const url = `${API_BASE_URL}/api/admin/runtime/voices/${caseId}/${speakerId}/preview`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${t}` },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    let message = `Preview failed (${res.status})`;
-    try {
-      const b = (await res.json()) as { error?: { message?: string } };
-      if (b.error?.message) message = b.error.message;
-    } catch {
-      /* non-JSON */
-    }
-    throw new ApiError(message, res.status, "preview_failed");
-  }
-  return URL.createObjectURL(await res.blob());
-}
 
 // ------------------------------ credentials ------------------------------
 export const getRuntimeCredentials = (t: string) =>

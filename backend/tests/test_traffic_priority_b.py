@@ -171,57 +171,16 @@ def test_interview_slot_cap_and_release_on_success_and_exception(monkeypatch):
         pass
 
 
-def test_interview_overload_returns_503(engine, monkeypatch):
-    from app.core import concurrency
-    from app.core.config import get_settings
-
-    s = get_settings()
-    monkeypatch.setattr(s, "max_concurrent_ai_interviews", 1)
-    monkeypatch.setattr(s, "ai_interview_wait_seconds", 0.05)
-    monkeypatch.setattr(concurrency, "_interview_sem", concurrency.DistributedSemaphore("test_interview_overload"))
-
-    with make_client(engine, FakeOpenAIClient(text="ok"), authenticate=False) as c:
-        h = bearer(register_student(c, email="ov@school.edu")["accessToken"])
-        sid = c.post("/api/sessions", json={"studentName": "O", "caseId": "camden"}, headers=h).json()["sessionId"]
-        # Hold the only slot, then a real interview request must get a clean 503.
-        held = concurrency.interview_slot().__enter__()
-        try:
-            r = c.post(f"/api/interviews/{sid}/messages", json={"text": "hi", "caseId": "camden"}, headers=h)
-            assert r.status_code == 503
-            assert r.json()["error"]["code"] == "service_overloaded"
-        finally:
-            held.__exit__(None, None, None)
-
-
-# ==========================================================================
-#  TTS CONCURRENCY / DEGRADATION
-# ==========================================================================
-def test_tts_slot_degrades_when_full(monkeypatch):
-    from app.core import concurrency
-    from app.core.config import get_settings
-
-    s = get_settings()
-    monkeypatch.setattr(s, "max_concurrent_tts_requests", 1)
-    monkeypatch.setattr(s, "tts_wait_seconds", 0.05)
-    monkeypatch.setattr(concurrency, "_tts_sem", concurrency.DistributedSemaphore("test_tts_cap"))
-
-    a = concurrency.tts_slot().acquire()
-    assert a.ok is True
-    b = concurrency.tts_slot().acquire()
-    assert b.ok is False  # degrade: caller keeps text, skips audio
-    a.release()
-    c = concurrency.tts_slot().acquire()
-    assert c.ok is True
-    c.release()
-
-
 # ==========================================================================
 #  ASSESSMENT QUEUE
 # ==========================================================================
-def _completed_session(client, headers, case_id="carly"):
+def _completed_session(client, engine, headers, case_id="carly"):
+    from tests.conftest import seed_exchange
+
     sid = client.post("/api/sessions", json={"studentName": "Q", "caseId": case_id}, headers=headers).json()["sessionId"]
-    client.post(f"/api/interviews/{sid}/messages",
-                json={"text": "How are you?", "caseId": case_id, "clientTurnId": "q1"}, headers=headers)
+    # Patient turns come from the trusted generation path (LiveKit + OpenAI
+    # Realtime worker); seed a full exchange directly as that layer does.
+    seed_exchange(engine, sid, [("How are you?", "I'm alright.")])
     client.post(f"/api/sessions/{sid}/complete", headers=headers)
     return sid
 
@@ -233,7 +192,7 @@ def test_assessment_enqueues_and_dedups(engine, monkeypatch):
     monkeypatch.setattr(s, "assessment_queue_enabled", True)
     with make_client(engine, FakeOpenAIClient(text="ok"), authenticate=False) as c:
         h = bearer(register_student(c, email="q1@school.edu")["accessToken"])
-        sid = _completed_session(c, h)
+        sid = _completed_session(c, engine, h)
         r1 = c.post(f"/api/sessions/{sid}/assessment", headers=h)
         assert r1.status_code == 202
         assert r1.json()["status"] in ("pending", "processing")
@@ -398,42 +357,7 @@ def test_retry_after_honored():
     assert provider_retry.backoff_seconds(0, base_ms=100, max_ms=1000, retry_after=2.0) == 1.0
 
 
-# ==========================================================================
-#  BOUNDED CONTEXT (B8)
-# ==========================================================================
-def _turn(role, content):
-    return types.SimpleNamespace(role=role, content=content)
-
-
-def test_context_bounded_over_40_turns(monkeypatch):
-    from app.core.config import get_settings
-    from app.patient_engine import context_resolver
-
-    s = get_settings()
-    monkeypatch.setattr(s, "actor_max_recent_turns", 12)
-    monkeypatch.setattr(s, "actor_context_char_limit", 0)  # isolate the turn cap
-
-    turns = []
-    for i in range(20):
-        turns.append(_turn("student", f"question {i}"))
-        turns.append(_turn("patient", f"answer {i}"))  # 40 turns total
-    ctx = context_resolver.resolve_context("carly", [], turns, set())
-    assert len(ctx.history) <= 12  # never grows with the interview
-    assert ctx.turn_count == 40    # full count still reported
-    # The most RECENT turns are the ones kept (continuity preserved).
-    assert ctx.history[-1]["content"] == "answer 19"
-
-
-def test_context_char_cap_trims_oldest(monkeypatch):
-    from app.core.config import get_settings
-    from app.patient_engine import context_resolver
-
-    s = get_settings()
-    monkeypatch.setattr(s, "actor_max_recent_turns", 50)
-    monkeypatch.setattr(s, "actor_context_char_limit", 30)
-
-    turns = [_turn("student", "x" * 20) for _ in range(10)]  # 200 chars total
-    ctx = context_resolver.resolve_context("carly", [], turns, set())
-    total = sum(len(h["content"]) for h in ctx.history)
-    assert total <= 30
-    assert len(ctx.history) >= 1
+# NOTE: The bounded-context (B8) tests were removed with the legacy text
+# generation pipeline (app/patient_engine/context_resolver). The live patient
+# conversation now runs through OpenAI Realtime, which manages its own context
+# window server-side; there is no local context-resolver to unit-test.

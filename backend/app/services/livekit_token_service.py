@@ -72,12 +72,9 @@ def livekit_configured() -> bool:
 
 
 def student_livekit_enabled() -> bool:
-    """Phase A: the student-safe token endpoint additionally requires
-    VOICE_ENGINE=livekit - this is what gives the flag real teeth. With the
-    default (VOICE_ENGINE=legacy), this is always False regardless of
-    LiveKit Cloud credentials, so create_student_token() below can never be
-    reached in production today (no caller has been wired to it yet either -
-    see the module docstring)."""
+    """The student-safe token endpoint additionally requires
+    VOICE_ENGINE=livekit (the only supported value) - a defensive check in
+    case LiveKit Cloud is configured but the engine flag is somehow not."""
     return livekit_configured() and get_settings().voice_engine == "livekit"
 
 
