@@ -29,7 +29,9 @@ def _mk_runtime(on_audio):
     return PromptAgentRuntime(
         session_id="s1",
         case_id="carly",
-        config={"model": "gpt-realtime-2.1-mini", "voice": "sage"},
+        # No "voice" key: the hosted prompt owns the patient's voice and the
+        # runtime never reads config["voice"] (would KeyError if it did).
+        config={"model": "gpt-realtime-2.1-mini"},
         db_factory=lambda: (_ for _ in ()).throw(AssertionError("db not expected")),
         on_audio=on_audio,
         on_student_final=lambda *a: None,

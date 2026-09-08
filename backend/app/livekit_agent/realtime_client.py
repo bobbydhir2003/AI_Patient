@@ -113,9 +113,11 @@ def build_prompt_agent_session_update(
         we deliberately do NOT set conversation:"none".
 
     `config` is a resolved dict from realtime_patient_configs.resolve_patient_config
-    (model/voice/prompt_id/turn_detection). reasoning_effort is carried in that
-    config for future use but is NOT sent here: gpt-realtime voice models do not
-    accept it today, and an unknown session field would fail the whole update.
+    (model/prompt_id/turn_detection). No `voice` is sent: the hosted prompt owns
+    the patient's voice, so omitting the session `voice` field keeps that hosted
+    selection authoritative. reasoning_effort is carried in that config for future
+    use but is NOT sent here: gpt-realtime voice models do not accept it today,
+    and an unknown session field would fail the whole update.
     """
     turn = config["turn_detection"]
     session: dict[str, Any] = {
@@ -142,9 +144,10 @@ def build_prompt_agent_session_update(
                 # overall noise floor the VAD must distinguish against.
                 "noise_reduction": {"type": "near_field"},
             },
+            # No `voice` here: the hosted prompt owns the patient's voice, so we
+            # deliberately omit the session voice field rather than override it.
             "output": {
                 "format": dict(_PCM_FORMAT),
-                "voice": config["voice"],
             },
         },
     }

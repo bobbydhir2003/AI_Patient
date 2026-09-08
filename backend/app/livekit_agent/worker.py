@@ -1137,9 +1137,9 @@ class PocAgentSession:
             )
             return None
         logger.info(
-            "prompt_agent_engine_active session_id=%s case_id=%s identity=%s track=%s model=%s voice=%s",
+            "prompt_agent_engine_active session_id=%s case_id=%s identity=%s track=%s model=%s",
             self.session_id, self.case_id, identity, track_sid,
-            config["model"], config["voice"],
+            config["model"],
         )
         return realtime_session
 

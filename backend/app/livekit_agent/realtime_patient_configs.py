@@ -2,8 +2,12 @@
 
 This is the SINGLE source of truth that maps a trusted, server-validated
 `case_id` (carly/camden/sofia/jayden) onto the OpenAI Realtime settings that
-voice that patient: a hosted prompt/config ID, model, voice, reasoning effort
+voice that patient: a hosted prompt/config ID, model, reasoning effort
 and the server_vad turn-detection tuning.
+
+The patient's VOICE is intentionally NOT set here. Each hosted OpenAI Realtime
+prompt owns its own configured voice; the runtime never sends a `voice` session
+override, so the hosted prompt's selection stays authoritative.
 
 Design constraints (see the approved prompt_agent architecture):
   - ONE shared worker handles all four patients. There are NOT four workers,
@@ -65,7 +69,6 @@ PATIENT_CONFIGS: dict[str, dict[str, Any]] = {
         "case_id": CARLY,
         "prompt_id_setting": "openai_realtime_carly_prompt_id",
         "model": _DEFAULT_MODEL,
-        "voice": "sage",
         "reasoning_effort": _DEFAULT_REASONING_EFFORT,
         "turn_detection": dict(_DEFAULT_TURN_DETECTION),
     },
@@ -73,7 +76,6 @@ PATIENT_CONFIGS: dict[str, dict[str, Any]] = {
         "case_id": CAMDEN,
         "prompt_id_setting": "openai_realtime_camden_prompt_id",
         "model": _DEFAULT_MODEL,
-        "voice": "sage",
         "reasoning_effort": _DEFAULT_REASONING_EFFORT,
         "turn_detection": dict(_DEFAULT_TURN_DETECTION),
     },
@@ -81,7 +83,6 @@ PATIENT_CONFIGS: dict[str, dict[str, Any]] = {
         "case_id": SOFIA,
         "prompt_id_setting": "openai_realtime_sofia_prompt_id",
         "model": _DEFAULT_MODEL,
-        "voice": "sage",
         "reasoning_effort": _DEFAULT_REASONING_EFFORT,
         "turn_detection": dict(_DEFAULT_TURN_DETECTION),
     },
@@ -89,7 +90,6 @@ PATIENT_CONFIGS: dict[str, dict[str, Any]] = {
         "case_id": JAYDEN,
         "prompt_id_setting": "openai_realtime_jayden_prompt_id",
         "model": _DEFAULT_MODEL,
-        "voice": "sage",
         "reasoning_effort": _DEFAULT_REASONING_EFFORT,
         "turn_detection": dict(_DEFAULT_TURN_DETECTION),
     },
@@ -99,11 +99,12 @@ PATIENT_CONFIGS: dict[str, dict[str, Any]] = {
 def resolve_patient_config(case_id: str, settings: "Settings") -> dict[str, Any]:
     """Resolve a validated case_id into a fully-populated prompt_agent config.
 
-    Returns a plain dict carrying model/voice/reasoning_effort/turn_detection
-    and the RESOLVED `prompt_id` pulled from Settings. Raises PatientConfigError
-    if the case is unknown or its prompt ID has not been configured - the worker
-    treats that as a hard start failure rather than voicing the wrong patient or
-    an unconfigured one.
+    Returns a plain dict carrying model/reasoning_effort/turn_detection and the
+    RESOLVED `prompt_id` pulled from Settings. The patient VOICE is deliberately
+    NOT included - the hosted prompt owns its own voice and the runtime sends no
+    voice override. Raises PatientConfigError if the case is unknown or its
+    prompt ID has not been configured - the worker treats that as a hard start
+    failure rather than voicing the wrong patient or an unconfigured one.
     """
     canonical = (case_id or "").strip().lower()
     template = PATIENT_CONFIGS.get(canonical)
@@ -121,7 +122,6 @@ def resolve_patient_config(case_id: str, settings: "Settings") -> dict[str, Any]
         "case_id": template["case_id"],
         "prompt_id": prompt_id,
         "model": template["model"],
-        "voice": template["voice"],
         "reasoning_effort": template["reasoning_effort"],
         "turn_detection": dict(template["turn_detection"]),
     }

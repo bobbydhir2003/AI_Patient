@@ -7,7 +7,8 @@ Layer 2 (Realtime):   input_audio_noise_reduction = near_field in the
 Layer 3 (VAD tuning): threshold=0.65, silence_duration_ms=750, and
                       interrupt_response remains true.
 
-Also confirms: existing case→prompt→voice/model mapping is unchanged.
+Also confirms: existing case→prompt/model mapping is unchanged and the runtime
+sends no voice override (the hosted prompt owns the patient's voice).
 """
 import pytest
 
@@ -93,22 +94,32 @@ def test_prompt_agent_payload_server_vad_type():
     assert td["type"] == "server_vad"
 
 
+def test_prompt_agent_payload_sends_no_voice_override():
+    """The hosted OpenAI prompt owns the patient's voice, so the runtime must
+    NOT send a session `voice` field - its presence would override the hosted
+    prompt's selection."""
+    payload = _build_prompt_agent_payload()
+    output = payload["session"]["audio"]["output"]
+    assert "voice" not in output
+
+
 # -------------------------------------------------------------------
-# Existing case→prompt→voice/model mapping unchanged
+# Existing case→prompt/model mapping unchanged
 # -------------------------------------------------------------------
 
 def test_patient_config_mapping_unchanged(monkeypatch):
     """All four patients still resolve with the correct structural shape:
-    prompt_id, voice, model, and turn_detection. The classroom fix must
-    not break or alter any patient's identity/voice/model mapping."""
+    prompt_id, model, and turn_detection. The classroom fix must not break or
+    alter any patient's identity/model mapping. Voice is deliberately absent -
+    the hosted prompt owns it and the runtime sends no voice override."""
     settings = get_settings()
     for case_id, template in PATIENT_CONFIGS.items():
         monkeypatch.setattr(settings, template["prompt_id_setting"], f"pmpt_{case_id}_test", raising=False)
     for case_id in PATIENT_CONFIGS:
         cfg = resolve_patient_config(case_id, settings)
         assert cfg["prompt_id"] == f"pmpt_{case_id}_test"
-        assert cfg["voice"]  # an OpenAI voice
         assert cfg["model"]  # an OpenAI Realtime model
+        assert "voice" not in cfg  # hosted prompt owns the voice, never the runtime
         assert cfg["turn_detection"]["threshold"] == 0.65
         assert cfg["turn_detection"]["silence_duration_ms"] == 750
         assert cfg["turn_detection"]["prefix_padding_ms"] == 300

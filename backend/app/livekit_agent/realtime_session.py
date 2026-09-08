@@ -198,18 +198,17 @@ class RealtimeSession:
         if self._run_task is not None:
             return
         self._run_task = asyncio.ensure_future(self._run())
+        # Voice is intentionally not logged here for the prompt_agent path: the
+        # hosted prompt owns the voice and the runtime sends no voice override.
+        # The effective voice OpenAI applies is logged later from the server's
+        # session echo (realtime_effective_config).
         logger.info(
-            "realtime_session_starting session_id=%s identity=%s track=%s model=%s voice=%s",
+            "realtime_session_starting session_id=%s identity=%s track=%s model=%s",
             self._session_id, self._identity, self._track_sid,
             (
                 self._prompt_agent.config["model"]
                 if self._prompt_agent is not None
                 else self._settings.openai_realtime_model
-            ),
-            (
-                self._prompt_agent.config["voice"]
-                if self._prompt_agent is not None
-                else self._settings.openai_realtime_voice
             ),
         )
 

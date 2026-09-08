@@ -28,18 +28,19 @@ _BACKEND = pathlib.Path(__file__).resolve().parent.parent
 _LIVEKIT_DIR = _BACKEND / "app" / "livekit_agent"
 
 
-# --------------------------------------------------- case -> prompt/voice/model
-def test_every_configured_case_resolves_prompt_voice_model(monkeypatch):
+# --------------------------------------------------- case -> prompt/model
+def test_every_configured_case_resolves_prompt_and_model(monkeypatch):
     """With prompt IDs set, each configured case resolves to a Realtime config
-    carrying a hosted prompt_id, an OpenAI voice, and a model."""
+    carrying a hosted prompt_id and a model. The patient VOICE is deliberately
+    absent - the hosted prompt owns it and the runtime sends no voice override."""
     settings = get_settings()
     for case_id, template in PATIENT_CONFIGS.items():
         monkeypatch.setattr(settings, template["prompt_id_setting"], f"pmpt_{case_id}_123", raising=False)
     for case_id in PATIENT_CONFIGS:
         cfg = resolve_patient_config(case_id, settings)
         assert cfg["prompt_id"] == f"pmpt_{case_id}_123"
-        assert cfg["voice"]        # an OpenAI voice is always selected
         assert cfg["model"]        # an OpenAI Realtime model is always selected
+        assert "voice" not in cfg  # hosted prompt owns the voice, never the runtime
         # server_vad tuning is present (OpenAI Realtime owns turn detection).
         assert "silence_duration_ms" in cfg["turn_detection"]
 
