@@ -60,24 +60,12 @@ export interface ServiceHealth {
   lastError: string | null;
   checkedAt: string;
 }
-export interface AudioQueueHealth {
-  available: boolean;
-  status: string;
-  pending: number | null;
-  processing: number | null;
-  failed: number | null;
-  message: string;
-  checkedAt: string;
-}
 export interface StorageHealth {
   status: string;
   usedBytes: number | null;
   totalBytes: number | null;
   freeBytes: number | null;
   percentUsed: number | null;
-  audioCacheEntries: number | null;
-  audioCacheMaxEntries: number | null;
-  audioCacheBytes: number | null;
   checkedAt: string;
 }
 export interface OpenAIConfig {
@@ -88,39 +76,8 @@ export interface OpenAIConfig {
   maxOutputTokens: number | null;
   status: string;
 }
-export interface ElevenLabsConfig {
-  configured: boolean;
-  enabled: boolean;
-  model: string;
-  outputFormat: string;
-  timeoutSeconds: number | null;
-  status: string;
-}
-export interface ConversationSettings {
-  sentenceLevelStreaming: string;
-  patientStreaming: string;
-  disclosureControl: string;
-  motivationalInterviewing: string;
-  ageAppropriateLanguage: string;
-  caregiverRouting: string;
-  maxPatientResponseChars: number;
-}
 export interface AiConfiguration {
   openai: OpenAIConfig;
-  elevenlabs: ElevenLabsConfig;
-  conversation: ConversationSettings;
-}
-export interface VoiceRow {
-  caseId: string;
-  speakerId: string;
-  patientName: string;
-  speakerLabel: string;
-  image: string;
-  voiceName: string | null;
-  maskedVoiceId: string | null;
-  model: string | null;
-  status: string;
-  reason: string;
 }
 export interface CredentialStatus {
   service: string;
@@ -165,7 +122,6 @@ export interface WorkerRow {
   requestsPerMinute: number | null;
   httpInFlight: number | null;
   interviewInFlight: number | null;
-  ttsInFlight: number | null;
   assessmentInFlight: number | null;
   memoryMb: number | null;
   currentTask: string | null;
@@ -194,7 +150,6 @@ export interface Concurrency {
   scope: string;
   redis: RedisHealth;
   openai: ConcurrencyLane;
-  tts: ConcurrencyLane;
   assessment: ConcurrencyLane;
 }
 export interface InfraCheck {
@@ -211,7 +166,6 @@ export interface SystemLive {
   database: DatabaseHealth;
   redis: RedisHealth;
   openai: ServiceHealth;
-  elevenlabs: ServiceHealth;
   workers: WorkerFleet;
   concurrency: Concurrency;
   checks: InfraCheck[];
@@ -224,12 +178,9 @@ export interface SystemOverview {
   database: DatabaseHealth;
   redis: RedisHealth;
   openai: ServiceHealth;
-  elevenlabs: ServiceHealth;
-  audioQueue: AudioQueueHealth;
   storage: StorageHealth;
   aiConfig: AiConfiguration;
   credentials: CredentialStatus[];
-  voices: VoiceRow[];
   alerts: SystemAlert[];
   activity: SystemActivity[];
   workers: WorkerFleet;
@@ -247,32 +198,3 @@ export function fetchSystemLive(token: string): Promise<SystemLive> {
   return systemRequest<SystemLive>("/admin/system/live", token);
 }
 
-export function fetchSystemVoices(token: string): Promise<{ voices: VoiceRow[] }> {
-  return systemRequest<{ voices: VoiceRow[] }>("/admin/system/voices", token);
-}
-
-export function clearAudioCache(token: string): Promise<{ success: boolean; message: string }> {
-  return systemRequest("/admin/system/audio-cache/clear", token, { method: "POST" });
-}
-
-/** Fetch a real voice-preview audio clip as a playable blob URL. Throws ApiError
- *  (with the backend's message) when the voice is not available/configured. */
-export async function fetchVoicePreview(token: string, caseId: string): Promise<string> {
-  const url = `${API_BASE_URL}/api/admin/system/voices/${encodeURIComponent(caseId)}/preview`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!response.ok) {
-    let message = `Preview failed (status ${response.status})`;
-    try {
-      const body = (await response.json()) as { error?: { message?: string } };
-      if (body.error?.message) message = body.error.message;
-    } catch {
-      /* non-JSON */
-    }
-    throw new ApiError(message, response.status, "preview_failed");
-  }
-  const blob = await response.blob();
-  return URL.createObjectURL(blob);
-}

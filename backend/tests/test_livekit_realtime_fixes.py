@@ -1,11 +1,14 @@
-"""Fixes for the first live gpt-realtime-2.1 run:
+"""Fixes for the first live gpt-realtime-2.1 run, plus the PR 5/6 legacy
+removal:
 
-FIX 1 - dual-engine guard: when settings.realtime_engine_active is true, browser
-        student_text must NOT drive the legacy _handle_student_turn/_run_turn/
-        ElevenLabs pipeline (that caused the parallel ElevenLabs 401 -> "Patient
-        audio generation failed"). Browser SPEECH is ignored; a MANUAL typed
-        Send is routed through the Realtime engine (native voice). See worker.py
-        _on_data.
+FIX 1 - dual-engine guard: browser SpeechRecognition student_text must NOT
+        independently trigger a turn - the Realtime audio path already drives
+        every spoken turn natively. A MANUAL typed Send is routed to the
+        prompt_agent Realtime conversation - see worker.py's _on_data /
+        _submit_prompt_agent_typed_text. The legacy _handle_student_turn/
+        _run_turn/ElevenLabs/patient_adapter pipeline and the realtime-OFF
+        fallback have been removed entirely (PR 6): the worker now requires
+        prompt_agent to start at all (see start()'s fail-closed check).
 
 FIX 2 - barge-in WebSocket correction: cancel_active_response no longer sends the
         invalid output_audio_buffer.clear event, and only sends response.cancel
@@ -17,7 +20,6 @@ Deterministic, no network.
 import asyncio
 
 from app.core.config import get_settings
-from app.livekit_agent import patient_adapter
 from app.livekit_agent.realtime_session import RealtimeSession
 from tests.test_livekit_realtime_phase_a import _settings
 from tests.test_livekit_realtime_phase_d import _QueueConn
@@ -26,7 +28,7 @@ from tests.test_livekit_poc import _fake_rtc_for_worker
 
 
 # =====================================================================
-# FIX 1 - dual-engine suppression (worker _on_data)
+# FIX 1 / PR 5 - dual-engine suppression + prompt_agent typed-input routing
 # =====================================================================
 
 def _enable_realtime(monkeypatch):
@@ -37,32 +39,60 @@ def _enable_realtime(monkeypatch):
     return s
 
 
+class _FakePromptAgentRuntime:
+    def __init__(self):
+        self.submitted: list[tuple[str, str]] = []
+
+    async def submit_typed_text(self, client_turn_id, text):
+        self.submitted.append((client_turn_id, text))
+
+    async def aclose(self):
+        pass
+
+
+class _FakeReadySession:
+    """Stands in for the RealtimeSession start() would otherwise construct -
+    avoids needing a real OPENAI_REALTIME_CARLY_PROMPT_ID / network connection
+    just to prove the worker's data-packet ROUTING decision."""
+
+    is_ready = True
+    close_reason = None
+
+    async def wait_until_ready(self, timeout):
+        return True
+
+    async def cancel_active_response(self):
+        pass
+
+    async def aclose(self):
+        pass
+
+
 def _spies(monkeypatch, session):
-    calls = {"legacy": [], "realtime": [], "eleven": 0}
+    """Wires a fake prompt_agent runtime (as if a Realtime session were
+    already up), replacing _start_prompt_agent_session (not
+    _prompt_agent_runtime directly) so it survives session.start()'s own
+    realtime-session bring-up, which would otherwise overwrite it with a real
+    PromptAgentRuntime (or fail closed without a configured
+    OPENAI_REALTIME_CARLY_PROMPT_ID)."""
+    runtime = _FakePromptAgentRuntime()
 
-    async def fake_student_turn(text, cid):
-        calls["legacy"].append((text, cid))
+    async def fake_start_prompt_agent_session(settings, identity, track_sid):
+        session._prompt_agent_runtime = runtime
+        session._realtime_session = _FakeReadySession()
+        return session._realtime_session
 
-    async def fake_realtime_turn(cid, text, my_generation=None, *, reserved=False):
-        calls["realtime"].append((cid, text))
-
-    def fake_synth(*a, **k):
-        calls["eleven"] += 1
-        raise AssertionError("ElevenLabs must not be called on the Realtime path")
-
-    monkeypatch.setattr(session, "_handle_student_turn", fake_student_turn)
-    monkeypatch.setattr(session, "_handle_realtime_turn", fake_realtime_turn)
-    monkeypatch.setattr(patient_adapter, "synthesize_patient_audio_pcm", fake_synth)
-    return calls
+    monkeypatch.setattr(session, "_start_prompt_agent_session", fake_start_prompt_agent_session)
+    return runtime
 
 
 def test_realtime_active_browser_speech_is_suppressed(monkeypatch, engine):
-    """(1) legacy _run_turn NOT called, (2) ElevenLabs NOT called, (3) the
-    Realtime path is untouched by this browser SPEECH packet."""
+    """A browser SpeechRecognition SPEECH final never reaches prompt_agent -
+    the Realtime audio path owns every spoken turn."""
     with _fake_rtc_for_worker():
         session, room, _sid = _make_ready_session(engine, monkeypatch, remote_identities={"student-1": object()})
         _enable_realtime(monkeypatch)
-        calls = _spies(monkeypatch, session)
+        runtime = _spies(monkeypatch, session)
 
         async def drive():
             await session.start()
@@ -71,21 +101,20 @@ def test_realtime_active_browser_speech_is_suppressed(monkeypatch, engine):
 
         asyncio.run(drive())
 
-    assert calls["legacy"] == []       # legacy _handle_student_turn/_run_turn NOT called
-    assert calls["realtime"] == []      # speech is not manually routed either
-    assert calls["eleven"] == 0         # ElevenLabs NOT called
+    assert runtime.submitted == []        # speech is not manually routed either
     # ack still sent, flagged so the browser does not retry
     acks = _control_messages(room, "turn_ack")
     assert any(a.get("clientTurnId") == "browser-uuid-1" and a.get("semanticIgnored") is True for a in acks)
 
 
-def test_realtime_active_manual_typed_routes_to_realtime(monkeypatch, engine):
-    """(5) manual typed Send under Realtime is honored via the Realtime engine
-    (native voice), NEVER the legacy ElevenLabs path."""
+def test_realtime_active_manual_typed_routes_to_prompt_agent(monkeypatch, engine):
+    """PR 5: a manual typed Send under prompt_agent is handed straight to
+    PromptAgentRuntime.submit_typed_text - the SAME Realtime conversation
+    microphone turns use."""
     with _fake_rtc_for_worker():
         session, room, _sid = _make_ready_session(engine, monkeypatch, remote_identities={"student-1": object()})
         _enable_realtime(monkeypatch)
-        calls = _spies(monkeypatch, session)
+        runtime = _spies(monkeypatch, session)
 
         async def drive():
             await session.start()
@@ -94,30 +123,28 @@ def test_realtime_active_manual_typed_routes_to_realtime(monkeypatch, engine):
 
         asyncio.run(drive())
 
-    assert calls["realtime"] == [("browser-uuid-2", "please continue")]  # routed to Realtime engine
-    assert calls["legacy"] == []                                          # never the legacy path
-    assert calls["eleven"] == 0
+    assert runtime.submitted == [("browser-uuid-2", "please continue")]  # routed to prompt_agent
+    # ack sent, and the clientTurnId is tracked so a resend of the same id is a no-op.
+    acks = _control_messages(room, "turn_ack")
+    assert any(a.get("clientTurnId") == "browser-uuid-2" for a in acks)
+    assert "browser-uuid-2" in session._completed_turn_ids
 
 
-def test_legacy_mode_still_processes_browser_text(monkeypatch, engine):
-    """(4) with the Realtime engine OFF, browser student_text drives the legacy
-    pipeline exactly as before."""
+def test_realtime_engine_off_fails_the_job_closed(monkeypatch, engine):
+    """PR 6: the realtime-OFF legacy pipeline is gone - if the Realtime
+    engine is unavailable, start() shuts the job down rather than falling
+    back to any legacy voice path."""
     with _fake_rtc_for_worker():
-        session, room, _sid = _make_ready_session(engine, monkeypatch, remote_identities={"student-1": object()})
+        session, _room, _sid = _make_ready_session(engine, monkeypatch)
         s = get_settings()
-        monkeypatch.setattr(s, "livekit_realtime_engine_enabled", False)  # legacy mode
+        monkeypatch.setattr(s, "livekit_realtime_engine_enabled", False)
         assert s.realtime_engine_active is False
-        calls = _spies(monkeypatch, session)
+        shutdown_reasons = []
+        monkeypatch.setattr(session, "_shutdown_and_signal", lambda reason: shutdown_reasons.append(reason) or asyncio.sleep(0))
 
-        async def drive():
-            await session.start()
-            room.emit("data_received", _StudentTextPacket("how long?", "browser-uuid-3", source="speech_browser"))
-            await _run_until_idle()
+        asyncio.run(session.start())
 
-        asyncio.run(drive())
-
-    assert calls["legacy"] == [("how long?", "browser-uuid-3")]  # legacy path used, as before
-    assert calls["realtime"] == []
+    assert shutdown_reasons == ["realtime_engine_unavailable"]
 
 
 # =====================================================================

@@ -27,16 +27,14 @@ const TEST_TYPE_LABELS: Record<string, string> = {
   stress: "Stress (bounded)",
   soak: "Soak (capability)",
   ai_traffic: "AI Traffic",
-  tts_traffic: "TTS Traffic",
 };
 
 const PROVIDER_LABELS: Record<string, string> = {
   SIMULATED_AI: "Simulated AI (no provider spend)",
   REAL_OPENAI: "Real OpenAI",
-  REAL_OPENAI_TTS: "Real OpenAI + ElevenLabs",
 };
 
-const REAL_MODES = new Set(["REAL_OPENAI", "REAL_OPENAI_TTS"]);
+const REAL_MODES = new Set(["REAL_OPENAI"]);
 
 // Quick profiles (target users / duration seconds). These only pre-fill the
 // form; nothing runs until the operator clicks Start.
@@ -170,7 +168,7 @@ export function LoadCapacityTestingPage() {
     if (isReal) {
       const ok = window.confirm(
         `⚠ REAL PROVIDER COST WARNING\n\n"${PROVIDER_LABELS[providerMode]}" sends real, billable traffic to ` +
-        `${providerMode === "REAL_OPENAI_TTS" ? "OpenAI and ElevenLabs" : "OpenAI"} for ` +
+        `OpenAI for ` +
         `${targetUsers} virtual students over ${durationSeconds}s. This will incur provider charges.\n\n` +
         `Continue and start paid traffic?`,
       );
@@ -428,7 +426,6 @@ function CapacityReport({ cap }: { cap: CapacityAnalysis }) {
 
 function TelemetryBlocks({ telemetry }: { telemetry: MetricsResponse["telemetry"] }) {
   const oa = telemetry.providers.openai;
-  const el = telemetry.providers.elevenlabs;
   const srv = telemetry.infrastructure.server as Record<string, unknown>;
   const pool = telemetry.infrastructure.dbPool as Record<string, unknown>;
   const cpu = srv.available ? `${srv.cpu_percent}%` : "Not available";
@@ -440,7 +437,6 @@ function TelemetryBlocks({ telemetry }: { telemetry: MetricsResponse["telemetry"
         <dl className="pt-kv">
           <dt>OpenAI req/min</dt><dd>{num((oa.requests_per_minute as number) ?? null)}</dd>
           <dt>OpenAI success</dt><dd>{oa.success_rate == null ? "Not available" : `${((oa.success_rate as number) * 100).toFixed(1)}%`}</dd>
-          <dt>ElevenLabs req/min</dt><dd>{num((el.requests_per_minute as number) ?? null)}</dd>
         </dl>
         <p className="pt-muted" style={{ fontSize: "0.75rem" }}>From the backend's own real provider telemetry.</p>
       </div>

@@ -39,10 +39,17 @@ _DEFAULT_REASONING_EFFORT = "low"
 # server_vad tuning requested for the prompt_agent runtime. OpenAI Realtime owns
 # speech/VAD entirely in this mode (no Deepgram/Silero/Smart Turn), so these are
 # the only turn-detection knobs.
+#
+# Classroom-safe defaults (conservative, not aggressive):
+#   threshold 0.65  - reduces false VAD triggers from nearby students' voices
+#                     while still detecting a quiet student at arm's length.
+#   silence_duration_ms 750 - avoids premature end-of-turn from brief pauses
+#                     caused by ambient classroom noise.
+# prefix_padding_ms 300 is unchanged (captures the start of an utterance).
 _DEFAULT_TURN_DETECTION: dict[str, Any] = {
-    "threshold": 0.50,
+    "threshold": 0.65,
     "prefix_padding_ms": 300,
-    "silence_duration_ms": 500,
+    "silence_duration_ms": 750,
 }
 
 

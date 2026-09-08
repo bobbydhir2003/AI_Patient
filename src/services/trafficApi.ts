@@ -89,7 +89,6 @@ export interface TrafficOverview {
     requests_last_5m: number;
   };
   openai: ProviderBlock;
-  elevenlabs: ProviderBlock;
   assessment: {
     pending: number;
     processing: number;
@@ -109,7 +108,6 @@ export interface TrafficOverview {
       wait_p95_ms: number | null;
       timeouts_5m: number;
     };
-    tts: { active: number; limit: number };
   };
   server: {
     available: boolean;
@@ -157,7 +155,6 @@ export interface HistoryPoint {
   active_users: number;
   http_rpm: number;
   openai_rpm: number;
-  elevenlabs_rpm: number;
   rate_limited: number;
 }
 
@@ -165,7 +162,6 @@ export interface TrafficCapacity {
   deployment_mode: string;
   app_workers: number;
   max_ai_interview_concurrency: number;
-  max_tts_concurrency: number;
   assessment_workers: number;
   rate_limiter_scope: string;
   notes: { global_rate_limiting: string; autoscaling: string };
@@ -183,7 +179,6 @@ export interface TrafficCapacity {
     };
     login_throttle: { enabled: boolean; max_failed_attempts: number; lockout_seconds: number };
     interview_concurrency: { active: number; limit: number };
-    tts_concurrency: { active: number; limit: number };
     assessment_execution: string;
     retry_backoff: { enabled: boolean; max_retries: number };
     circuit_breaker: string;

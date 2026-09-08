@@ -121,14 +121,14 @@ class SpeechStyleOut(CamelModel):
 
 
 class InterviewConfigOut(CamelModel):
-    """Student-safe interview feature flags (never keys or internal config)."""
+    """Student-safe interview configuration (never keys or internal config).
 
-    streaming_enabled: bool = False
-    sentence_pipelining_enabled: bool = False
-    # Phase B: which voice architecture InterviewPage should use. Always one
-    # of "legacy"/"livekit" (Settings.voice_engine's own validator already
-    # guarantees this - see core/config.py). Never a key, never a secret.
-    voice_engine: str = "legacy"
+    The patient conversation runs exclusively through the LiveKit + OpenAI
+    Realtime voice path, so this only advertises the voice engine. "livekit"
+    is the only supported value (Settings.voice_engine's own validator already
+    guarantees this - see core/config.py)."""
+
+    voice_engine: str = "livekit"
 
 
 class TurnSegmentOut(CamelModel):

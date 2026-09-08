@@ -1,15 +1,10 @@
-"""Tests for the Phase 1 LiveKit POC: token endpoint (app/api/livekit.py),
-token minting (app/services/livekit_token_service.py), and the agent adapter
-(app/livekit_agent/patient_adapter.py, worker.py).
+"""Tests for the LiveKit token endpoint (app/api/livekit.py), token minting
+(app/services/livekit_token_service.py), and worker.py's job/session
+lifecycle (fixed identity, per-job isolation, disconnect/shutdown).
 
 Nothing here touches a real LiveKit Cloud connection - the `livekit`/
 `livekit-api` packages are used exactly as installed (real JWT signing, real
-SDK types), but no network calls are made. The two most important tests in
-this file (test_generate_and_persist_turn_uses_interview_slot and
-test_synthesize_patient_audio_pcm_uses_tts_slot) prove the POC agent goes
-through the SAME Redis-backed concurrency semaphores as the production
-/api/interviews and /api/voice paths - it is not a second, ungoverned
-provider-calling path.
+SDK types), but no network calls are made.
 """
 import asyncio
 import contextlib
@@ -20,13 +15,10 @@ import types
 import jwt
 import pytest
 
-from app.core.concurrency import interview_slot, tts_slot
 from app.core.config import get_settings
-from app.livekit_agent import patient_adapter
 from app.services import livekit_token_service
 from tests.conftest import make_client
 from tests.test_auth import auth_header, login_token, make_admin, register
-from tests.test_voice import FakeElevenLabsClient, give_carly_a_placeholder, give_carly_a_voice_id, seed_owned_session
 
 LIVEKIT_URL = "wss://fake-project.livekit.cloud"
 LIVEKIT_API_KEY = "test-lk-key"
@@ -194,333 +186,6 @@ def test_token_not_configured_returns_503(engine, monkeypatch):
     assert r.json()["error"]["code"] == "livekit_not_configured"
 
 
-# =================================================================
-# Agent adapter: proof the SAME production semaphores/pipeline are reused
-# =================================================================
-
-def test_generate_and_persist_turn_uses_interview_slot(monkeypatch, engine, db_session):
-    """TEST F (critical): the POC agent's OpenAI call goes through the exact
-    same distributed interview_slot() every FastAPI worker uses - not a
-    second, ungoverned code path."""
-    from tests.conftest import FakeOpenAIClient
-
-    calls: list[str] = []
-    real_enter = interview_slot.__enter__
-    real_exit = interview_slot.__exit__
-
-    def spy_enter(self):
-        calls.append("enter")
-        return real_enter(self)
-
-    def spy_exit(self, *exc):
-        calls.append("exit")
-        return real_exit(self, *exc)
-
-    monkeypatch.setattr(interview_slot, "__enter__", spy_enter)
-    monkeypatch.setattr(interview_slot, "__exit__", spy_exit)
-
-    fake_openai = FakeOpenAIClient(text="I've had this pain for about a week.")
-    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
-
-    _user, session_id = seed_owned_session(db_session, case_id="carly")
-
-    result = patient_adapter.generate_and_persist_turn(
-        db_session, session_id=session_id, case_id="carly",
-        question="How long have you had this pain?", client_turn_id="turn-1",
-    )
-
-    assert calls == ["enter", "exit"]
-    assert fake_openai.calls, "OpenAI was never actually invoked"
-    assert result.patient_text == "I've had this pain for about a week."
-    assert result.replayed is False
-
-
-def test_generate_and_persist_turn_is_idempotent_on_client_turn_id(monkeypatch, engine, db_session):
-    """TEST K: a retried/duplicate client_turn_id (e.g. a reconnect resending
-    the same message) replays the saved turn instead of generating (and
-    billing) a second time - the SAME idempotency contract production uses."""
-    from tests.conftest import FakeOpenAIClient
-
-    fake_openai = FakeOpenAIClient(text="Same answer every time.")
-    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
-
-    _user, session_id = seed_owned_session(db_session, case_id="carly")
-
-    first = patient_adapter.generate_and_persist_turn(
-        db_session, session_id=session_id, case_id="carly",
-        question="Where does it hurt?", client_turn_id="dup-turn",
-    )
-    second = patient_adapter.generate_and_persist_turn(
-        db_session, session_id=session_id, case_id="carly",
-        question="Where does it hurt?", client_turn_id="dup-turn",
-    )
-
-    assert len(fake_openai.calls) == 1  # NOT called twice
-    assert first.replayed is False
-    assert second.replayed is True
-    assert second.patient_turn_id == first.patient_turn_id
-    assert second.patient_text == first.patient_text
-
-
-def test_generate_and_persist_turn_raises_for_unknown_session(db_session, engine):
-    with pytest.raises(patient_adapter.LiveKitPocSessionNotFoundError):
-        patient_adapter.generate_and_persist_turn(
-            db_session, session_id="does-not-exist", case_id="carly",
-            question="Hi", client_turn_id="t1",
-        )
-
-
-def test_synthesize_patient_audio_pcm_uses_tts_slot(monkeypatch, engine):
-    """TEST G (critical): the POC agent's ElevenLabs call goes through the
-    exact same distributed tts_slot() every FastAPI worker uses."""
-    give_carly_a_voice_id(monkeypatch)
-    fake_el = FakeElevenLabsClient(chunks=(b"\x01\x02", b"\x03\x04"))
-    monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
-
-    calls: list[str] = []
-    real_acquire = tts_slot.acquire
-    real_release = tts_slot.release
-
-    def spy_acquire(self):
-        calls.append("acquire")
-        return real_acquire(self)
-
-    def spy_release(self):
-        calls.append("release")
-        return real_release(self)
-
-    monkeypatch.setattr(tts_slot, "acquire", spy_acquire)
-    monkeypatch.setattr(tts_slot, "release", spy_release)
-
-    pcm = patient_adapter.synthesize_patient_audio_pcm(case_id="carly", text="Hello there.")
-
-    assert calls == ["acquire", "release"]
-    assert pcm == b"\x01\x02\x03\x04"
-
-
-def test_synthesize_patient_audio_pcm_resolves_correct_voice_profile(monkeypatch, engine):
-    """TEST I: the SAME voice_profile_loader/speech_style_mapper resolve the
-    voice id/model, and the adapter requests raw PCM (not the production MP3
-    default) so no new audio-decoding dependency is required."""
-    give_carly_a_voice_id(monkeypatch)
-    fake_el = FakeElevenLabsClient()
-    monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
-
-    patient_adapter.synthesize_patient_audio_pcm(case_id="carly", text="Hello there.")
-
-    assert len(fake_el.calls) == 1
-    call = fake_el.calls[0]
-    assert call["voice_id"] == "real-voice-id"
-    assert call["output_format"] == "pcm_16000"
-    assert call["text"] == "Hello there."
-
-
-def test_synthesize_patient_audio_pcm_returns_none_when_voice_not_configured(monkeypatch, engine):
-    """No silent fallback to browser TTS anywhere in this module - an
-    unconfigured voice simply yields no audio, and the caller (worker.py)
-    surfaces that as an explicit POC failure."""
-    give_carly_a_placeholder(monkeypatch)
-    fake_el = FakeElevenLabsClient()
-    monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
-
-    pcm = patient_adapter.synthesize_patient_audio_pcm(case_id="carly", text="Hello there.")
-
-    assert pcm is None
-    assert fake_el.calls == []  # never even attempted
-
-
-def test_synthesize_patient_audio_pcm_returns_none_when_tts_at_capacity(monkeypatch, engine):
-    settings = get_settings()
-    give_carly_a_voice_id(monkeypatch)
-    fake_el = FakeElevenLabsClient()
-    monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
-    # Zero capacity + zero wait -> acquire() cannot possibly succeed.
-    monkeypatch.setattr(settings, "max_concurrent_tts_requests", 0)
-    monkeypatch.setattr(settings, "tts_wait_seconds", 0.0)
-
-    pcm = patient_adapter.synthesize_patient_audio_pcm(case_id="carly", text="Hello there.")
-
-    assert pcm is None
-    assert fake_el.calls == []
-
-
-# =================================================================
-# Camden caregiver-primary case: speaker/voice-key routing regression.
-#
-# Root cause this section guards against: the LiveKit adapter used to call
-# load_voice_profile(case_id) with NO speaker_id, defaulting to "patient" -
-# but Camden's case file (caregiver_primary_only=true) only registers a
-# voice under "caregiver", so the loader's speaker-match safety gate (see
-# voice_profile_loader.py) always reported "unavailable" and ElevenLabs was
-# never reached, for every single Camden turn. See patient_adapter.py's
-# module docstring ("Speaker/voice routing parity") for the fix.
-# =================================================================
-
-def test_generate_and_persist_turn_resolves_camden_to_mother_and_caregiver_voice_key(
-    monkeypatch, engine, db_session
-):
-    """TEST A/B: Camden's caregiver-primary lock resolves the conversational
-    speaker to 'mother' (speaker_router.resolve_for_case's deterministic
-    rule, same as legacy mode) and the TTS voice_key to 'caregiver'
-    (speaker_router.participant_meta's voice_key for the mother participant)
-    - not the 'patient' default that caused every Camden LiveKit turn to
-    fail before ever reaching ElevenLabs."""
-    from tests.conftest import FakeOpenAIClient
-
-    fake_openai = FakeOpenAIClient(text="He's been much more tired lately.")
-    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
-
-    _user, session_id = seed_owned_session(db_session, case_id="camden")
-
-    result = patient_adapter.generate_and_persist_turn(
-        db_session, session_id=session_id, case_id="camden",
-        question="Can you tell me what's been going on?", client_turn_id="camden-turn-1",
-    )
-
-    assert result.replayed is False
-    assert result.voice_key == "caregiver"
-
-    from app.repositories.transcript_repository import TranscriptRepository
-
-    patient_turn = TranscriptRepository(db_session).get_by_index(session_id, 1)
-    assert patient_turn.speaker_id == "mother"
-    assert patient_turn.speaker_label == "Camden's Mother"
-
-
-def test_generate_and_persist_turn_camden_routes_to_mother_even_when_child_is_addressed(
-    monkeypatch, engine, db_session
-):
-    """The caregiver-primary lock overrides even a direct, child-addressed
-    question (matches speaker_router.resolve_for_case's documented rule and
-    test_camden_participants.py's legacy-mode assertion of the same rule) -
-    proves the LiveKit path doesn't have its own, divergent routing."""
-    from tests.conftest import FakeOpenAIClient
-
-    fake_openai = FakeOpenAIClient(text="He usually tells me his legs hurt.")
-    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
-
-    _user, session_id = seed_owned_session(db_session, case_id="camden")
-
-    result = patient_adapter.generate_and_persist_turn(
-        db_session, session_id=session_id, case_id="camden",
-        question="Camden, where does it hurt?", client_turn_id="camden-turn-2",
-    )
-
-    assert result.voice_key == "caregiver"
-
-
-def test_generate_and_persist_turn_carly_still_resolves_patient_voice_key(monkeypatch, engine, db_session):
-    """Regression: a plain single-speaker case must keep resolving to the
-    'patient' voice_key exactly as before this fix - no accidental caregiver
-    routing for cases that never set caregiver_primary_only."""
-    from tests.conftest import FakeOpenAIClient
-
-    fake_openai = FakeOpenAIClient(text="I've had this pain for about a week.")
-    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
-
-    _user, session_id = seed_owned_session(db_session, case_id="carly")
-
-    result = patient_adapter.generate_and_persist_turn(
-        db_session, session_id=session_id, case_id="carly",
-        question="How long have you had this pain?", client_turn_id="carly-turn-1",
-    )
-
-    assert result.voice_key == "patient"
-
-    from app.repositories.transcript_repository import TranscriptRepository
-
-    patient_turn = TranscriptRepository(db_session).get_by_index(session_id, 1)
-    assert patient_turn.speaker_id == "patient"
-
-
-def test_generate_and_persist_turn_camden_replay_preserves_caregiver_voice_key(monkeypatch, engine, db_session):
-    """A duplicate/retried clientTurnId replays the saved turn (no second
-    OpenAI call) but must still report the SAME resolved voice_key - derived
-    from the persisted turn's own speaker_id, not re-routed from scratch."""
-    from tests.conftest import FakeOpenAIClient
-
-    fake_openai = FakeOpenAIClient(text="Same answer every time.")
-    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
-
-    _user, session_id = seed_owned_session(db_session, case_id="camden")
-
-    first = patient_adapter.generate_and_persist_turn(
-        db_session, session_id=session_id, case_id="camden",
-        question="What's been going on?", client_turn_id="camden-dup",
-    )
-    second = patient_adapter.generate_and_persist_turn(
-        db_session, session_id=session_id, case_id="camden",
-        question="What's been going on?", client_turn_id="camden-dup",
-    )
-
-    assert len(fake_openai.calls) == 1  # NOT called twice
-    assert first.voice_key == "caregiver"
-    assert second.replayed is True
-    assert second.voice_key == "caregiver"
-
-
-def test_synthesize_patient_audio_pcm_resolves_camden_caregiver_voice(monkeypatch, engine):
-    """TEST C/D/G (the core fix): requesting voice_key='caregiver' for Camden
-    resolves the case file's real, already-configured caregiver voice id and
-    genuinely reaches ElevenLabs - proving the bug (which always requested
-    the default 'patient' key and never got this far) is fixed. Camden's
-    checked-in case file already ships a real voice id, so no test override
-    is needed (unlike Carly's placeholder-by-default fixture)."""
-    fake_el = FakeElevenLabsClient(chunks=(b"\x01\x02", b"\x03\x04"))
-    monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
-
-    pcm = patient_adapter.synthesize_patient_audio_pcm(
-        case_id="camden", text="He's been sleeping more than usual.", voice_key="caregiver",
-    )
-
-    assert pcm == b"\x01\x02\x03\x04"
-    assert len(fake_el.calls) == 1
-    assert fake_el.calls[0]["voice_id"] == "GP1bgf0sjoFuuHkyrg8E"  # camden.json's caregiver voice_id
-
-
-def test_synthesize_patient_audio_pcm_still_refuses_camden_patient_voice_key(monkeypatch, engine):
-    """Requirement: the fix must NOT weaken the loader's speaker-match safety
-    gate. Requesting the CHILD's ('patient') voice_key for Camden - exactly
-    the old, buggy default the LiveKit adapter used to pass - must still be
-    refused, since Camden's case file only ever configures a voice under
-    'caregiver'. Proves TTS success is achieved by resolving the RIGHT key,
-    not by loosening this rule."""
-    fake_el = FakeElevenLabsClient()
-    monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
-
-    pcm = patient_adapter.synthesize_patient_audio_pcm(
-        case_id="camden", text="irrelevant", voice_key="patient",
-    )
-
-    assert pcm is None
-    assert fake_el.calls == []  # ElevenLabs never even attempted
-
-
-def test_synthesize_patient_audio_pcm_camden_missing_caregiver_voice_fails_closed(monkeypatch, engine):
-    """A genuine configuration failure (no caregiver voice configured at all)
-    must still produce an explicit None (-> "failed" status upstream), never
-    a silent fallback - distinguishes a config-gate failure from a real
-    ElevenLabs provider failure, both of which must fail closed."""
-    from app.patient_engine import case_loader
-
-    case = case_loader.load_case("camden")
-    monkeypatch.setattr(case.voice_profile, "voice_id", "PASTE_CAMDEN_VOICE_ID_HERE")
-    fake_el = FakeElevenLabsClient()
-    monkeypatch.setattr(patient_adapter, "get_elevenlabs_client", lambda: fake_el)
-
-    pcm = patient_adapter.synthesize_patient_audio_pcm(
-        case_id="camden", text="irrelevant", voice_key="caregiver",
-    )
-
-    assert pcm is None
-    assert fake_el.calls == []
-
-
-# =================================================================
-# Phase 2 persistent worker (app/livekit_agent/worker.py) - WorkerOptions /
-# JobContext based, replaces the Phase 1 --room/--session-id/--case-id CLI
-# script.
-# =================================================================
 
 def test_worker_refuses_to_start_without_full_livekit_configuration(monkeypatch):
     """The persistent worker must fail closed (never start, never invent
@@ -604,14 +269,6 @@ def test_job_request_handler_sets_fixed_agent_identity():
     assert captured["identity"] == AGENT_PARTICIPANT_IDENTITY == "patient-agent"
 
 
-def test_frame_size_matches_20ms_at_16khz_mono_16bit():
-    """640 bytes = 320 samples x 2 bytes/sample = 20ms @ 16kHz mono PCM16 -
-    a conventional WebRTC frame duration. Unchanged from Phase 1."""
-    from app.livekit_agent.worker import _FRAME_BYTES
-
-    assert _FRAME_BYTES == 640
-
-
 # --------------------------------------------------------------- PocAgentSession integration
 # PocAgentSession.start()/_publish_pcm do `import livekit.rtc as rtc` at call
 # time. Python's `import a.b as c` binds via getattr(sys.modules['a'], 'b'),
@@ -628,9 +285,13 @@ def _fake_rtc_for_worker():
     fake_rtc = types.ModuleType("livekit.rtc")
 
     class _AudioSource:
-        def __init__(self, sample_rate, num_channels):
+        def __init__(self, sample_rate, num_channels, queue_size_ms=None):
             self.sample_rate = sample_rate
             self.num_channels = num_channels
+            # prompt_agent's small-playout-buffer barge-in fix passes this;
+            # the fake has no real queue to size, so it is accepted and
+            # otherwise unused.
+            self.queue_size_ms = queue_size_ms
             # Phase D2: observable so interrupt tests can prove clear_queue()
             # was actually called, and captured_frames so a test can assert
             # publication genuinely stopped (not just that the task ended).
@@ -726,119 +387,36 @@ class _FakeAgentRoom:
             handler(*args)
 
 
-def _seed_session_with_factory(engine, case_id="carly"):
-    from sqlalchemy.orm import sessionmaker
+def _enable_realtime_and_fake_session(monkeypatch, session):
+    """Bypasses the real OpenAI Realtime handshake so start() proceeds past
+    its fail-closed check - these tests are about disconnect/shutdown and
+    per-job isolation mechanics, not the Realtime session itself."""
+    settings = get_settings()
+    monkeypatch.setattr(settings, "livekit_realtime_engine_enabled", True)
+    monkeypatch.setattr(settings, "openai_api_key", "sk-x")
 
-    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    db = factory()
-    try:
-        _user, session_id = seed_owned_session(db, case_id=case_id)
-    finally:
-        db.close()
-    return factory, session_id
+    class _FakeRealtimeSession:
+        input_sample_rate = 24000
+        is_ready = True
+        close_reason = None
 
+        async def start(self):
+            pass
 
-async def _run_one_turn(room, session_id, case_id) -> list[str]:
-    from app.livekit_agent.worker import PocAgentSession
+        async def wait_until_ready(self, timeout):
+            return True
 
-    shutdown_reasons: list[str] = []
-    session = PocAgentSession(
-        room=room, session_id=session_id, case_id=case_id,
-        on_shutdown=lambda reason: shutdown_reasons.append(reason),
-    )
-    await session.start()
+        async def cancel_active_response(self):
+            pass
 
-    class _Packet:
-        topic = "student_text"
-        data = json.dumps({"text": "How are you feeling today?", "clientTurnId": "t1"}).encode()
+        async def aclose(self):
+            pass
 
-    room.emit("data_received", _Packet())
-    for _ in range(25):  # let the fire-and-forget turn task run to completion
-        await asyncio.sleep(0.02)
-    return shutdown_reasons
+    async def fake_start_prompt_agent_session(settings, identity, track_sid):
+        session._realtime_session = _FakeRealtimeSession()
+        return session._realtime_session
 
-
-def test_poc_agent_session_turn_uses_interview_slot(monkeypatch, engine):
-    """TEST H5 (critical, Phase 2): the NEW WorkerOptions/JobContext-driven
-    PocAgentSession - not just patient_adapter.py in isolation - still routes
-    OpenAI generation through the SAME interview_slot() semaphore. Proves the
-    Phase 2 rewrite (room/session/case_id now come from ctx.job.metadata
-    instead of argparse) did not introduce a second, ungoverned path."""
-    from tests.conftest import FakeOpenAIClient
-
-    factory, session_id = _seed_session_with_factory(engine)
-    monkeypatch.setattr("app.livekit_agent.worker.get_db_factory", lambda: factory)
-
-    fake_openai = FakeOpenAIClient(text="I've had it for a few days.")
-    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
-    # No configured voice -> synthesize_patient_audio_pcm returns None cleanly
-    # (already covered elsewhere); this test only cares about interview_slot.
-
-    calls: list[str] = []
-    real_enter = interview_slot.__enter__
-    real_exit = interview_slot.__exit__
-
-    def spy_enter(self):
-        calls.append("enter")
-        return real_enter(self)
-
-    def spy_exit(self, *exc):
-        calls.append("exit")
-        return real_exit(self, *exc)
-
-    monkeypatch.setattr(interview_slot, "__enter__", spy_enter)
-    monkeypatch.setattr(interview_slot, "__exit__", spy_exit)
-
-    with _fake_rtc_for_worker():
-        room = _FakeAgentRoom()
-        asyncio.run(_run_one_turn(room, session_id, "carly"))
-
-    assert calls == ["enter", "exit"]
-    assert fake_openai.calls, "OpenAI was never actually invoked through PocAgentSession"
-
-
-def test_poc_agent_session_turn_uses_tts_slot(monkeypatch, engine):
-    """TEST H6 (critical, Phase 2): same proof as above for the ElevenLabs
-    tts_slot() semaphore, driven through PocAgentSession end-to-end."""
-    factory, session_id = _seed_session_with_factory(engine)
-    monkeypatch.setattr("app.livekit_agent.worker.get_db_factory", lambda: factory)
-
-    from tests.conftest import FakeOpenAIClient
-
-    fake_openai = FakeOpenAIClient(text="I've had it for a few days.")
-    monkeypatch.setattr("app.patient_engine.get_openai_client", lambda: fake_openai)
-
-    give_carly_a_voice_id(monkeypatch)
-    fake_el = FakeElevenLabsClient(chunks=(b"\x01\x02", b"\x03\x04"))
-    monkeypatch.setattr("app.livekit_agent.patient_adapter.get_elevenlabs_client", lambda: fake_el)
-
-    calls: list[str] = []
-    real_acquire = tts_slot.acquire
-    real_release = tts_slot.release
-
-    def spy_acquire(self):
-        calls.append("acquire")
-        return real_acquire(self)
-
-    def spy_release(self):
-        calls.append("release")
-        return real_release(self)
-
-    monkeypatch.setattr(tts_slot, "acquire", spy_acquire)
-    monkeypatch.setattr(tts_slot, "release", spy_release)
-
-    with _fake_rtc_for_worker():
-        room = _FakeAgentRoom()
-        asyncio.run(_run_one_turn(room, session_id, "carly"))
-
-    assert calls == ["acquire", "release"]
-    # Filtered to the turn-lifecycle topic only - published_data also now
-    # carries agent_ready/turn_ack control messages (topic "agent_control"),
-    # which have no "status" key at all (see Phase C's protocol).
-    statuses = [
-        p[1]["status"] for p in room.local_participant.published_data if p[0] == "patient_turn_status"
-    ]
-    assert statuses == ["speaking_started", "speaking_ended"]
+    monkeypatch.setattr(session, "_start_prompt_agent_session", fake_start_prompt_agent_session)
 
 
 def test_participant_disconnect_triggers_idempotent_shutdown(monkeypatch, engine):
@@ -859,6 +437,7 @@ def test_participant_disconnect_triggers_idempotent_shutdown(monkeypatch, engine
         # verification - bypass the real DB existence check (see Phase C's
         # _verify_session_exists) rather than seeding an unrelated session.
         monkeypatch.setattr(session, "_verify_session_exists", lambda: True)
+        _enable_realtime_and_fake_session(monkeypatch, session)
         asyncio.run(session.start())
 
         class _Student:
@@ -901,6 +480,8 @@ def test_two_jobs_do_not_share_state(monkeypatch, engine):
         # sessions purely to satisfy it.
         monkeypatch.setattr(session_a, "_verify_session_exists", lambda: True)
         monkeypatch.setattr(session_b, "_verify_session_exists", lambda: True)
+        _enable_realtime_and_fake_session(monkeypatch, session_a)
+        _enable_realtime_and_fake_session(monkeypatch, session_b)
         asyncio.run(session_a.start())
         asyncio.run(session_b.start())
 

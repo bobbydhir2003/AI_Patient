@@ -33,7 +33,6 @@ import { TrafficDashboardPage } from "./pages/admin/system/TrafficDashboardPage"
 import { LoadCapacityTestingPage } from "./pages/admin/system/LoadCapacityTestingPage";
 import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
 import { AiConfigurationPage } from "./pages/admin/system/AiConfigurationPage";
-import { PatientVoicesPage } from "./pages/admin/system/PatientVoicesPage";
 import { AiUsageCostPage } from "./pages/admin/system/AiUsageCostPage";
 import { ApiCredentialsPage } from "./pages/admin/system/ApiCredentialsPage";
 import { SystemHealthPage } from "./pages/admin/system/subpages";
@@ -117,7 +116,6 @@ function App() {
             element={<LoadCapacityTestingPage />}
           />
           <Route path="system/usage" element={<AiUsageCostPage />} />
-          <Route path="system/voices" element={<PatientVoicesPage />} />
           <Route path="system/config" element={<AiConfigurationPage />} />
           <Route path="system/credentials" element={<ApiCredentialsPage />} />
           <Route path="system/health" element={<SystemHealthPage />} />

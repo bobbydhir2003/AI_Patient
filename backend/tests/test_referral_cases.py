@@ -12,9 +12,6 @@ def client(student_client):
 
 from app.core.constants import REFERRAL_CASE_IDS, STANDARD_CASE_IDS
 from app.patient_engine.case_loader import load_all_cases, load_case
-from app.patient_engine.fact_selector import select_facts
-from app.patient_engine.prompt_builder import build_developer_prompt
-from app.patient_engine.topic_classifier import classify
 
 SRC = Path(__file__).resolve().parent.parent.parent / "src"
 
@@ -91,29 +88,15 @@ def test_referral_session_stores_category_and_capabilities(client):
     assert std["assessmentCapabilities"] == ["standard_interview"]
 
 
-def test_referral_prompt_contains_own_hidden_context_only():
+def test_referral_case_has_own_hidden_context():
+    """Each referral case carries its own hidden educational context in its case
+    data. (The old text-generation prompt-builder path was removed; the patient
+    persona/hidden context now lives in the case file + the hosted OpenAI
+    Realtime prompt.)"""
     for case_id in REFERRAL_CASE_IDS:
         case = load_case(case_id)
         assert case.referral_context is not None
-        prompt = build_developer_prompt(case, select_facts(case, classify("How are you feeling?")))
-        # the AI patient gets its own hidden context...
-        assert case.referral_context.hidden_context[:40] in prompt
-        assert "Never say or hint that the student should refer you" in prompt
-        # ...and never another case's hidden context or patient names
-        for other_id in REFERRAL_CASE_IDS:
-            if other_id == case_id:
-                continue
-            other = load_case(other_id)
-            assert other.referral_context.hidden_context[:40] not in prompt
-            assert not re.search(
-                rf"\b{other.display_name.lower()}\b", prompt.lower()
-            ), f"{case_id} prompt leaks {other.display_name}"
-
-
-def test_standard_cases_have_no_referral_block():
-    camden = load_case("camden")
-    prompt = build_developer_prompt(camden, [])
-    assert "HIDDEN CONTEXT" not in prompt
+        assert case.referral_context.hidden_context.strip()
 
 
 def test_referral_facts_use_progressive_disclosure():

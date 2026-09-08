@@ -97,104 +97,12 @@ def build_session_update(settings: "Settings") -> dict[str, Any]:
     }
 
 
-NATIVE_ALLOWED_FACTS_TOOL = "get_allowed_patient_facts"
-NATIVE_STAGE_RESPONSE_TOOL = "stage_patient_response"
-
-
-def native_agent_tools() -> list[dict[str, Any]]:
-    """The complete, deliberately narrow capability surface for native mode.
-
-    Neither tool accepts a session/case identifier; those are bound to the
-    server-side worker job and can therefore never be redirected by model
-    arguments to another interview.
-    """
-    return [
-        {
-            "type": "function",
-            "name": NATIVE_ALLOWED_FACTS_TOOL,
-            "description": (
-                "Required before every clinical patient answer. Returns only the "
-                "patient facts the PT backend authorizes for the current student turn."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
-        },
-        {
-            "type": "function",
-            "name": NATIVE_STAGE_RESPONSE_TOOL,
-            "description": (
-                "Submit natural patient wording and the fact IDs it uses for backend "
-                "authorization. This stages no database mutation."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "authorization_id": {"type": "string"},
-                    "patient_text": {"type": "string"},
-                    "used_fact_ids": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["authorization_id", "patient_text", "used_fact_ids"],
-                "additionalProperties": False,
-            },
-        },
-    ]
-
-
-def build_native_agent_session_update(
-    settings: "Settings", *, instructions: str,
-) -> dict[str, Any]:
-    """Configure the normal Realtime conversation as the native voice agent.
-
-    The first model response for every user turn is forced through the read-only
-    fact tool. The worker subsequently forces the staging tool, validates its
-    arguments, and only then permits an audio response. This is enforcement,
-    not a prompt-only request.
-    """
-    eagerness = settings.openai_realtime_semantic_eagerness
-    return {
-        "type": "session.update",
-        "session": {
-            "type": "realtime",
-            "model": settings.openai_realtime_native_agent_model,
-            "instructions": instructions,
-            "output_modalities": ["audio"],
-            "tools": native_agent_tools(),
-            "tool_choice": {
-                "type": "function", "name": NATIVE_ALLOWED_FACTS_TOOL,
-            },
-            "audio": {
-                "input": {
-                    "format": dict(_PCM_FORMAT),
-                    "turn_detection": {
-                        "type": "semantic_vad",
-                        "eagerness": eagerness,
-                        "create_response": True,
-                        # LiveKit, not OpenAI, owns the playback buffer. The
-                        # worker reacts to Realtime's speech_started signal by
-                        # clearing that queue, targeting response.cancel, and
-                        # truncating conversation audio to the delivered point.
-                        "interrupt_response": False,
-                    },
-                    "transcription": {"model": settings.openai_realtime_transcription_model},
-                },
-                "output": {
-                    "format": dict(_PCM_FORMAT),
-                    "voice": settings.openai_realtime_voice,
-                },
-            },
-        },
-    }
-
-
 def build_prompt_agent_session_update(
     settings: "Settings", config: dict[str, Any],
 ) -> dict[str, Any]:
     """Configure Realtime to OWN the whole patient conversation (prompt_agent).
 
-    Unlike controlled/native mode, here Realtime is the conversational author:
+    Realtime is the conversational author:
       - turn_detection = server_vad with create_response=True so Realtime
         answers the student NATURALLY on end-of-turn (no backend generation),
       - interrupt_response=True so Realtime auto-truncates its own answer on
@@ -226,6 +134,13 @@ def build_prompt_agent_session_update(
                     "interrupt_response": True,
                 },
                 "transcription": {"model": settings.openai_realtime_transcription_model},
+                # Classroom-safe noise reduction: near_field is designed for
+                # close microphones (laptops/phones at arm's length) and
+                # suppresses stationary background noise that would otherwise
+                # inflate server_vad's perceived speech energy. Does not solve
+                # nearby human speech (cocktail party problem) but reduces the
+                # overall noise floor the VAD must distinguish against.
+                "noise_reduction": {"type": "near_field"},
             },
             "output": {
                 "format": dict(_PCM_FORMAT),

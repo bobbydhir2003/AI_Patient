@@ -1,11 +1,9 @@
 /**
- * Phase B: wraps the SAME LiveKitPocEngine the admin POC page uses (see
+ * Wraps the SAME LiveKitPocEngine the admin POC page uses (see
  * livekitPocEngine.ts - not a second/parallel LiveKit implementation) for
- * the REAL student InterviewPage. Exposes a result shape deliberately
- * compatible with useVoiceConversation's (state/errorMessage/supported/
- * active/startConversation/stopConversation/interruptPatient/retry/reset/
- * cancelPatientSpeech/submitExternal) so InterviewPage.tsx can pick ONE of
- * the two hooks per render and drive the rest of its UI unchanged.
+ * the REAL student InterviewPage. This is the sole voice hook InterviewPage
+ * uses (state/errorMessage/supported/active/startConversation/
+ * stopConversation/interruptPatient/retry/reset/submitExternal).
  *
  * What's deliberately different from the admin POC page:
  * - Token source: fetchStudentLiveKitToken (require_session_access-gated),
@@ -20,9 +18,9 @@
  *   onTurnCompleted causes the page to re-fetch the same authoritative DB
  *   rows. Both paths share ConversationTurn.id, so they reconcile naturally.
  *
- * NEVER calls speechSynthesis, patientVoiceService, or any legacy playback
- * primitive - see livekitPocEngine.ts's own docstring/tests for that
- * guarantee; this hook only adds React lifecycle around it.
+ * NEVER calls speechSynthesis or any browser playback primitive - see
+ * livekitPocEngine.ts's own docstring/tests for that guarantee; this hook
+ * only adds React lifecycle around it.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -89,9 +87,8 @@ function mapPocState(state: PocState): LiveKitVoiceUIState {
 export interface UseLiveKitInterviewVoiceOptions {
   sessionId: string | null;
   enabled: boolean;
-  /** Interim (non-final) recognized text, for display only - mirrors
-   * useVoiceConversation's onInterim. Called with "" once a final result is
-   * sent, matching the legacy hook's own draft-clearing behavior. */
+  /** Interim (non-final) recognized text, for display only. Called with ""
+   * once a final result is sent, to clear the draft. */
   onInterim: (transcript: string) => void;
   /** Fires once per completed turn (the agent's "speaking_ended"). Carries
    * NO text - the page is expected to re-fetch the session's transcript,
@@ -128,7 +125,6 @@ export interface UseLiveKitInterviewVoiceResult {
   interruptPatient: () => void;
   retry: () => void;
   reset: () => void;
-  cancelPatientSpeech: () => void;
   submitExternal: (text: string) => void;
 }
 
@@ -253,11 +249,6 @@ export function useLiveKitInterviewVoice(
     engineRef.current?.interruptPatient();
   }, []);
 
-  /** No engine-level equivalent of "cancel the in-flight patient turn"
-   * exists beyond interruptPatient (SPEAKING-only, see above) - a no-op,
-   * never a silent fallback. */
-  const cancelPatientSpeech = useCallback(() => {}, []);
-
   /** Typed input while LiveKit mode is active: sends through the SAME
    * engine.sendText() a spoken final transcript would use - same
    * "listening only" guard inside the engine, so a message typed while
@@ -290,7 +281,6 @@ export function useLiveKitInterviewVoice(
     interruptPatient,
     retry,
     reset,
-    cancelPatientSpeech,
     submitExternal,
   };
 }

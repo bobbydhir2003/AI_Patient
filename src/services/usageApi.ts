@@ -76,9 +76,8 @@ export interface UsageSummary {
   pricing: {
     version: string;
     openai: { default_input_per_1k: number; default_output_per_1k: number; models: string[] };
-    elevenlabs: { per_character: number };
   };
-  providers: { openai: ProviderHealthBlock; elevenlabs: ProviderHealthBlock };
+  providers: { openai: ProviderHealthBlock };
 }
 
 export interface TimeseriesPoint {

@@ -18,14 +18,6 @@ def _student_client(engine, *, email="phaseb@school.edu", number="PB1"):
     return client
 
 
-def test_interview_config_reports_legacy_by_default(engine, monkeypatch):
-    monkeypatch.setattr(get_settings(), "voice_engine", "legacy")
-    client = _student_client(engine)
-    r = client.get("/api/interviews/config")
-    assert r.status_code == 200, r.text
-    assert r.json()["voiceEngine"] == "legacy"
-
-
 def test_interview_config_reports_livekit_when_configured(engine, monkeypatch):
     monkeypatch.setattr(get_settings(), "voice_engine", "livekit")
     client = _student_client(engine)
@@ -52,5 +44,5 @@ def test_interview_config_never_leaks_livekit_credentials(engine, monkeypatch):
     r = client.get("/api/interviews/config")
     assert r.status_code == 200
     body_keys = set(r.json().keys())
-    assert body_keys == {"streamingEnabled", "sentencePipeliningEnabled", "voiceEngine"}
+    assert body_keys == {"voiceEngine"}
     assert "should-never-appear" not in r.text

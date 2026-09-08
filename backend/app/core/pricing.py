@@ -53,10 +53,6 @@ _OPENAI_MODELS: dict[str, dict[str, float]] = {
     },
 }
 
-# --- ElevenLabs: USD per single generated character --------------------------
-_ELEVENLABS_PER_CHAR = 0.00013
-
-
 @dataclass(frozen=True)
 class OpenAiRates:
     input_per_token: float
@@ -71,10 +67,6 @@ def openai_rates(model: str | None) -> OpenAiRates:
         cached_input_per_token=cfg["cached_input_per_token"],
         output_per_token=cfg["output_per_token"],
     )
-
-
-def elevenlabs_rate_per_char() -> float:
-    return _ELEVENLABS_PER_CHAR
 
 
 def estimate_openai_cost(
@@ -95,12 +87,6 @@ def estimate_openai_cost(
     return round(cost, 8), r
 
 
-def estimate_elevenlabs_cost(characters: int) -> tuple[float, float]:
-    """Return (cost_usd, per_char_rate)."""
-    rate = _ELEVENLABS_PER_CHAR
-    return round(max(0, characters) * rate, 8), rate
-
-
 def pricing_snapshot() -> dict:
     """Human-readable pricing summary for the dashboard footer/admin display."""
     return {
@@ -110,5 +96,4 @@ def pricing_snapshot() -> dict:
             "default_output_per_1k": round(_OPENAI_DEFAULT["output_per_token"] * 1000, 6),
             "models": sorted(_OPENAI_MODELS.keys()),
         },
-        "elevenlabs": {"per_character": _ELEVENLABS_PER_CHAR},
     }

@@ -22,33 +22,6 @@ class OpenAIConfigPatchIn(CamelModel):
     streaming_enabled: bool | None = None
 
 
-class ElevenLabsConfigPatchIn(CamelModel):
-    enabled: bool | None = None
-    model: str | None = None
-    output_format: str | None = None
-    timeout_seconds: float | None = None
-
-
-class ConversationPatchIn(CamelModel):
-    sentence_level_streaming: bool | None = None
-    patient_streaming: bool | None = None
-
-
-class VoicePatchIn(CamelModel):
-    display_name: str | None = None
-    voice_id: str | None = None
-    voice_name: str | None = None
-    model_id: str | None = None
-    stability: float | None = None
-    similarity_boost: float | None = None
-    style: float | None = None
-    speed: float | None = None
-    speaker_boost: bool | None = None
-    preview_text: str | None = None
-    is_active: bool | None = None
-    expected_updated_at: str | None = None  # optimistic-lock token
-
-
 # ------------------------------ responses ------------------------------
 class ApplyResult(CamelModel):
     success: bool
@@ -79,33 +52,6 @@ class TestResultOut(CamelModel):
     service: str
     status: str  # success | failed | not_configured
     message: str = ""
-
-
-class VoiceRowOut(CamelModel):
-    case_id: str
-    speaker_id: str
-    patient_name: str
-    speaker_label: str
-    image: str = ""
-    display_name: str = ""
-    voice_name: str | None = None
-    masked_voice_id: str | None = None
-    model: str | None = None
-    stability: float = 0.5
-    similarity_boost: float = 0.75
-    style: float = 0.1
-    speed: float = 1.0
-    speaker_boost: bool = True
-    preview_text: str = ""
-    status: str
-    source: str = "none"
-    has_override: bool = False
-    updated_at: str | None = None
-    updated_by: str | None = None
-
-
-class VoiceListOut(CamelModel):
-    voices: list[VoiceRowOut]
 
 
 class HistoryItemOut(CamelModel):

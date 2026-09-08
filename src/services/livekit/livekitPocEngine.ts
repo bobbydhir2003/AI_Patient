@@ -577,7 +577,21 @@ export class LiveKitPocEngine {
     });
     this.callbacks.onRoomName(tokenInfo.roomName);
 
-    const room = new Room();
+    // Classroom-safe microphone defaults: explicitly request browser audio
+    // processing rather than relying on browser/device defaults (which vary).
+    // echoCancellation prevents patient speaker audio from being re-captured by
+    // the same device's mic (self-echo). noiseSuppression reduces ambient
+    // classroom noise reaching OpenAI's server_vad. autoGainControl normalises
+    // volume across varying mic distances. These are passed to getUserMedia via
+    // LiveKit's audioCaptureDefaults and apply to every setMicrophoneEnabled(true)
+    // call this Room makes (see LiveKit SDK 2.x AudioCaptureOptions).
+    const room = new Room({
+      audioCaptureDefaults: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
     this.room = room;
 
     room.on(RoomEvent.Disconnected, () => {

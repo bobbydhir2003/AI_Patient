@@ -35,8 +35,8 @@ class RedisHealthOut(CamelModel):
 
 
 class ServiceHealthOut(CamelModel):
-    """OpenAI / ElevenLabs. `status` is 'configured' or 'not_configured' - never
-    'connected' unless a real Test Connection has actually run (deferred)."""
+    """OpenAI. `status` is 'configured' or 'not_configured' - never 'connected'
+    unless a real Test Connection has actually run (deferred)."""
 
     service: str
     configured: bool
@@ -48,25 +48,12 @@ class ServiceHealthOut(CamelModel):
     checked_at: str = ""
 
 
-class AudioQueueHealthOut(CamelModel):
-    available: bool
-    status: str  # ok | warning | unavailable
-    pending: int | None = None
-    processing: int | None = None
-    failed: int | None = None
-    message: str = ""
-    checked_at: str = ""
-
-
 class StorageHealthOut(CamelModel):
     status: str  # healthy | warning | unavailable
     used_bytes: int | None = None
     total_bytes: int | None = None
     free_bytes: int | None = None
     percent_used: float | None = None
-    audio_cache_entries: int | None = None
-    audio_cache_max_entries: int | None = None
-    audio_cache_bytes: int | None = None
     checked_at: str = ""
 
 
@@ -79,45 +66,8 @@ class OpenAIConfigOut(CamelModel):
     status: str = ""
 
 
-class ElevenLabsConfigOut(CamelModel):
-    configured: bool
-    enabled: bool = False
-    model: str = ""
-    output_format: str = ""
-    timeout_seconds: float | None = None
-    status: str = ""
-
-
-class ConversationSettingsOut(CamelModel):
-    """Real, active conversation values. Read-only: these reflect what the
-    backend actually uses. Non-toggleable behaviors are marked accordingly."""
-
-    sentence_level_streaming: str  # Enabled | Disabled
-    patient_streaming: str  # Enabled | Disabled
-    disclosure_control: str
-    motivational_interviewing: str
-    age_appropriate_language: str
-    caregiver_routing: str
-    max_patient_response_chars: int
-
-
 class AiConfigurationOut(CamelModel):
     openai: OpenAIConfigOut
-    elevenlabs: ElevenLabsConfigOut
-    conversation: ConversationSettingsOut
-
-
-class VoiceRowOut(CamelModel):
-    case_id: str
-    speaker_id: str  # patient | caregiver
-    patient_name: str
-    speaker_label: str
-    image: str = ""
-    voice_name: str | None = None
-    masked_voice_id: str | None = None  # None => not configured
-    model: str | None = None
-    status: str  # active | not_configured | disabled | unavailable
-    reason: str = ""
 
 
 class CredentialStatusOut(CamelModel):
@@ -167,7 +117,6 @@ class WorkerOut(CamelModel):
     requests_per_minute: float | None = None
     http_in_flight: int | None = None
     interview_in_flight: int | None = None
-    tts_in_flight: int | None = None
     assessment_in_flight: int | None = None
     memory_mb: float | None = None
     # Per requirements: the app does NOT record a reliable per-worker "current
@@ -216,7 +165,6 @@ class ConcurrencyOut(CamelModel):
     scope: str  # global (redis) | per_process
     redis: RedisHealthOut
     openai: ConcurrencyLaneOut
-    tts: ConcurrencyLaneOut
     assessment: ConcurrencyLaneOut
 
 
@@ -239,7 +187,6 @@ class SystemLiveOut(CamelModel):
     database: DatabaseHealthOut
     redis: RedisHealthOut
     openai: ServiceHealthOut
-    elevenlabs: ServiceHealthOut
     workers: WorkerFleetOut
     concurrency: ConcurrencyOut
     checks: list[InfraCheckOut]
@@ -252,22 +199,15 @@ class SystemOverviewOut(CamelModel):
     database: DatabaseHealthOut
     redis: RedisHealthOut
     openai: ServiceHealthOut
-    elevenlabs: ServiceHealthOut
-    audio_queue: AudioQueueHealthOut
     storage: StorageHealthOut
     ai_config: AiConfigurationOut
     credentials: list[CredentialStatusOut]
-    voices: list[VoiceRowOut]
     alerts: list[AlertOut]
     activity: list[ActivityOut]
     # Live runtime sections (also polled on their own via /admin/system/live):
     workers: WorkerFleetOut
     concurrency: ConcurrencyOut
     checks: list[InfraCheckOut]
-
-
-class VoiceListOut(CamelModel):
-    voices: list[VoiceRowOut]
 
 
 class MutationResultOut(CamelModel):

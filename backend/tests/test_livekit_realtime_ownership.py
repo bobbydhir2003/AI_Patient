@@ -85,9 +85,13 @@ def _install_stream_rtc(fake_rtc):
 
 
 def test_one_realtime_session_is_constructed_and_started_per_worker(monkeypatch, engine):
+    """prompt_agent is the only mode _maybe_start_realtime_session can select,
+    so it always resolves a patient config before constructing RealtimeSession
+    - a real prompt ID must be configured for that resolution to succeed."""
     with _fake_rtc_for_worker():
         worker, _room, _sid = _make_ready_session(engine, monkeypatch)
-        _enable_realtime(monkeypatch)
+        settings = _enable_realtime(monkeypatch)
+        monkeypatch.setattr(settings, "openai_realtime_carly_prompt_id", "prompt-fake")
         made = []
 
         class FakeSession(_PersistentRealtime):

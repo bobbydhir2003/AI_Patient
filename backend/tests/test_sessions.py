@@ -42,16 +42,16 @@ def test_get_missing_session(client):
     assert client.get("/api/sessions/doesnotexist").status_code == 404
 
 
-def _seed_exchange(client, session_id, case_id="camden"):
-    client.post(
-        f"/api/interviews/{session_id}/messages",
-        json={"text": "Hi, how are you today?", "caseId": case_id},
-    )
+def _seed_exchange(engine, session_id):
+    # Patient turns come from the trusted generation path (the LiveKit + OpenAI
+    # Realtime worker); seed a full exchange directly as that layer does.
+    from tests.conftest import seed_exchange
+    seed_exchange(engine, session_id, [("Hi, how are you today?", "I'm alright.")])
 
 
-def test_complete_locks_session(client):
+def test_complete_locks_session(client, engine):
     session_id = _create(client).json()["sessionId"]
-    _seed_exchange(client, session_id)
+    _seed_exchange(engine, session_id)
     done = client.post(f"/api/sessions/{session_id}/complete")
     assert done.status_code == 200
     body = done.json()
@@ -63,12 +63,14 @@ def test_complete_locks_session(client):
     assert again.json()["locked"] is True
 
 
-def test_locked_session_rejects_messages(client):
+def test_locked_session_rejects_new_turns(client, engine):
     session_id = _create(client).json()["sessionId"]
-    _seed_exchange(client, session_id)
+    _seed_exchange(engine, session_id)
     client.post(f"/api/sessions/{session_id}/complete")
+    # A completed/locked session must reject any further student turn.
     response = client.post(
-        f"/api/interviews/{session_id}/messages", json={"text": "Hello?", "caseId": "camden"}
+        f"/api/sessions/{session_id}/turns",
+        json={"clientTurnId": "late-1", "speaker": "student", "content": "Hello?", "source": "typed"},
     )
     assert response.status_code == 409
-    assert response.json()["error"]["code"] == "session_locked"
+    assert response.json()["error"]["code"] == "transcript_locked"

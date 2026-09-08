@@ -944,62 +944,6 @@ test("STATIC: useLiveKitInterviewVoice.ts source never references speechSynthesi
   assert.ok(source.includes("LiveKitPocEngine"));
 });
 
-// ---------------------------------------------------------------------------
-// Phase B: InterviewPage.tsx's engine-selection guards, checked statically.
-// This is a TEXT-LEVEL regression guard (this project has no React
-// component-rendering test harness - see the Phase B report), not a
-// behavioral proof that the guards execute correctly at runtime. It exists
-// to catch an accidental removal of a guard, not to replace real-device/
-// manual verification of the actual rendered UI.
-// ---------------------------------------------------------------------------
-test("STATIC (regression guard, not behavioral proof): InterviewPage.tsx textually guards every patientVoiceService call site behind voiceEngine !== \"livekit\"", () => {
-  const source = fs.readFileSync(
-    path.join(repoRoot, "src", "pages", "InterviewPage.tsx"),
-    "utf8",
-  );
-
-  // Every cancelPatientSpeech() call must be preceded on the SAME line by
-  // the voiceEngine guard, EXCEPT the "Speak patient replies" checkbox
-  // toggle - that call site sits inside the Audio Settings panel, which is
-  // itself entirely hidden when voiceEngine === "livekit" (checked below),
-  // so it can never execute in LiveKit mode despite having no guard of its
-  // own on that line.
-  const UNGUARDED_BUT_UNREACHABLE = "if (!e.target.checked) cancelPatientSpeech();";
-  const cancelLines = source.split("\n").map((l) => l.trim()).filter((l) => l.includes("cancelPatientSpeech()"));
-  assert.ok(cancelLines.length >= 3, "expected multiple cancelPatientSpeech() call sites");
-  for (const line of cancelLines) {
-    if (line === UNGUARDED_BUT_UNREACHABLE) continue;
-    assert.ok(
-      line.includes('voiceEngine !== "livekit"'),
-      `cancelPatientSpeech() call site must be guarded: "${line}"`,
-    );
-  }
-
-  // The typed-send speakPatientResponse() call must be gated in the same
-  // condition as the other legacy-only checks.
-  const typedSendGuardIndex = source.indexOf('voiceEnabled && ttsAvailable && caseId && voiceEngine !== "livekit"');
-  assert.ok(typedSendGuardIndex !== -1, "typed-send speakPatientResponse() must be gated on voiceEngine !== \"livekit\"");
-
-  // The legacy recovery banner must be gated the same way.
-  assert.ok(
-    source.includes('recoveryAction && voiceEngine !== "livekit"'),
-    "the legacy recovery banner must be hidden when voiceEngine === \"livekit\"",
-  );
-
-  // The Audio Settings panel (speak-replies/auto-interrupt/sensitivity - all
-  // legacy-only concepts) must also be hidden in LiveKit mode.
-  assert.ok(
-    source.includes('(ttsAvailable || voice.supported) && voiceEngine !== "livekit"'),
-    "the legacy-only Audio Settings panel must be hidden when voiceEngine === \"livekit\"",
-  );
-
-  // Phase C product requirement: no student-facing retry button for LiveKit.
-  assert.ok(
-    source.includes('retryDisabled={voiceEngine === "livekit"}'),
-    "ConversationControl must be told to suppress its retry action in LiveKit mode",
-  );
-});
-
 // ===========================================================================
 // PHASE C: production reliability protocol - agent-ready handshake, targeted
 // data messages, turn-delivery ACK + bounded automatic retry, and separate

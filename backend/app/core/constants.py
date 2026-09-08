@@ -115,28 +115,14 @@ APPLY_RESTART = "restart_required"     # needs a server restart to take effect
 # --- Runtime configuration: server-side validation guards ---
 # Approved OpenAI models (only those the strict-JSON Responses flow supports).
 OPENAI_MODEL_ALLOWLIST = ("gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1")
-# Approved ElevenLabs models + output formats (must match the current integration).
-ELEVENLABS_MODEL_ALLOWLIST = (
-    "eleven_turbo_v2_5",
-    "eleven_multilingual_v2",
-    "eleven_flash_v2_5",
-)
-ELEVENLABS_FORMAT_ALLOWLIST = ("mp3_44100_128", "mp3_44100_64", "mp3_22050_32")
 OPENAI_TIMEOUT_RANGE = (1.0, 120.0)
 OPENAI_MAX_TOKENS_RANGE = (16, 4000)
-ELEVENLABS_TIMEOUT_RANGE = (1.0, 120.0)
-VOICE_STABILITY_RANGE = (0.0, 1.0)
-VOICE_SIMILARITY_RANGE = (0.0, 1.0)
-VOICE_STYLE_RANGE = (0.0, 1.0)
-VOICE_SPEED_RANGE = (0.7, 1.2)
 
 # --- Runtime config audit action types ---
 AUDIT_CREDENTIAL_REPLACED = "credential_replaced"
 AUDIT_CREDENTIAL_REMOVED = "credential_removed"
 AUDIT_CREDENTIAL_TESTED = "credential_tested"
 AUDIT_AI_CONFIG_UPDATED = "ai_config_updated"
-AUDIT_VOICE_UPDATED = "voice_updated"
-AUDIT_VOICE_RESTORED = "voice_restored"
 AUDIT_CONFIG_RESTORED = "config_restored"
 
 # --- Audit log action types ---
@@ -147,21 +133,9 @@ AUDIT_SESSION_ARCHIVED = "session_archived"
 AUDIT_SESSION_DELETED = "session_deleted"
 AUDIT_ASSESSMENT_DELETED = "assessment_deleted"
 AUDIT_MESSAGE_DELETED = "message_deleted"
-# System dashboard actions
-AUDIT_VOICE_PREVIEWED = "voice_previewed"
-AUDIT_AUDIO_CACHE_CLEARED = "audio_cache_cleared"
 
 # Storage alert threshold (percent used) - configurable real threshold.
 STORAGE_WARNING_PERCENT = 80.0
-
-# Fixed, safe voice-preview sample sentences (never free-form text).
-VOICE_PREVIEW_SAMPLES = {
-    # Camden is voiced only by his mother, so the preview auditions her voice.
-    "camden": "Hi, I'm Camden's mother. I can help answer your questions.",
-    "carly": "Hi, I'm Carly. Thank you for meeting with me.",
-    "sofia": "Hi, I'm Sofia.",
-    "jayden": "Hi, I'm Jayden. I'm ready to get started.",
-}
 
 # --- Extra session status used by the admin panel ---
 SESSION_STATUS_ARCHIVED = "archived"

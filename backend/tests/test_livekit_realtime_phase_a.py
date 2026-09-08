@@ -310,11 +310,16 @@ def test_maybe_start_realtime_session_fails_safe_to_none_on_error(monkeypatch, e
 
 
 def test_maybe_start_realtime_session_returns_session_when_active(monkeypatch, engine):
+    """prompt_agent is the only mode _maybe_start_realtime_session can select
+    (see worker._start_prompt_agent_session), so it always resolves a patient
+    config first - a real prompt ID must be configured for that resolution to
+    reach RealtimeSession construction at all."""
     with _fake_rtc_for_worker():
         session, _room, _sid = _make_ready_session(engine, monkeypatch)
         s = get_settings()
         monkeypatch.setattr(s, "livekit_realtime_engine_enabled", True)
         monkeypatch.setattr(s, "openai_api_key", "sk-x")
+        monkeypatch.setattr(s, "openai_realtime_carly_prompt_id", "prompt-fake")
 
         started = {}
 

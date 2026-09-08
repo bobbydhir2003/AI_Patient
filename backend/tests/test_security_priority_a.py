@@ -45,7 +45,8 @@ def test_unauthenticated_session_access_fails(engine):
 
 def test_unauthenticated_interview_generation_fails(engine):
     with anon(engine) as c:
-        r = c.post("/api/interviews/anything/messages", json={"text": "Hi", "caseId": "camden"})
+        # The interview voice path mints a LiveKit token; it must require auth.
+        r = c.post("/api/interviews/anything/livekit-token")
         assert r.status_code == 401
 
 
@@ -55,13 +56,6 @@ def test_unauthenticated_assessment_fails(engine):
         assert c.post("/api/sessions/x/assessment").status_code == 401
         assert c.get("/api/sessions/x/assessment").status_code == 401
         assert c.get("/api/assessments/x").status_code == 401
-
-
-def test_unauthenticated_voice_request_fails(engine):
-    with anon(engine) as c:
-        r = c.post("/api/voice/synthesize", json={"caseId": "carly", "text": "hi", "sessionId": "s", "turnId": "t"})
-        assert r.status_code == 401
-        assert c.get("/api/voice/status/carly").status_code == 401
 
 
 def test_invalid_and_malformed_tokens_are_rejected(engine):
@@ -85,9 +79,8 @@ def test_student_cannot_access_another_students_session(engine):
         assert c.post(f"/api/sessions/{sid}/turns", json=turn, headers=hb).status_code == 404
         # complete
         assert c.post(f"/api/sessions/{sid}/complete", headers=hb).status_code == 404
-        # interview generation
-        msg = {"text": "hello", "caseId": "camden"}
-        assert c.post(f"/api/interviews/{sid}/messages", json=msg, headers=hb).status_code == 404
+        # interview voice token
+        assert c.post(f"/api/interviews/{sid}/livekit-token", headers=hb).status_code == 404
         # assessment
         assert c.post(f"/api/sessions/{sid}/assessment", headers=hb).status_code == 404
         assert c.get(f"/api/sessions/{sid}/assessment/status", headers=hb).status_code == 404
@@ -143,109 +136,16 @@ def test_student_cannot_create_patient_turn(engine):
 
 
 def test_completed_session_rejects_new_turns(engine):
-    fake = FakeOpenAIClient(text="I feel tired.")
-    with make_client(engine, fake, authenticate=False) as c:
+    with make_client(engine, FakeOpenAIClient(text="I feel tired."), authenticate=False) as c:
         ha, _ = _headers(c, email="cs@school.edu")
         sid = _new_session(c, ha)
-        c.post(f"/api/interviews/{sid}/messages", json={"text": "hi", "caseId": "camden"}, headers=ha)
+        # Patient turns come from the trusted generation path; seed a full
+        # exchange directly so the session can be completed/locked.
+        from tests.conftest import seed_exchange
+        seed_exchange(engine, sid, [("hi", "hello")])
         assert c.post(f"/api/sessions/{sid}/complete", headers=ha).status_code == 200
         turn = {"clientTurnId": "late", "speaker": "student", "content": "one more", "source": "typed"}
         assert c.post(f"/api/sessions/{sid}/turns", json=turn, headers=ha).status_code == 409
-
-
-# ==========================================================================
-#  VOICE (A5)
-# ==========================================================================
-def test_voice_requires_session_reference(engine, monkeypatch):
-    """Arbitrary text with no session reference cannot be synthesized."""
-    from tests.test_voice import FakeElevenLabsClient, give_carly_a_voice_id, make_voice_client
-
-    give_carly_a_voice_id(monkeypatch)
-    with make_voice_client(engine, FakeElevenLabsClient(), monkeypatch) as c:
-        ha, _ = _headers(c, email="v1@school.edu")
-        r = c.post(
-            "/api/voice/synthesize",
-            json={"caseId": "carly", "text": "say whatever I want"},
-            headers=ha,
-        )
-        assert r.status_code == 422
-
-
-def test_voice_rejects_another_users_session(engine, monkeypatch):
-    from app.patient_engine.openai_client import get_openai_client
-    from tests.test_voice import FakeElevenLabsClient, give_carly_a_voice_id, make_voice_client
-
-    give_carly_a_voice_id(monkeypatch)
-    with make_voice_client(engine, FakeElevenLabsClient(), monkeypatch) as c:
-        c.app.dependency_overrides[get_openai_client] = lambda: FakeOpenAIClient(text="I'm okay.")
-        ha, _ = _headers(c, email="va@school.edu")
-        hb, _ = _headers(c, email="vb@school.edu")
-        sid = _new_session(c, ha, case_id="carly")
-        turn = c.post(
-            f"/api/interviews/{sid}/messages",
-            json={"text": "How are you?", "caseId": "carly", "clientTurnId": "t1"},
-            headers=ha,
-        ).json()
-        # B references A's session/turn -> generic 422, never audio.
-        r = c.post(
-            "/api/voice/synthesize",
-            json={"caseId": "carly", "text": "x", "sessionId": sid, "turnId": turn["turnId"]},
-            headers=hb,
-        )
-        assert r.status_code == 422
-
-
-def test_voice_rejects_student_turn(engine, monkeypatch):
-    """Only patient turns can be voiced; a student turn is refused."""
-    from app.patient_engine.openai_client import get_openai_client
-    from tests.test_voice import FakeElevenLabsClient, give_carly_a_voice_id, make_voice_client
-
-    give_carly_a_voice_id(monkeypatch)
-    with make_voice_client(engine, FakeElevenLabsClient(), monkeypatch) as c:
-        c.app.dependency_overrides[get_openai_client] = lambda: FakeOpenAIClient(text="I'm okay.")
-        ha, _ = _headers(c, email="vs@school.edu")
-        sid = _new_session(c, ha, case_id="carly")
-        c.post(
-            f"/api/interviews/{sid}/messages",
-            json={"text": "How are you?", "caseId": "carly", "clientTurnId": "t1"},
-            headers=ha,
-        )
-        # turn index 0 is the STUDENT turn.
-        turns = c.get(f"/api/sessions/{sid}/turns", headers=ha).json()
-        student_turn_id = next(t["id"] for t in turns if t["speaker"] == "student")
-        r = c.post(
-            "/api/voice/synthesize",
-            json={"caseId": "carly", "text": "x", "sessionId": sid, "turnId": student_turn_id},
-            headers=ha,
-        )
-        assert r.status_code == 422
-
-
-def test_voice_failure_does_not_lose_transcript(engine, monkeypatch):
-    """A TTS failure must not remove the already-persisted interview turn."""
-    from app.patient_engine.openai_client import get_openai_client
-    from tests.test_voice import FakeElevenLabsClient, give_carly_a_voice_id, make_voice_client
-
-    give_carly_a_voice_id(monkeypatch)
-    with make_voice_client(engine, FakeElevenLabsClient(fail=True), monkeypatch) as c:
-        c.app.dependency_overrides[get_openai_client] = lambda: FakeOpenAIClient(text="I'm okay.")
-        ha, _ = _headers(c, email="vf@school.edu")
-        sid = _new_session(c, ha, case_id="carly")
-        turn = c.post(
-            f"/api/interviews/{sid}/messages",
-            json={"text": "How are you?", "caseId": "carly", "clientTurnId": "t1"},
-            headers=ha,
-        ).json()
-        # TTS fails...
-        bad = c.post(
-            "/api/voice/synthesize",
-            json={"caseId": "carly", "text": "x", "sessionId": sid, "turnId": turn["turnId"]},
-            headers=ha,
-        )
-        assert bad.status_code == 502
-        # ...but the transcript is intact.
-        turns = c.get(f"/api/sessions/{sid}/turns", headers=ha).json()
-        assert [t["speaker"] for t in turns] == ["student", "patient"]
 
 
 # ==========================================================================
@@ -379,14 +279,15 @@ def test_interview_rate_limit_returns_429(engine, monkeypatch):
 
     s = get_settings()
     monkeypatch.setattr(s, "rate_limit_enabled", True)
-    monkeypatch.setattr(s, "interview_rate_limit", "2/minute")
+    # The student interview-voice endpoint (LiveKit token mint) is rate-limited
+    # via its own bucket; the limiter runs as a dependency before the handler.
+    monkeypatch.setattr(s, "voice_rate_limit", "2/minute")
 
     fake = FakeOpenAIClient(text="I'm okay.")
     with make_client(engine, fake, authenticate=False) as c:
         ha, _ = _headers(c, email="rl@school.edu")
         sid = _new_session(c, ha)
-        msg = {"text": "hello", "caseId": "camden"}
         statuses = [
-            c.post(f"/api/interviews/{sid}/messages", json=msg, headers=ha).status_code for _ in range(4)
+            c.post(f"/api/interviews/{sid}/livekit-token", headers=ha).status_code for _ in range(4)
         ]
         assert 429 in statuses

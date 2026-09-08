@@ -79,7 +79,6 @@ export function useSystemOverview(): State {
                 database: d.database,
                 redis: d.redis,
                 openai: d.openai,
-                elevenlabs: d.elevenlabs,
                 workers: d.workers,
                 concurrency: d.concurrency,
                 checks: d.checks,

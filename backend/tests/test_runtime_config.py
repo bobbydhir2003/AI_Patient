@@ -3,22 +3,23 @@
 Provider network boundaries are faked (as everywhere in this suite). "A new
 request uses the updated value" is proven by checking the value the provider
 boundary actually receives after an edit.
+
+Patient interview voice is now provided by OpenAI Realtime (see
+app/livekit_agent/), so there is no editable ElevenLabs/patient-voice config;
+only the OpenAI credential + model configuration remains here.
 """
 import json
 
 import pytest
-from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core import crypto
 from app.core.constants import USER_ROLE_ADMIN
 from app.core.security import hash_password
 from app.database.base import Base
-from app.database.connection import get_db, reset_engine
-from app.models import ApiCredential, PatientVoiceSetting, User
-from app.voice.elevenlabs_client import get_elevenlabs_client
+from app.database.connection import reset_engine
+from app.models import ApiCredential, User
 from tests.test_auth import auth_header, login_token
-from tests.test_voice import FakeElevenLabsClient
 
 
 @pytest.fixture(autouse=True)
@@ -37,27 +38,6 @@ def _make_user(engine, email, role, password="adminpass1"):
         db.commit()
     finally:
         db.close()
-
-
-def _client_with_fakes(engine, elevenlabs=None):
-    from app.main import create_app
-
-    app = create_app()
-    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-
-    def override_db():
-        db = factory()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = override_db
-    if elevenlabs is not None:
-        app.dependency_overrides[get_elevenlabs_client] = lambda: elevenlabs
-    from fastapi.testclient import TestClient
-
-    return TestClient(app)
 
 
 @pytest.fixture()
@@ -106,7 +86,7 @@ def test_stored_key_is_encrypted_and_never_returned(client, engine, admins):
 def test_credential_audit_has_no_raw_secret(client, engine, admins):
     su = login_token(client, "super@school.edu", "adminpass1")
     secret = "sk-audit-check-1234567890"
-    client.post("/api/admin/runtime/credentials/elevenlabs", json={"key": secret}, headers=auth_header(su))
+    client.post("/api/admin/runtime/credentials/openai", json={"key": secret}, headers=auth_header(su))
     from app.models import AuditLog, ConfigurationHistory
     db = sessionmaker(bind=engine, expire_on_commit=False)()
     blob = " ".join(a.description for a in db.query(AuditLog).all())
@@ -133,7 +113,6 @@ def test_openai_client_uses_runtime_model(monkeypatch, engine, admins):
     """The REAL OpenAI client must send the runtime-selected model on the next
     request (proven at the SDK boundary)."""
     from app.patient_engine.openai_client import OpenAIPatientClient
-    from app.services import runtime_config_service as rc
 
     class _FakeRT:
         api_key = "sk-test"; model = "gpt-4.1"; timeout_seconds = 30.0
@@ -156,251 +135,6 @@ def test_openai_client_uses_runtime_model(monkeypatch, engine, admins):
     monkeypatch.setattr(c, "_get_client", lambda rt=None: _FakeSDK())
     c.generate([{"role": "user", "content": "hi"}])
     assert captured["model"] == "gpt-4.1"  # runtime value used, not the env default
-
-
-# --------------------------------------------------------------- voices
-def test_voice_edit_persists_and_rejects_bad_id(client, engine, admins):
-    admin = login_token(client, "admin@school.edu", "adminpass1")
-    r = client.patch("/api/admin/runtime/voices/camden/caregiver",
-                     json={"voiceId": "MotherVoiceId123", "displayName": "Mom", "stability": 0.6},
-                     headers=auth_header(admin))
-    assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "active" and body["maskedVoiceId"] and "••••" in body["maskedVoiceId"]
-    assert "MotherVoiceId123" not in json.dumps(body)  # full id never returned
-
-    bad = client.patch("/api/admin/runtime/voices/carly/patient",
-                       json={"voiceId": "bad id"}, headers=auth_header(admin))
-    assert bad.status_code >= 400
-
-
-def test_camden_only_mother_voice_is_configurable(client, engine, admins):
-    """Camden exposes a SINGLE voice speaker: the mother (caregiver). The child
-    ('patient') speaker no longer exists, so editing it is rejected; only the
-    caregiver record can be created."""
-    admin = login_token(client, "admin@school.edu", "adminpass1")
-    # The Camden child voice speaker is gone -> rejected.
-    rejected = client.patch("/api/admin/runtime/voices/camden/patient",
-                            json={"voiceId": "CamdenVoice0001"}, headers=auth_header(admin))
-    assert rejected.status_code >= 400
-    # Only the mother/caregiver voice is configurable.
-    ok = client.patch("/api/admin/runtime/voices/camden/caregiver",
-                      json={"voiceId": "MotherVoice0002"}, headers=auth_header(admin))
-    assert ok.status_code == 200
-    db = sessionmaker(bind=engine, expire_on_commit=False)()
-    rows = db.query(PatientVoiceSetting).filter_by(case_id="camden").all()
-    speakers = {r.speaker_id: r.voice_id for r in rows}
-    db.close()
-    assert speakers == {"caregiver": "MotherVoice0002"}
-
-
-def test_preview_does_not_save(client, engine, admins):
-    fake = FakeElevenLabsClient()
-    c = _client_with_fakes(engine, elevenlabs=fake)
-    _make_user(engine, "a2@school.edu", USER_ROLE_ADMIN)
-    admin = login_token(c, "a2@school.edu", "adminpass1")
-    # Give an elevenlabs key so preview is available.
-    _make_user(engine, "s2@school.edu", USER_ROLE_ADMIN)
-    su = login_token(c, "s2@school.edu", "adminpass1")
-    c.post("/api/admin/runtime/credentials/elevenlabs", json={"key": "sk-el-123456789"}, headers=auth_header(su))
-
-    r = c.post("/api/admin/runtime/voices/sofia/patient/preview",
-               json={"voiceId": "UnsavedPreviewVoice", "previewText": "Hi"}, headers=auth_header(admin))
-    assert r.status_code == 200 and r.content
-    assert fake.calls[0]["voice_id"] == "UnsavedPreviewVoice"  # unsaved value used for audition
-
-    # No override was persisted by previewing.
-    db = sessionmaker(bind=engine, expire_on_commit=False)()
-    assert db.query(PatientVoiceSetting).filter_by(case_id="sofia", speaker_id="patient").count() == 0
-    db.close()
-
-
-def test_optimistic_locking_blocks_stale_write(client, engine, admins):
-    admin = login_token(client, "admin@school.edu", "adminpass1")
-    client.patch("/api/admin/runtime/voices/jayden/patient",
-                 json={"voiceId": "JaydenVoice0001"}, headers=auth_header(admin))
-    r = client.patch("/api/admin/runtime/voices/jayden/patient",
-                     json={"voiceId": "JaydenVoice0002", "expectedUpdatedAt": "1999-01-01T00:00:00+00:00"},
-                     headers=auth_header(admin))
-    assert r.status_code >= 400
-    assert "another administrator" in r.text.lower()
-
-
-# --------------------------------------------------------------- wiring: interview TTS
-def test_saved_voice_affects_interview_tts(tmp_path, monkeypatch):
-    """load_voice_profile (used by the student interview) must return a saved
-    runtime override - proving a dashboard voice edit changes real speech."""
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'rt.db'}")
-    from app.core.config import get_settings
-    get_settings.cache_clear()
-    reset_engine()
-    try:
-        from app.database.connection import get_engine, get_session_factory
-        Base.metadata.create_all(get_engine())
-        db = get_session_factory()()
-        from app.services import runtime_config_service as rc
-        rc.set_voice(db, case_id="carly", speaker_id="patient",
-                     patch={"voice_id": "BrandNewCarlyVoice"}, admin_email="a@x")
-        db.commit(); db.close()
-
-        monkeypatch.setattr(get_settings(), "elevenlabs_api_key", "k")
-        monkeypatch.setattr(get_settings(), "elevenlabs_enabled", True)
-        from app.voice.voice_profile_loader import load_voice_profile
-        resolved = load_voice_profile("carly", "patient")
-        assert resolved.available and resolved.profile.voice_id == "BrandNewCarlyVoice"
-    finally:
-        get_settings.cache_clear()
-        reset_engine()
-
-
-# --------------------------------------------- credential resolution consistency
-# Confirmed bug: load_voice_profile used to check settings.elevenlabs_api_key
-# (env only), while the real ElevenLabsClient resolves credentials through
-# runtime_config_service.elevenlabs_runtime() (DB override -> env -> default).
-# A key stored ONLY via the admin dashboard therefore made the loader report
-# "unavailable" even though the real client would have used it successfully.
-# These tests prove both paths now use the SAME resolution.
-def _isolated_db(tmp_path, monkeypatch, name: str, *, encryption: bool = False):
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/name}")
-    if encryption:
-        monkeypatch.setenv("CONFIG_ENCRYPTION_KEY", "unit-test-encryption-key")
-    from app.core.config import get_settings
-
-    get_settings.cache_clear()
-    reset_engine()
-    from app.database.connection import get_engine
-
-    Base.metadata.create_all(get_engine())
-    return get_settings()
-
-
-def test_elevenlabs_credential_env_only_is_available(tmp_path, monkeypatch):
-    settings = _isolated_db(tmp_path, monkeypatch, "cred_env.db")
-    try:
-        from tests.test_voice import give_carly_a_voice_id
-
-        give_carly_a_voice_id(monkeypatch)
-        monkeypatch.setattr(settings, "elevenlabs_api_key", "env-key-123456")
-        monkeypatch.setattr(settings, "elevenlabs_enabled", True)
-
-        from app.voice.voice_profile_loader import load_voice_profile
-
-        resolved = load_voice_profile("carly", "patient")
-        assert resolved.available is True
-        assert resolved.reason == ""
-    finally:
-        from app.core.config import get_settings
-
-        get_settings.cache_clear()
-        reset_engine()
-
-
-def test_elevenlabs_credential_db_only_is_available(tmp_path, monkeypatch):
-    """The confirmed bug, fixed: NO env key, but a DB-stored key -> available."""
-    settings = _isolated_db(tmp_path, monkeypatch, "cred_db.db", encryption=True)
-    try:
-        from tests.test_voice import give_carly_a_voice_id
-
-        give_carly_a_voice_id(monkeypatch)
-        monkeypatch.setattr(settings, "elevenlabs_api_key", "")  # env EMPTY
-        monkeypatch.setattr(settings, "elevenlabs_enabled", True)
-
-        from app.database.connection import get_session_factory
-        from app.services import runtime_config_service as rc
-
-        db = get_session_factory()()
-        rc.set_credential(db, service="elevenlabs", new_key="sk_db_only_key_123456", admin_email="a@x")
-        db.commit(); db.close()
-
-        from app.voice.voice_profile_loader import load_voice_profile
-
-        resolved = load_voice_profile("carly", "patient")
-        assert resolved.available is True
-        assert resolved.reason == ""
-    finally:
-        from app.core.config import get_settings
-
-        get_settings.cache_clear()
-        reset_engine()
-
-
-def test_elevenlabs_credential_db_takes_precedence_over_env(tmp_path, monkeypatch):
-    settings = _isolated_db(tmp_path, monkeypatch, "cred_both.db", encryption=True)
-    try:
-        from tests.test_voice import give_carly_a_voice_id
-
-        give_carly_a_voice_id(monkeypatch)
-        monkeypatch.setattr(settings, "elevenlabs_api_key", "env-key-should-be-overridden")
-        monkeypatch.setattr(settings, "elevenlabs_enabled", True)
-
-        from app.database.connection import get_session_factory
-        from app.services import runtime_config_service as rc
-
-        db = get_session_factory()()
-        rc.set_credential(db, service="elevenlabs", new_key="sk_db_wins_123456", admin_email="a@x")
-        db.commit(); db.close()
-
-        assert rc.elevenlabs_runtime().api_key == "sk_db_wins_123456"
-
-        from app.voice.voice_profile_loader import load_voice_profile
-
-        resolved = load_voice_profile("carly", "patient")
-        assert resolved.available is True
-    finally:
-        from app.core.config import get_settings
-
-        get_settings.cache_clear()
-        reset_engine()
-
-
-def test_elevenlabs_credential_neither_configured_is_unavailable(tmp_path, monkeypatch):
-    settings = _isolated_db(tmp_path, monkeypatch, "cred_none.db")
-    try:
-        from tests.test_voice import give_carly_a_voice_id
-
-        give_carly_a_voice_id(monkeypatch)
-        monkeypatch.setattr(settings, "elevenlabs_api_key", "")
-        monkeypatch.setattr(settings, "elevenlabs_enabled", True)
-
-        from app.voice.voice_profile_loader import load_voice_profile
-
-        resolved = load_voice_profile("carly", "patient")
-        assert resolved.available is False
-        assert resolved.reason == "missing_api_key"
-    finally:
-        from app.core.config import get_settings
-
-        get_settings.cache_clear()
-        reset_engine()
-
-
-def test_elevenlabs_credential_db_key_with_placeholder_voice_id_still_unavailable(tmp_path, monkeypatch):
-    """A DB-stored key does not bypass the voice-id validity check."""
-    settings = _isolated_db(tmp_path, monkeypatch, "cred_db_placeholder.db", encryption=True)
-    try:
-        from tests.test_voice import give_carly_a_placeholder
-
-        give_carly_a_placeholder(monkeypatch)
-        monkeypatch.setattr(settings, "elevenlabs_api_key", "")
-        monkeypatch.setattr(settings, "elevenlabs_enabled", True)
-
-        from app.database.connection import get_session_factory
-        from app.services import runtime_config_service as rc
-
-        db = get_session_factory()()
-        rc.set_credential(db, service="elevenlabs", new_key="sk_db_only_key_654321", admin_email="a@x")
-        db.commit(); db.close()
-
-        from app.voice.voice_profile_loader import load_voice_profile
-
-        resolved = load_voice_profile("carly", "patient")
-        assert resolved.available is False
-        assert resolved.reason == "missing_voice_id"
-    finally:
-        from app.core.config import get_settings
-
-        get_settings.cache_clear()
-        reset_engine()
 
 
 # --------------------------------------------------------------- session snapshot

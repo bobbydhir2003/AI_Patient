@@ -421,7 +421,6 @@ def _live_telemetry(db: Session) -> dict:
     return {
         "providers": {
             "openai": traffic_service.provider_block(_openai_pm()),
-            "elevenlabs": traffic_service.provider_block(_elevenlabs_pm()),
         },
         "infrastructure": {
             "server": traffic_service.server_health(),
@@ -435,11 +434,6 @@ def _live_telemetry(db: Session) -> dict:
 def _openai_pm():
     from app.core.telemetry import get_telemetry
     return get_telemetry().openai
-
-
-def _elevenlabs_pm():
-    from app.core.telemetry import get_telemetry
-    return get_telemetry().elevenlabs
 
 
 def _http_in_flight() -> int:

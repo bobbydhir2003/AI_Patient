@@ -17,6 +17,7 @@ from tests.test_assessment import _combined, _review, _run_interview
 def assess_env(engine):
     fake = FakeOpenAIClient(text="I get tired fast.")
     with make_client(engine, fake) as api:
+        api._test_engine = engine
         yield api, fake, engine
 
 

@@ -169,3 +169,72 @@ def test_aclose_stops_publisher_cleanly():
         assert rt._publisher_task is None
 
     asyncio.run(scenario())
+
+
+class _FakeSession:
+    """Stand-in for RealtimeSession - just enough for submit_typed_text to
+    inject a conversation item and trigger a response, exactly the same
+    conn.send() surface RealtimeSession.send_event forwards to."""
+
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    async def send_event(self, event: dict) -> None:
+        self.sent.append(event)
+
+
+def test_submit_typed_text_persists_and_injects_conversation_item():
+    """PR 5: typed input reaches the SAME OpenAI Realtime conversation a
+    spoken turn uses - persisted here directly (no
+    conversation.item.input_audio_transcription.completed for a text item),
+    then conversation.item.create + response.create ask Realtime to answer
+    naturally, exactly as it would after a spoken end-of-turn. No backend
+    generation, no ElevenLabs."""
+
+    async def scenario():
+        rt = _mk_runtime(lambda pcm: None)
+        session = _FakeSession()
+        rt.bind_session(session)
+
+        persisted = []
+
+        def fake_persist(client_turn_id, text, source="openai_realtime"):
+            persisted.append((client_turn_id, text, source))
+            return "turn-db-1"
+
+        rt._persist_student_sync = fake_persist
+
+        finals = []
+        rt._on_student_final = lambda *a: finals.append(a)
+
+        await rt.submit_typed_text("client-turn-1", "  how long has it hurt?  ")
+
+        assert persisted == [("client-turn-1", "how long has it hurt?", "manual_typed")]
+        assert finals and finals[0][0] == "client-turn-1"
+        assert finals[0][2] == "turn-db-1"
+        assert finals[0][3] == "how long has it hurt?"
+
+        item_create = next(e for e in session.sent if e["type"] == "conversation.item.create")
+        assert item_create["item"]["role"] == "user"
+        assert item_create["item"]["content"] == [
+            {"type": "input_text", "text": "how long has it hurt?"}
+        ]
+        assert {"type": "response.create"} in session.sent
+
+    asyncio.run(scenario())
+
+
+def test_submit_typed_text_empty_text_is_a_noop():
+    async def scenario():
+        rt = _mk_runtime(lambda pcm: None)
+        session = _FakeSession()
+        rt.bind_session(session)
+        rt._persist_student_sync = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not persist for empty text")
+        )
+
+        await rt.submit_typed_text("client-turn-2", "   ")
+
+        assert session.sent == []
+
+    asyncio.run(scenario())

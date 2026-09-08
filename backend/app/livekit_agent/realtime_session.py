@@ -1,20 +1,16 @@
-"""Phase A: one OpenAI Realtime session per interview, LISTEN-ONLY.
+"""One OpenAI Realtime session per interview - the production voice pipeline.
 
-Scope of THIS phase (deliberately minimal - see the approved POC plan):
-  - open exactly one Realtime connection for one interview,
-  - configure it as the turn-taking brain (semantic_vad) with
-    create_response=false / interrupt_response=false so it NEVER invents or
-    speaks a patient answer,
-  - forward the student's microphone PCM to it,
-  - observe and LOG the turn-taking signals (speech_started / speech_stopped /
-    input_audio_buffer.committed / input transcription completed) and errors.
+RealtimeSession:
+  - opens exactly one Realtime connection for one interview,
+  - configures it as the turn-taking brain (semantic_vad) and, for prompt_agent,
+    hands it the whole conversation (create_response=true, hosted prompt),
+  - forwards the student's microphone PCM to it,
+  - drives patient_engine-free playback: OpenAI Realtime owns generation, the
+    backend only persists/streams the resulting transcript and audio.
 
-It does NOT (yet) call patient_engine, create a backend turn, publish audio, or
-touch DB/transcript state - those arrive in Phases B-D. This class holds NO
-reference to PocAgentSession's turn-driving state, mirroring the isolation
-discipline of the legacy _CandidateTurnCoordinator (worker.py): a failure
-anywhere here is caught and logged and can never break the student's audio
-ingest task, let alone the legacy conversation path.
+This class holds NO reference to PocAgentSession's turn-driving state: a
+failure anywhere here is caught and logged and can never break the student's
+audio ingest task.
 
 Provider specifics live entirely behind the injected `client` (see
 realtime_client.OpenAIRealtimeClient) so this orchestration is unit-testable
@@ -24,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -32,7 +27,6 @@ from app.core.logging import get_logger
 from app.livekit_agent.realtime_client import (
     REALTIME_PCM_SAMPLE_RATE,
     RealtimeConnectionLike,
-    build_native_agent_session_update,
     build_prompt_agent_session_update,
     build_session_update,
     encode_audio_append,
@@ -119,11 +113,9 @@ class RealtimeSession:
         client: Any,
         settings: "Settings",
         on_event: EventHook | None = None,
-        on_turn_complete: "Callable[[str, str], Any] | None" = None,
         on_speech_started: "Callable[[], None] | None" = None,
         on_speech_stopped: "Callable[[], None] | None" = None,
         on_unavailable: UnavailableHook | None = None,
-        native_agent: Any | None = None,
         prompt_agent: Any | None = None,
     ) -> None:
         self._session_id = session_id
@@ -138,34 +130,12 @@ class RealtimeSession:
         self._on_speech_started = on_speech_started
         self._on_speech_stopped = on_speech_stopped
         self._on_unavailable = on_unavailable
-        self._native_agent = native_agent
-        if self._native_agent is not None:
-            self._native_agent.bind_session(self)
-        # prompt_agent mode: Realtime OWNS the conversation. Mutually exclusive
-        # with native_agent (the worker only ever wires one). When set, this
+        # prompt_agent mode: Realtime OWNS the conversation. When set, this
         # session sends the prompt_agent session.update and routes every server
         # event to the runtime, which handles audio-out + transcript persistence.
         self._prompt_agent = prompt_agent
         if self._prompt_agent is not None:
             self._prompt_agent.bind_session(self)
-        self._native_followups: dict[str, dict[str, Any]] = {}
-        self._native_active_response_id: str | None = None
-        self._native_active_item_id: str | None = None
-        self._native_audio_started_at: float | None = None
-        self._native_audio_bytes = 0
-        self._native_cancel_requested: set[str] = set()
-        self._native_cancel_sent: set[str] = set()
-        # Phase B: when supplied, a RealtimeTurnController turns the raw event
-        # stream into exactly one deduplicated backend turn per completed
-        # utterance and invokes this callback with (client_turn_id, transcript).
-        # None (the Phase A default) keeps this session pure listen-only.
-        self._turn_controller = None
-        if on_turn_complete is not None:
-            from app.livekit_agent.realtime_turn_controller import RealtimeTurnController
-
-            self._turn_controller = RealtimeTurnController(
-                session_id=session_id, on_turn_complete=on_turn_complete,
-            )
 
         self._audio_queue: "asyncio.Queue[bytes]" = asyncio.Queue(maxsize=_MAX_QUEUED_AUDIO_FRAMES)
         # Phase D: the single in-flight patient response's event sink. Set only
@@ -234,8 +204,6 @@ class RealtimeSession:
             (
                 self._prompt_agent.config["model"]
                 if self._prompt_agent is not None
-                else self._settings.openai_realtime_native_agent_model
-                if self._native_agent is not None
                 else self._settings.openai_realtime_model
             ),
             (
@@ -313,11 +281,6 @@ class RealtimeSession:
                 if self._prompt_agent is not None:
                     session_update = build_prompt_agent_session_update(
                         self._settings, self._prompt_agent.config,
-                    )
-                elif self._native_agent is not None:
-                    session_update = build_native_agent_session_update(
-                        self._settings,
-                        instructions=self._native_agent.instructions,
                     )
                 else:
                     session_update = build_session_update(self._settings)
@@ -410,18 +373,6 @@ class RealtimeSession:
                 )
                 if event_type:
                     await self._prompt_agent.handle_event(event_type, event)
-            if self._native_agent is not None:
-                event_type = getattr(event, "type", None) or (
-                    event.get("type") if isinstance(event, dict) else None
-                )
-                if event_type:
-                    await self._native_agent.handle_event(event_type, event)
-                    if event_type == _EVT_RESPONSE_DONE:
-                        response = _get(event, "response")
-                        response_id = _get(response, "id") or _get(event, "response_id")
-                        followup = self._native_followups.pop(str(response_id or ""), None)
-                        if followup is not None and self.is_ready and self._conn is conn:
-                            await conn.send(followup)
 
     def _handle_event(self, event: Any) -> None:
         event_type = getattr(event, "type", None) or (
@@ -497,7 +448,6 @@ class RealtimeSession:
                     and self._configuration_pending
                     and effective_session is not None
                     and effective_type in (None, "realtime")
-                    and self._effective_configuration_valid(effective_session)
                 ):
                     self._configuration_pending = False
                     self._configured_ready.set()
@@ -505,6 +455,32 @@ class RealtimeSession:
                     logger.info(
                         "realtime_session_configured_ready session_id=%s track=%s",
                         self._session_id, self._track_sid,
+                    )
+                    # Log the EFFECTIVE configuration OpenAI applied (hosted
+                    # prompt defaults merged with our session.update overrides).
+                    # No secrets: model/voice/turn-detection/noise/transcription only.
+                    _audio = _get(effective_session, "audio") or {}
+                    _inp = _get(_audio, "input") or {}
+                    _out = _get(_audio, "output") or {}
+                    _td = _get(_inp, "turn_detection") or {}
+                    _nr = _get(_inp, "noise_reduction") or {}
+                    _tx = _get(_inp, "transcription") or {}
+                    logger.info(
+                        "realtime_effective_config session_id=%s model=%s voice=%s"
+                        " td_type=%s td_threshold=%s td_prefix=%s td_silence=%s"
+                        " td_create_response=%s td_interrupt=%s"
+                        " noise_reduction=%s transcription_model=%s",
+                        self._session_id,
+                        _get(effective_session, "model"),
+                        _get(_out, "voice"),
+                        _get(_td, "type"),
+                        _get(_td, "threshold"),
+                        _get(_td, "prefix_padding_ms"),
+                        _get(_td, "silence_duration_ms"),
+                        _get(_td, "create_response"),
+                        _get(_td, "interrupt_response"),
+                        _get(_nr, "type"),
+                        _get(_tx, "model"),
                     )
                 else:
                     logger.warning(
@@ -523,12 +499,6 @@ class RealtimeSession:
                 self._session_id, self._track_sid, event_type,
             )
 
-        # Phase B: feed the turn controller (when active) so it can assemble
-        # exactly one backend turn per completed utterance. Isolated inside the
-        # controller's own try/except - never breaks the receive loop.
-        if self._turn_controller is not None:
-            self._turn_controller.handle_event(event_type, event)
-
         # Additive observer hook (tests). Never allowed to break the receive loop.
         if self._on_event is not None:
             try:
@@ -538,26 +508,6 @@ class RealtimeSession:
                     "realtime_session_event_hook_failed session_id=%s event=%s",
                     self._session_id, event_type,
                 )
-
-    def _effective_configuration_valid(self, effective_session: Any) -> bool:
-        """Native readiness additionally proves both authority tools survived."""
-        if self._native_agent is None:
-            return True
-        from app.livekit_agent.realtime_client import (
-            NATIVE_ALLOWED_FACTS_TOOL,
-            NATIVE_STAGE_RESPONSE_TOOL,
-        )
-
-        tools = _get(effective_session, "tools") or []
-        names = {_get(tool, "name") for tool in tools}
-        required = {NATIVE_ALLOWED_FACTS_TOOL, NATIVE_STAGE_RESPONSE_TOOL}
-        if required.issubset(names):
-            return True
-        logger.error(
-            "native_session_tools_not_accepted session_id=%s accepted_tools=%s",
-            self._session_id, sorted(str(name) for name in names if name),
-        )
-        return False
 
     def _route_response_event(self, event_type: str, event: Any) -> None:
         """Feed one outbound-response event to the active speak() collector.
@@ -640,118 +590,12 @@ class RealtimeSession:
             queue.put_nowait(("error", _get(event, "error")))
 
     async def send_event(self, event: dict[str, Any]) -> None:
-        """Send one native-agent client event through this job-owned socket."""
+        """Send one client event through this job-owned socket - used by
+        PromptAgentRuntime.submit_typed_text to inject a typed conversation
+        turn into the same Realtime session microphone input uses."""
         if not self.is_ready or self._conn is None:
             raise RuntimeError("Realtime session is unavailable")
         await self._conn.send(event)
-
-    async def send_tool_output(
-        self,
-        *,
-        call_id: str,
-        output: str,
-        after_response_id: str,
-        followup: dict[str, Any] | None,
-    ) -> None:
-        """Return a function result now; start its follow-up after response.done.
-
-        A default Realtime conversation permits one response at a time. Waiting
-        for the tool-call response's terminal event prevents overlapping model
-        responses while still appending the tool result immediately.
-        """
-        await self.send_event({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": output,
-            },
-        })
-        if followup is not None:
-            self._native_followups[after_response_id] = followup
-
-    async def submit_typed_text(self, text: str, client_turn_id: str) -> None:
-        if self._native_agent is None:
-            raise RuntimeError("typed native input requires native-agent mode")
-        await self._native_agent.submit_typed_text(text, client_turn_id)
-
-    def arm_native_response(self, response_id: str) -> None:
-        if response_id:
-            self._native_active_response_id = response_id
-            self._native_active_item_id = None
-            self._native_audio_started_at = None
-            self._native_audio_bytes = 0
-
-    def note_native_audio(self, response_id: str, item_id: str, byte_count: int) -> None:
-        if response_id != self._native_active_response_id or byte_count <= 0:
-            return
-        if item_id:
-            self._native_active_item_id = item_id
-        if self._native_audio_started_at is None:
-            self._native_audio_started_at = time.monotonic()
-        self._native_audio_bytes += byte_count
-
-    def disarm_native_response(self, response_id: str) -> None:
-        if self._native_active_response_id == response_id:
-            self._native_active_response_id = None
-            self._native_active_item_id = None
-            self._native_audio_started_at = None
-            self._native_audio_bytes = 0
-
-    def is_native_response_cancelled(self, response_id: str) -> bool:
-        return bool(response_id and response_id in self._native_cancel_requested)
-
-    def quarantine_active_native_response(self) -> str | None:
-        """Synchronously reject late PCM before the async cancel task runs."""
-        response_id = self._native_active_response_id
-        if response_id:
-            self._native_cancel_requested.add(response_id)
-        return response_id
-
-    async def cancel_native_response(self, response_id: str) -> None:
-        if (
-            not response_id
-            or response_id in self._native_cancel_sent
-            or self._conn is None
-        ):
-            return
-        self._native_cancel_requested.add(response_id)
-        self._native_cancel_sent.add(response_id)
-        item_id = self._native_active_item_id
-        started_at = self._native_audio_started_at
-        generated_ms = int(self._native_audio_bytes / (REALTIME_PCM_SAMPLE_RATE * 2) * 1000)
-        played_ms = (
-            min(generated_ms, max(0, int((time.monotonic() - started_at) * 1000)))
-            if started_at is not None
-            else 0
-        )
-        if self._native_active_response_id == response_id:
-            self._native_active_response_id = None
-        self._native_active_item_id = None
-        self._native_audio_started_at = None
-        self._native_audio_bytes = 0
-        try:
-            await self._conn.send({"type": "response.cancel", "response_id": response_id})
-            logger.info(
-                "native_response_cancel_sent session_id=%s response_id=%s",
-                self._session_id, response_id,
-            )
-            if item_id:
-                await self._conn.send({
-                    "type": "conversation.item.truncate",
-                    "item_id": item_id,
-                    "content_index": 0,
-                    "audio_end_ms": played_ms,
-                })
-                logger.info(
-                    "native_conversation_audio_truncated session_id=%s response_id=%s item_id=%s audio_end_ms=%d",
-                    self._session_id, response_id, item_id, played_ms,
-                )
-        except Exception:
-            logger.exception(
-                "native_response_cancel_failed session_id=%s response_id=%s",
-                self._session_id, response_id,
-            )
 
     async def speak(self, *, client_turn_id: str, text: str, on_audio: AudioSink) -> SpeakResult:
         """Phase D: make Realtime speak the backend-APPROVED `text` in native
@@ -869,9 +713,6 @@ class RealtimeSession:
         Idempotent: the response_id is consumed on the first cancel, so a
         duplicate interruption sends nothing further. Never raises."""
         queue = self._active_response
-        if queue is None and self._native_active_response_id is not None:
-            await self.cancel_native_response(self._native_active_response_id)
-            return
         if (
             queue is None
             or self._active_response_cancel_requested

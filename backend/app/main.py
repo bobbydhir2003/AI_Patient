@@ -23,7 +23,6 @@ from app.api import (
     queue as queue_api,
     sessions,
     students,
-    voice,
 )
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -48,20 +47,15 @@ async def _lifespan(_: FastAPI):
             get_assessment_worker().start()
         get_heartbeat().start()  # no-op when Redis is not configured
     yield
-    # Shutdown: stop background workers and release the ElevenLabs keep-alive pool.
-    from app.voice.elevenlabs_client import close_http_client
+    # Shutdown: stop background workers.
+    if workers_on:
+        from app.core.assessment_worker import get_assessment_worker
+        from app.core.telemetry import get_telemetry
+        from app.core.worker_registry import get_heartbeat
 
-    try:
-        if workers_on:
-            from app.core.assessment_worker import get_assessment_worker
-            from app.core.telemetry import get_telemetry
-            from app.core.worker_registry import get_heartbeat
-
-            get_assessment_worker().stop()
-            get_telemetry().stop_sampler()
-            get_heartbeat().stop()  # deletes this worker's Redis record immediately
-    finally:
-        close_http_client()
+        get_assessment_worker().stop()
+        get_telemetry().stop_sampler()
+        get_heartbeat().stop()  # deletes this worker's Redis record immediately
 
 
 def _install_telemetry_middleware(_app: FastAPI) -> None:
@@ -103,8 +97,6 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        # Lets the browser read the TTS pause hint on streamed audio responses.
-        expose_headers=["X-Pause-Before-Ms"],
     )
     _install_telemetry_middleware(_app)
     register_exception_handlers(_app)
@@ -126,7 +118,6 @@ def create_app() -> FastAPI:
     _app.include_router(interviews.router, prefix="/api")
     _app.include_router(queue_api.router, prefix="/api")
     _app.include_router(assessments.router, prefix="/api")
-    _app.include_router(voice.router, prefix="/api")
     # Phase 1 LiveKit POC only (admin-gated) - additive, does not alter any
     # route above. See app/api/livekit.py.
     _app.include_router(livekit.router, prefix="/api")

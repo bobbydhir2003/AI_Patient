@@ -12,12 +12,15 @@ from tests.conftest import FakeOpenAIClient, make_client
 
 
 def _run_interview(client, case_id="camden", questions=("Hi Camden, how are you?", "What do you like to play?")):
+    """Create a session, seed a student+patient transcript (as the LiveKit +
+    OpenAI Realtime worker's persistence layer does), and complete it. The old
+    typed HTTP /messages path is gone, so the transcript is seeded directly."""
+    from tests.conftest import seed_exchange
+
     session_id = client.post(
         "/api/sessions", json={"studentName": "Assess Tester", "studentId": "", "caseId": case_id}
     ).json()["sessionId"]
-    for q in questions:
-        r = client.post(f"/api/interviews/{session_id}/messages", json={"text": q, "caseId": case_id})
-        assert r.status_code == 200
+    seed_exchange(client._test_engine, session_id, [(q, "I get tired fast.") for q in questions])
     client.post(f"/api/sessions/{session_id}/complete")
     return session_id
 
@@ -108,6 +111,7 @@ def _queue_happy_path(fake, student_text="Hi Camden, how are you?"):
 def assess_env(engine):
     fake = FakeOpenAIClient(text="I get tired fast.", response_type="clinical_answer")
     with make_client(engine, fake) as api:
+        api._test_engine = engine
         yield api, fake
 
 

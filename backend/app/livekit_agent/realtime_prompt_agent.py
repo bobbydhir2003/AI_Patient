@@ -1,21 +1,21 @@
 """prompt_agent runtime: OpenAI Realtime OWNS the whole patient conversation.
 
-Unlike controlled/native mode, the backend here authors NOTHING. Realtime
-listens, decides turn-taking (server_vad), and answers the student naturally in
-the patient's voice using a hosted per-patient prompt. This runtime's ONLY jobs
-are the transcript/persistence side-effects the rest of the app already depends
-on:
+The backend here authors NOTHING. Realtime listens, decides turn-taking
+(server_vad), and answers the student naturally in the patient's voice using a
+hosted per-patient prompt. This runtime's jobs are:
 
   - stream Realtime's patient audio out to the LiveKit AudioSource (via the
     worker's on_audio),
   - persist the FINAL student utterance as a normal student ConversationTurn and
     publish a `student_transcript` transcript_sync event carrying its DB id,
   - persist the FINAL patient utterance as a normal patient ConversationTurn and
-    publish a `patient_text_final` transcript_sync event carrying its DB id.
+    publish a `patient_text_final` transcript_sync event carrying its DB id,
+  - inject typed student text into the SAME Realtime conversation
+    (submit_typed_text) so typed and spoken input answer identically.
 
-It bypasses RealtimeTurnController, patient_adapter generation, native staging,
-Deepgram/Silero/Smart Turn, ElevenLabs and the conversation:"none" speak() path
-entirely - Realtime is the conversational brain in this mode.
+It bypasses patient_adapter generation, Deepgram/Silero/Smart Turn, ElevenLabs
+and the conversation:"none" speak() path entirely - Realtime is the
+conversational brain in this mode.
 
 Bound to exactly one RealtimeSession (one interview), same isolation contract as
 the other runtimes: a failure in here is caught/logged and never breaks the
@@ -29,7 +29,7 @@ from typing import Any, Awaitable, Callable
 
 from app.core.constants import PROMPT_VERSION, ROLE_PATIENT
 from app.core.logging import get_logger
-from app.livekit_agent import native_agent
+from app.livekit_agent.turn_persistence import persist_student_turn_once
 from app.repositories.transcript_repository import TranscriptRepository
 
 logger = get_logger("app.livekit_agent.realtime")
@@ -335,19 +335,62 @@ class PromptAgentRuntime:
             return
         self._on_student_final(client_turn_id, self._next_epoch(), student_turn_id, text)
 
+    # ---- typed-input entry point -------------------------------------------
+    async def submit_typed_text(self, client_turn_id: str, text: str) -> None:
+        """Typed-input counterpart to a spoken turn: injects `text` into the
+        SAME OpenAI Realtime conversation microphone turns use (no backend
+        generation, no ElevenLabs). There is no
+        conversation.item.input_audio_transcription.completed event for a text
+        item (that event is audio-only), so the student turn is persisted here
+        directly rather than via _on_student_transcription_done. The patient's
+        reply then arrives through the normal response.* event flow
+        (_on_response_created/_on_audio_delta/_on_response_done), exactly as
+        it does after a spoken end-of-turn."""
+        text = text.strip()
+        if not text or self._session is None:
+            return
+        try:
+            student_turn_id = await asyncio.get_running_loop().run_in_executor(
+                None, self._persist_student_sync, client_turn_id, text, "manual_typed",
+            )
+        except Exception:
+            logger.exception(
+                "prompt_agent_typed_student_persist_failed session_id=%s client_turn_id=%s",
+                self._session_id, client_turn_id,
+            )
+            return
+        self._on_student_final(client_turn_id, self._next_epoch(), student_turn_id, text)
+        try:
+            await self._session.send_event({
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+            })
+            await self._session.send_event({"type": "response.create"})
+        except Exception:
+            logger.exception(
+                "prompt_agent_typed_text_send_failed session_id=%s client_turn_id=%s",
+                self._session_id, client_turn_id,
+            )
+
     # ---- blocking DB persistence (run in executor) ------------------------
-    def _persist_student_sync(self, client_turn_id: str, text: str) -> str:
+    def _persist_student_sync(
+        self, client_turn_id: str, text: str, source: str = "openai_realtime",
+    ) -> str:
         db = self._db_factory()
         try:
             # Reuse the existing, idempotent student-turn writer (dedups by
             # client_turn_id and validates session ownership/lock state).
-            saved = native_agent.persist_student_turn_once(
+            saved = persist_student_turn_once(
                 db,
                 session_id=self._session_id,
                 case_id=self._case_id,
                 client_turn_id=client_turn_id,
                 text=text,
-                source="openai_realtime",
+                source=source,
             )
             return saved.id
         finally:

@@ -313,3 +313,35 @@ def auth_headers(client, **kwargs) -> dict:
 
 def bearer(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+def seed_exchange(engine, session_id, pairs=(("Hello?", "I'm okay."),), *, start=1):
+    """Seed a full student+patient transcript directly in the DB.
+
+    The old typed HTTP interview path (POST /interviews/{id}/messages) has been
+    removed - the live patient conversation now runs through LiveKit + OpenAI
+    Realtime, which persists turns via the worker. Tests that only need a
+    transcript to exist (assessment, completion, transcript restore) seed it
+    here through the repository, exactly as the worker's persistence layer does.
+    Returns the number of turns written.
+    """
+    from sqlalchemy.orm import sessionmaker
+
+    from app.repositories.transcript_repository import TranscriptRepository
+
+    db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+    try:
+        repo = TranscriptRepository(db)
+        i = start - 1
+        for student_text, patient_text in pairs:
+            i += 1
+            if student_text is not None:
+                repo.append_turn(session_id, "student", student_text,
+                                 client_turn_id=f"s{i}", source="typed")
+            if patient_text is not None:
+                repo.append_turn(session_id, "patient", patient_text,
+                                 client_turn_id=f"p{i}", source="openai_realtime")
+        db.commit()
+        return i
+    finally:
+        db.close()

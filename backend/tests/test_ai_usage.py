@@ -1,9 +1,15 @@
 """AI Usage & Cost telemetry tests.
 
-Covers: real OpenAI usage recording on an interview turn, totals = input + output,
-session aggregation, ElevenLabs recording, cost calculation, historical pricing
-preservation, average cost, time filters, admin authorization, no double-counting
-on replay, and separation of concurrent sessions.
+Covers OpenAI usage recording, totals = input + output, session aggregation,
+cost calculation, historical pricing preservation, average cost, time filters,
+admin authorization, and separation of concurrent sessions.
+
+The live interview usage producer is now the LiveKit + OpenAI Realtime worker
+(and the assessment pipeline); the old typed HTTP /messages producer was
+removed. These tests therefore seed usage events directly through
+`usage_recorder.record_openai_usage` - exactly the call those producers make -
+and then assert the aggregation/reporting the dashboard performs. ElevenLabs
+usage recording was removed with the ElevenLabs TTS path.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -20,29 +26,28 @@ def _factory(engine):
     return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
-def _start(client, case_id="camden"):
-    r = client.post("/api/sessions", json={"studentName": "Usage Tester", "studentId": "", "caseId": case_id})
-    return r.json()["sessionId"]
-
-
-def _send(client, session_id, text, case_id="camden", client_turn_id=None):
-    body = {"text": text, "caseId": case_id}
-    if client_turn_id:
-        body["clientTurnId"] = client_turn_id
-    return client.post(f"/api/interviews/{session_id}/messages", json=body)
+def _record_turn(engine, session_id, *, case_id="camden", n=1):
+    """Record N OpenAI usage events for a session, mirroring what a producer
+    records per turn (100 input / 40 output, matching the legacy fake)."""
+    db = _factory(engine)()
+    try:
+        for _ in range(n):
+            usage_recorder.record_openai_usage(
+                db, session_id, "stud", case_id,
+                {"input_tokens": 100, "output_tokens": 40, "model": "gpt-4o-mini"},
+            )
+    finally:
+        db.close()
 
 
 # --------------------------------------------------- 1,2,3: OpenAI recording
-def test_openai_usage_recorded_with_totals(student_client, engine):
-    sid = _start(student_client)
-    assert _send(student_client, sid, "Hi, how are you?").status_code == 200
-
+def test_openai_usage_recorded_with_totals(engine):
+    _record_turn(engine, "s1")
     db = _factory(engine)()
     try:
-        events = db.query(AiUsageEvent).filter_by(session_id=sid, provider="openai").all()
+        events = db.query(AiUsageEvent).filter_by(session_id="s1", provider="openai").all()
         assert len(events) == 1, "exactly one OpenAI event per turn"
         e = events[0]
-        # The FakeOpenAIClient reports 100 input / 40 output.
         assert e.input_tokens == 100 and e.output_tokens == 40
         assert e.total_tokens == e.input_tokens + e.output_tokens == 140  # totals = in + out
         assert e.estimated_cost_usd > 0
@@ -50,13 +55,11 @@ def test_openai_usage_recorded_with_totals(student_client, engine):
         db.close()
 
 
-def test_multiple_turns_accumulate(student_client, engine):
-    sid = _start(student_client)
-    for q in ("one", "two", "three"):
-        assert _send(student_client, sid, f"question {q}?").status_code == 200
+def test_multiple_turns_accumulate(engine):
+    _record_turn(engine, "s2", n=3)
     db = _factory(engine)()
     try:
-        events = db.query(AiUsageEvent).filter_by(session_id=sid, provider="openai").all()
+        events = db.query(AiUsageEvent).filter_by(session_id="s2", provider="openai").all()
         assert len(events) == 3
         assert sum(e.total_tokens for e in events) == 3 * 140
     finally:
@@ -64,13 +67,11 @@ def test_multiple_turns_accumulate(student_client, engine):
 
 
 # --------------------------------------------------- 4: session aggregation
-def test_session_aggregation(student_client, engine):
-    sid = _start(student_client)
-    _send(student_client, sid, "a?")
-    _send(student_client, sid, "b?")
+def test_session_aggregation(engine):
+    _record_turn(engine, "s3", n=2)
     db = _factory(engine)()
     try:
-        agg = usage_service.session_detail(db, sid)
+        agg = usage_service.session_detail(db, "s3")
         assert agg is not None
         assert agg["input_tokens"] == 200 and agg["output_tokens"] == 80
         assert agg["total_tokens"] == 280
@@ -80,25 +81,7 @@ def test_session_aggregation(student_client, engine):
         db.close()
 
 
-# --------------------------------------------------- 5,6,7: EL + cost + pricing
-def test_elevenlabs_recording_and_cost(engine):
-    db = _factory(engine)()
-    try:
-        usage_recorder.record_elevenlabs_usage(
-            db, session_id="s_el", student_id="stud", case_id="camden",
-            characters=1000, voice_id="v1", model_id="eleven_turbo_v2_5",
-        )
-        e = db.query(AiUsageEvent).filter_by(session_id="s_el", provider="elevenlabs").one()
-        assert e.characters_generated == 1000
-        expected, per_char = pricing.estimate_elevenlabs_cost(1000)
-        assert abs(e.estimated_cost_usd - expected) < 1e-9
-        # Historical pricing preserved on the row.
-        assert abs(e.provider_unit_price - per_char) < 1e-12
-        assert e.pricing_version == pricing.PRICING_VERSION
-    finally:
-        db.close()
-
-
+# --------------------------------------------------- 5,6: cost + pricing
 def test_openai_cost_matches_pricing_and_preserves_rates(engine):
     db = _factory(engine)()
     try:
@@ -127,11 +110,9 @@ def test_missing_usage_records_nothing(engine):
 
 
 # --------------------------------------------------- 8: average cost + filters
-def test_summary_average_cost_and_totals(student_client, engine):
-    s1 = _start(student_client)
-    _send(student_client, s1, "q?")
-    s2 = _start(student_client)
-    _send(student_client, s2, "q?")
+def test_summary_average_cost_and_totals(engine):
+    _record_turn(engine, "s_a")
+    _record_turn(engine, "s_b")
     db = _factory(engine)()
     try:
         summ = usage_service.summary(db, "today")
@@ -177,35 +158,17 @@ def test_usage_endpoints_require_admin(engine):
         assert c.get("/api/admin/usage/summary").status_code == 401  # anon
 
 
-# --------------------------------------------------- 11: no double counting
-def test_replayed_turn_not_double_counted(student_client, engine):
-    sid = _start(student_client)
-    cti = "fixed-client-turn-id"
-    r1 = _send(student_client, sid, "hello?", client_turn_id=cti)
-    r2 = _send(student_client, sid, "hello?", client_turn_id=cti)  # idempotent replay
-    assert r1.status_code == 200 and r2.status_code == 200
-    db = _factory(engine)()
-    try:
-        events = db.query(AiUsageEvent).filter_by(session_id=sid, provider="openai").count()
-        assert events == 1, "a replayed (idempotent) turn must be counted once"
-    finally:
-        db.close()
-
-
 # --------------------------------------------------- 12: concurrent sessions
-def test_sessions_kept_separate(student_client, engine):
-    s1 = _start(student_client)
-    s2 = _start(student_client)
-    _send(student_client, s1, "q1?")
-    _send(student_client, s2, "q2?")
-    _send(student_client, s2, "q3?")
+def test_sessions_kept_separate(engine):
+    _record_turn(engine, "sep1", n=1)
+    _record_turn(engine, "sep2", n=2)
     db = _factory(engine)()
     try:
-        assert usage_service.session_detail(db, s1)["total_tokens"] == 140
-        assert usage_service.session_detail(db, s2)["total_tokens"] == 280
+        assert usage_service.session_detail(db, "sep1")["total_tokens"] == 140
+        assert usage_service.session_detail(db, "sep2")["total_tokens"] == 280
         listing = usage_service.sessions(db, "today", limit=10)
         assert listing["total"] == 2
         ids = {row["session_id"] for row in listing["sessions"]}
-        assert ids == {s1, s2}
+        assert ids == {"sep1", "sep2"}
     finally:
         db.close()
