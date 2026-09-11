@@ -16,6 +16,10 @@ export function RegisterPage() {
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    if (!studentNumber.trim()) {
+      setError("Student number (NUID) is required.");
+      return;
+    }
     if (password.length < 8) {
       setError("Password must be at least 8 characters.");
       return;
@@ -69,9 +73,9 @@ export function RegisterPage() {
             onChange={(e) => setEmail(e.target.value)} autoComplete="email" required />
         </div>
         <div className="pt-field">
-          <label htmlFor="studentNumber">Student number</label>
+          <label htmlFor="studentNumber">Student number (NUID)</label>
           <input id="studentNumber" className="pt-input" value={studentNumber}
-            onChange={(e) => setStudentNumber(e.target.value)} />
+            onChange={(e) => setStudentNumber(e.target.value)} required />
         </div>
         <div className="pt-field">
           <label htmlFor="password">Password</label>

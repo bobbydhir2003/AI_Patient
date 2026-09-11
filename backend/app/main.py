@@ -23,6 +23,7 @@ from app.api import (
     queue as queue_api,
     sessions,
     students,
+    surveys,
 )
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
@@ -116,6 +117,7 @@ def create_app() -> FastAPI:
     _app.include_router(access.admin_router, prefix="/api")
     _app.include_router(sessions.router, prefix="/api")
     _app.include_router(interviews.router, prefix="/api")
+    _app.include_router(surveys.router, prefix="/api")
     _app.include_router(queue_api.router, prefix="/api")
     _app.include_router(assessments.router, prefix="/api")
     # Phase 1 LiveKit POC only (admin-gated) - additive, does not alter any

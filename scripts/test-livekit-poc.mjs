@@ -1579,6 +1579,39 @@ test("PHASE C2 B: mic resolves before agent_ready - waits, then LISTENING once a
   await engine.end();
 });
 
+test("P1 STARTUP: no early LISTENING before agent_ready, and the shipped startup timeline markers fire in order", async () => {
+  resetFixtures();
+  // Default nextMicBehavior resolves the mic immediately, and the fake room
+  // connects immediately - so this isolates the agent_ready gate specifically.
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-p1-startup");
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+
+  // Room connected + mic ready, but NO agent_ready yet: must NOT be LISTENING,
+  // and the "Listening entered" marker (startup_reconciled) must NOT have fired.
+  assert.equal(engine.getState(), "waiting_for_agent", "must not enter LISTENING before agent_ready");
+  assert.equal(FakeSpeechRecognition.instances.length, 0, "recognition must not start before agent_ready");
+  assert.ok(
+    !telemetryEvents().some((e) => e.event === "livekit_startup_reconciled"),
+    "the Listening marker must not fire before both readiness signals are in",
+  );
+  // The earlier shipped startup markers are already present (proving the
+  // instrumentation covers the pre-agent_ready window too).
+  const before = telemetryEvents().map((e) => e.event);
+  assert.ok(before.includes("livekit_room_connected"), "room-connected marker fired");
+  assert.ok(before.includes("livekit_mic_ready"), "mic-ready marker fired");
+
+  sendAgentReady(room);
+  assert.equal(engine.getState(), "listening", "LISTENING only once agent_ready also arrives");
+  const after = telemetryEvents().map((e) => e.event);
+  assert.ok(after.includes("livekit_agent_ready_received"), "agent_ready-received marker fired");
+  assert.ok(after.includes("livekit_startup_reconciled"), "Listening marker fires exactly at LISTENING");
+
+  await engine.end();
+});
+
 test("PHASE C2 C: an early agent_ready survives a full microphone retry cycle - never discarded, never needs resending", async () => {
   resetFixtures();
   let resolveSecondAttempt;

@@ -4,6 +4,8 @@ import { AppFooter } from "./components/layout/AppFooter";
 import { WelcomePage } from "./pages/WelcomePage";
 import { CaseCatalogPage } from "./pages/CaseCatalogPage";
 import { CaseIntroductionPage } from "./pages/CaseIntroductionPage";
+import { PreSurveyPage } from "./pages/PreSurveyPage";
+import { PostSurveyPage } from "./pages/PostSurveyPage";
 import { InterviewPage } from "./pages/InterviewPage";
 import { InterviewQueuePage } from "./pages/InterviewQueuePage";
 import { InterviewCompletePage } from "./pages/InterviewCompletePage";
@@ -52,6 +54,8 @@ function App() {
         <Route path="/" element={<WelcomePage />} />
         <Route path="/cases" element={<CaseCatalogPage />} />
         <Route path="/cases/:caseId" element={<CaseIntroductionPage />} />
+        <Route path="/survey/:caseId/pre" element={<PreSurveyPage />} />
+        <Route path="/survey/:sessionId/post" element={<PostSurveyPage />} />
         <Route path="/interview/complete" element={<InterviewCompletePage />} />
         <Route path="/interview/:caseId" element={<InterviewPage />} />
         <Route path="/queue/:caseId" element={<InterviewQueuePage />} />

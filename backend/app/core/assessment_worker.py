@@ -80,25 +80,63 @@ class AssessmentWorker:
 
     # ------------------------------------------------------------------ loop
     def _loop(self) -> None:
-        from app.database.connection import get_session_factory
-
         poll = get_settings().assessment_poll_interval_seconds
         while not self._stop.is_set():
-            claimed = None
+            claimed = False
             try:
-                db = get_session_factory()()
-                try:
-                    self._reap_stuck(db)
-                    claimed = self._claim_if_capacity(db)
-                    if claimed is not None:
-                        self._execute(db, claimed)
-                finally:
-                    db.close()
+                claimed = self._process_once()
             except Exception as exc:  # never let a worker thread die
                 logger.warning("assessment_worker_error error=%s", exc)
-            if claimed is None:
+            if not claimed:
                 if self._stop.wait(poll):
                     break
+
+    def _process_once(self) -> bool:
+        """One poll cycle, split so a PostgreSQL connection is NEVER held while
+        an assessment waits on OpenAI (this is what makes high assessment
+        concurrency safe against a small DB pool):
+
+          A. CLAIM / LOAD - open a SHORT session, reap stuck jobs, atomically
+             claim one PENDING run and commit it to PROCESSING, then CLOSE that
+             session completely BEFORE any OpenAI work begins.
+          B/C/D. COMPUTE + SAVE + FAILURE - open a SEPARATE, fresh session for
+             the pipeline (generation + verification + persistence, and the
+             FAILED path). Every OpenAI call in the pipeline is preceded by a
+             commit (see usage_recorder.record_openai_usage / the VERIFYING
+             transition), and the session uses expire_on_commit=False, so no
+             pool connection is checked out across the long provider round trips
+             - it is held only for the brief DB writes.
+
+        Returns True iff a run was claimed and executed this cycle (so the loop
+        polls again immediately instead of sleeping)."""
+        from app.database.connection import get_session_factory
+        from app.models import AssessmentRun
+
+        # --- A. CLAIM / LOAD (short-lived session, closed before compute) ---
+        run_id: str | None = None
+        db = get_session_factory()()
+        try:
+            self._reap_stuck(db)
+            claimed = self._claim_if_capacity(db)
+            run_id = claimed.id if claimed is not None else None
+        finally:
+            db.close()  # released BEFORE any OpenAI work — the whole point
+        if run_id is None:
+            return False
+
+        # --- B/C/D. COMPUTE + SAVE (dedicated fresh session) ---
+        db = get_session_factory()()
+        try:
+            run = db.get(AssessmentRun, run_id)
+            if run is None:
+                # Claimed row vanished (should not happen: the claim committed
+                # PROCESSING). Release the reserved slot so it can't leak.
+                self._release_execution_slot(run_id)
+                return True
+            self._execute(db, run)
+        finally:
+            db.close()
+        return True
 
     def _claim_if_capacity(self, db):
         """Adaptive throttle (Part 6): only claim a job if the CURRENT OpenAI
@@ -171,11 +209,15 @@ class AssessmentWorker:
         return None  # another worker grabbed it first
 
     def _execute(self, db, run) -> None:
-        # NOTE: the in-flight slot is RESERVED at claim time (_claim_if_capacity)
-        # so the adaptive cap holds across threads; here we only release it.
+        """Run the pipeline for a claimed run on the given (fresh) session.
+
+        The in-flight slot + fleet-wide semaphore token were RESERVED at claim
+        time (_claim_if_capacity); this method releases them when done. Does NOT
+        close `db` - the caller (_process_once) owns that session's lifecycle."""
         tele = get_telemetry()
         settings = get_settings()
         t0 = time.monotonic()
+        run_id = run.id  # capture before any commit/detach so the finally is safe
         try:
             if settings.mock_ai:
                 self._execute_mock(db, run)
@@ -187,15 +229,21 @@ class AssessmentWorker:
             tele.openai.window.incr("assessment_completed")
         except Exception as exc:
             # The pipeline marks the run FAILED itself; log and continue.
-            logger.warning("assessment_job_failed run=%s error=%s", run.id, exc)
+            logger.warning("assessment_job_failed run=%s error=%s", run_id, exc)
         finally:
-            tele.assessment_in_flight.dec()
-            with self._tokens_lock:
-                token = self._tokens.pop(run.id, None)
-            _assessment_sem.release(token)
-            tele.history  # (touch; no-op) keep import graph obvious
             duration_ms = int((time.monotonic() - t0) * 1000)
+            self._release_execution_slot(run_id)
             tele.openai.window.observe_latency(duration_ms)  # coarse job duration signal
+
+    def _release_execution_slot(self, run_id: str) -> None:
+        """Release the fleet-wide assessment semaphore token + the process-local
+        in-flight gauge reserved for this run at claim time. Safe if no token
+        was stored (DistributedSemaphore.release(None) is a no-op), so the
+        vanished-row path and the direct-_execute test path both stay correct."""
+        get_telemetry().assessment_in_flight.dec()
+        with self._tokens_lock:
+            token = self._tokens.pop(run_id, None)
+        _assessment_sem.release(token)
 
     def _execute_mock(self, db, run) -> None:
         """MOCK_AI: simulate assessment work without spending, so the queue and

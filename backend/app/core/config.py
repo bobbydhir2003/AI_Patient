@@ -28,6 +28,13 @@ _LENIENT_NUMERIC_FIELDS = (
     "openai_assessment_timeout_seconds",
     "openai_max_output_tokens",
     "openai_max_retries",
+    "redcap_timeout_seconds",
+    # LiveKit worker capacity knobs: a stray unit suffix in a worker machine's
+    # .env must fall back to the safe default, not crash worker startup.
+    "livekit_worker_load_threshold",
+    "livekit_worker_num_idle_processes",
+    "livekit_worker_job_memory_warn_mb",
+    "livekit_worker_job_memory_limit_mb",
     # NOTE: access_token_expire_minutes is intentionally NOT lenient - a bad
     # token-lifetime value is security-critical and must fail loudly, never
     # silently fall back to a default.
@@ -110,6 +117,37 @@ class Settings(BaseSettings):
     # bug) - changing this requires updating both sides together.
     livekit_agent_name: str = "ptai-patient-agent"
 
+    # --- LiveKit worker capacity (explicit, not hidden framework defaults) ---
+    # Wired into WorkerOptions in app/livekit_agent/worker.py._build_worker_options.
+    # The SAME values run on EVERY worker machine: horizontal scaling is "run the
+    # same worker code, same agent_name, same config, on N machines" - LiveKit
+    # Cloud load-balances jobs across all workers sharing agent_name. See
+    # docs/DEPLOYMENT.md's multi-worker topology.
+    #
+    # CPU-load ceiling (livekit-agents' 5-sample moving average) above which THIS
+    # worker stops accepting NEW jobs, so LiveKit Cloud routes them to a
+    # less-loaded worker sharing the same agent_name. Passed to WorkerOptions as
+    # a plain float so it applies in BOTH the `dev` and `start` CLI modes (the
+    # framework default is a ServerEnvOption: inf in dev / 0.7 in prod).
+    livekit_worker_load_threshold: float = 0.70
+    # Warm (pre-spawned) job subprocesses kept ready PER worker machine, so a
+    # burst of Start-Voice clicks does not cold-start most jobs (lowers Start
+    # Voice -> Listening latency). 6 is a sane per-machine default for the
+    # planned 3-machine / ~60-student topology - deliberately NOT 20. Set 0
+    # locally to avoid pre-spawning several Python interpreters on a laptop (see
+    # the local two-worker test in docs/DEPLOYMENT.md).
+    livekit_worker_num_idle_processes: int = 6
+    # Per-job memory guard rails (livekit-agents 1.3.5 WorkerOptions). `warn` logs
+    # when a job subprocess's RSS exceeds this many MB; `limit` (0 = disabled)
+    # kills a runaway job subprocess. Defaults MATCH the framework's own
+    # (500 / 0) so behavior is unchanged unless tuned from real per-job numbers.
+    livekit_worker_job_memory_warn_mb: int = 500
+    livekit_worker_job_memory_limit_mb: int = 0
+    # Optional human label for THIS worker machine, used ONLY in logs to confirm
+    # LiveKit Cloud is distributing jobs across Worker A/B/C. Blank => hostname.
+    # NEVER affects dispatch, isolation, or interview routing.
+    livekit_worker_instance_id: str = ""
+
     # --- Voice engine selection. "livekit" (LiveKit + OpenAI Realtime
     # prompt_agent) is the only supported interview voice architecture now -
     # the legacy browser SpeechRecognition + ElevenLabs path has been
@@ -165,6 +203,25 @@ class Settings(BaseSettings):
     openai_realtime_semantic_eagerness: str = "low"
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+
+    # --- REDCap (Pre/Post experience surveys) ---
+    # Server-side ONLY. The API token must never reach the frontend/logs. When
+    # url/token are empty, REDCap sync is treated as unconfigured: survey
+    # submissions still validate and are recorded locally, but no import is
+    # attempted (see survey_service). Override via REDCAP_API_URL / REDCAP_API_TOKEN.
+    redcap_api_url: str = ""
+    redcap_api_token: str = ""
+    redcap_timeout_seconds: float = 15.0
+    # Multi-case separation (see survey_service._case_instance_fields and
+    # docs/REDCAP.md). The 4 cases (carly/camden/sofia/jayden) reuse the SAME
+    # REDCap variable names, so they MUST be kept in separate per-case instances
+    # or a later case would overwrite an earlier one on the shared record_id
+    # (=NUID). When True (the required production design) the project is
+    # LONGITUDINAL with one event per case and each import is routed to that
+    # event via redcap_event_name. When False (a flat single-case project) no
+    # event routing is sent and multi-case separation is NOT guaranteed - only
+    # safe for a single-case deployment. Override via REDCAP_LONGITUDINAL.
+    redcap_longitudinal: bool = True
 
     log_level: str = "INFO"
 
@@ -271,11 +328,19 @@ class Settings(BaseSettings):
     openai_capacity_critical_pct: float = 0.95
 
     # Assessment background queue (DB-backed; live interviews get priority).
+    # Concurrency raised to 20 (NORMAL) after the worker was refactored so an
+    # assessment holds a PostgreSQL connection only for brief DB writes, never
+    # across its long OpenAI calls (see core/assessment_worker._process_once).
+    # This is a FLEET-WIDE cap enforced by DistributedSemaphore("assessment")
+    # in Redis: with 3 uvicorn workers each running this many local threads, at
+    # most this many assessments EXECUTE across the whole deployment at once.
     assessment_queue_enabled: bool = True
-    assessment_worker_concurrency: int = 3
-    # Adaptive throttling: effective workers by OpenAI capacity state.
-    assessment_workers_busy: int = 2
-    assessment_workers_protecting: int = 1
+    assessment_worker_concurrency: int = 20
+    # Adaptive throttling: effective workers by OpenAI capacity state (live
+    # interviews always keep priority, so assessments back off first). Kept
+    # proportional to the new NORMAL ceiling (~60% BUSY, ~30% PROTECTING).
+    assessment_workers_busy: int = 12
+    assessment_workers_protecting: int = 6
     assessment_pause_on_critical: bool = True
     assessment_poll_interval_seconds: float = 1.0
 

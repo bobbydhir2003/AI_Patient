@@ -21,12 +21,24 @@ class RegisterRequest(CamelModel):
     full_name: str = Field(min_length=1, max_length=200)
     email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=8, max_length=128)
-    student_number: str = Field(default="", max_length=100)
+    # Student number (NUID) is MANDATORY for student self-registration. It is the
+    # REDCap record_id used to link a student's Pre- and Post-experience surveys,
+    # so it must be present and non-blank. Admin/professor accounts are created
+    # through a separate path (not RegisterRequest) and are unaffected.
+    student_number: str = Field(min_length=1, max_length=100)
 
     @field_validator("email")
     @classmethod
     def _email(cls, v: str) -> str:
         return _normalize_email(v)
+
+    @field_validator("student_number")
+    @classmethod
+    def _student_number(cls, v: str) -> str:
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("Student number (NUID) is required.")
+        return v
 
 
 class LoginRequest(CamelModel):

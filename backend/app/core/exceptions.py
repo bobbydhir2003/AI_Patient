@@ -177,6 +177,63 @@ class AssessmentNotPossibleError(AppError):
         super().__init__(message)
 
 
+class NuidMissingError(AppError):
+    """The session's student has no NUID (student_number) on file, so there is no
+    REDCap record_id to submit the survey under. We never substitute a session
+    UUID or send an empty record_id - the student must add their NUID first."""
+
+    status_code = 409
+    code = "nuid_missing"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Your student number (NUID) is missing from your profile. Add it to your "
+            "profile before submitting the survey."
+        )
+
+
+class SurveyPreRequiredError(AppError):
+    """A Post-Survey was submitted for a case whose Pre-Survey has not yet
+    successfully completed. Pre + Interview + Post is ONE package: the Post
+    stage can never complete (or even reach REDCap) until Pre is done, so a
+    package can never become COMPLETED on Post alone."""
+
+    status_code = 409
+    code = "survey_pre_required"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Please complete the Pre-Survey before submitting the Post-Survey."
+        )
+
+
+class SurveyAlreadyCompletedError(AppError):
+    """The student has already COMPLETED the one survey package for this case
+    (Pre + Post both received by REDCap). The case-level rule is one package per
+    (student, case), so a fresh interview session/id can never reopen it. The
+    message names the case so the student sees exactly which one is done."""
+
+    status_code = 409
+    code = "survey_already_completed"
+
+    def __init__(self, case_name: str) -> None:
+        super().__init__(f"You have already completed the survey for {case_name}.")
+
+
+class SurveySyncError(AppError):
+    """REDCap was configured but the survey import failed (network/timeout/HTTP).
+    The student's answers are preserved client-side so they can retry; the local
+    submission row is marked failed. Never carries the REDCap token."""
+
+    status_code = 502
+    code = "survey_sync_failed"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Your survey could not be submitted right now. Please try again in a moment."
+        )
+
+
 class AssessmentNotFoundError(AppError):
     status_code = 404
     code = "assessment_not_found"

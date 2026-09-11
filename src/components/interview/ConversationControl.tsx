@@ -28,7 +28,9 @@ function statusText(state: VoiceConversationState, patientName: string): string 
     case "IDLE":
       return "Ready";
     case "REQUESTING_PERMISSION":
-      return "Requesting microphone access...";
+      // LiveKit + OpenAI Realtime setup window (token/room/worker/OpenAI) - the
+      // student is waiting on the connection, not a mic permission prompt.
+      return "Connecting...";
     case "LISTENING":
       return "Listening to you...";
     case "PROCESSING":
@@ -89,8 +91,8 @@ export function ConversationControl({
       mainAction = onStart;
       break;
     case "REQUESTING_PERMISSION":
-      mainLabel = "Requesting microphone...";
-      mainAria = "Requesting microphone access";
+      mainLabel = "Connecting...";
+      mainAria = "Connecting to the patient session";
       mainAction = null;
       break;
     case "LISTENING":

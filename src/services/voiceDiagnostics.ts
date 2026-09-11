@@ -77,6 +77,14 @@ export type VoiceEvent =
   // NOT emitted by the production interview/voice path. Mirrors the same
   // metadata-only, no-patient-text discipline as every event above.
   | "livekit_room_connecting"
+  // --- Startup-latency instrumentation (P1). Each carries meta.sinceStartMs
+  // (monotonic ms since startConversation() was invoked) so the click ->
+  // Listening timeline can be reconstructed from browser logs alone. These are
+  // dev-console-only (deliberately NOT in TELEMETRY_EVENTS below), so they are
+  // never POSTed anywhere - purely local measurement. No secrets/tokens/PII.
+  | "livekit_token_fetch_started"
+  | "livekit_token_fetch_resolved"
+  | "livekit_room_connect_started"
   | "livekit_room_connected"
   | "livekit_room_disconnected"
   | "livekit_room_reconnecting"
@@ -197,6 +205,12 @@ export interface VoiceEventMeta {
    * LiveKit turn being sent to the patient's first audio). Bounded/validated
    * server-side (VoiceTelemetryEvent.duration_ms) - never patient content. */
   durationMs?: number;
+  /** Startup-latency instrumentation (P1): monotonic milliseconds elapsed
+   * since the current startConversation()/start() attempt began, stamped on
+   * each startup milestone event so the click -> Listening timeline is
+   * reconstructable from logs. A pure elapsed duration - never patient
+   * content, a token, or anything session-identifying. */
+  sinceStartMs?: number;
   /** LiveKitPocEngine's PocState at the moment of this event (e.g. "thinking",
    * "error"). Engine lifecycle only - never patient content. */
   engineState?: string;

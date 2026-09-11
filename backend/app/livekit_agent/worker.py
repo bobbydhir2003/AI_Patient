@@ -91,6 +91,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import socket
 import time
 from collections import OrderedDict
 from enum import Enum
@@ -109,6 +111,31 @@ if TYPE_CHECKING:
     from app.livekit_agent.realtime_session import RealtimeSession
 
 logger = get_logger("app.livekit_agent.worker")
+
+# --- Worker identity (horizontal-scaling observability) -------------------
+# Constant for the life of the process. Lets logs show WHICH machine received a
+# given interview, so LiveKit Cloud's distribution across Worker A/B/C is
+# verifiable from logs alone. Never affects dispatch/isolation/routing, and
+# never carries a secret, prompt ID, or student PII.
+_WORKER_HOST = socket.gethostname()
+
+
+def _worker_instance_id() -> str:
+    """Human label for THIS worker machine: explicit LIVEKIT_WORKER_INSTANCE_ID
+    if set, else the hostname. Log-only."""
+    try:
+        configured = (get_settings().livekit_worker_instance_id or "").strip()
+    except Exception:
+        configured = ""
+    return configured or _WORKER_HOST
+
+
+def _worker_ident() -> str:
+    """Compact `worker_host=.. worker_pid=.. worker_instance=..` fragment for
+    structured log lines. PID is read live (each job runs in its OWN spawned
+    subprocess, so this is the job subprocess's PID)."""
+    return f"worker_host={_WORKER_HOST} worker_pid={os.getpid()} worker_instance={_worker_instance_id()}"
+
 
 STUDENT_TEXT_TOPIC = "student_text"
 PATIENT_TURN_STATUS_TOPIC = "patient_turn_status"
@@ -240,11 +267,16 @@ class PocAgentSession:
         on_shutdown: Callable[[str], None],
         job_id: str = "",
         room_id: str = "",
+        worker_id: str = "",
     ) -> None:
         self._room = room
         self.session_id = session_id
         self.case_id = case_id
         self._job_id = job_id
+        # LiveKit Cloud's framework worker id (log-only, for distribution
+        # visibility across Worker A/B/C). Optional so existing tests that
+        # construct PocAgentSession without it are unaffected.
+        self._worker_id = worker_id
         self._room_id = room_id
         self._on_shutdown = on_shutdown
         self._shutdown_called = False  # idempotency guard - see _trigger_shutdown
@@ -535,12 +567,39 @@ class PocAgentSession:
             audio_source_kwargs["queue_size_ms"] = _PROMPT_AGENT_AUDIO_QUEUE_MS
         self._audio_source = rtc.AudioSource(**audio_source_kwargs)
         track = rtc.LocalAudioTrack.create_audio_track("patient-voice", self._audio_source)
-        await room.local_participant.publish_track(track, rtc.TrackPublishOptions())
-        logger.info("livekit_agent_track_published session_id=%s job_id=%s", self.session_id, self._job_id)
 
         loop = asyncio.get_running_loop()
-        session_exists = await loop.run_in_executor(None, self._verify_session_exists)
+        # P1 startup-latency: publish_track (an SFU round trip) and
+        # verify_session_exists (a fast local DB query) do not depend on each
+        # other, so launch both concurrently instead of strictly serializing
+        # publish -> verify -> OpenAI as before. verify is still the
+        # fail-closed GATE that must pass before an OpenAI Realtime session is
+        # started at all - so a nonexistent session can never leave an orphan
+        # provider connection (nothing has been started when verify fails).
+        # This ONLY changes ordering/overlap; every readiness guarantee below
+        # (and the "track published before agent_ready" invariant) is
+        # preserved - see the awaited publish_task + ready-task arming order.
+        publish_task = asyncio.ensure_future(
+            room.local_participant.publish_track(track, rtc.TrackPublishOptions())
+        )
+        verify_task = asyncio.ensure_future(
+            loop.run_in_executor(None, self._verify_session_exists)
+        )
+
+        try:
+            session_exists = await verify_task
+        except Exception:
+            logger.exception(
+                "livekit_agent_session_verify_failed session_id=%s job_id=%s",
+                self.session_id, self._job_id,
+            )
+            session_exists = False
         if not session_exists:
+            # Abort BEFORE any OpenAI Realtime session is started (we have not
+            # called _maybe_start_realtime_session yet), so a bogus session can
+            # never leave an orphan provider connection. Drain the in-flight
+            # publish so it cannot outlive the job.
+            await self._drain_publish_task(publish_task)
             logger.error(
                 "livekit_agent_session_not_found_at_start session_id=%s job_id=%s", self.session_id, self._job_id,
             )
@@ -553,6 +612,7 @@ class PocAgentSession:
         # OPENAI_API_KEY), fail this job closed rather than silently running
         # the old pipeline or falling back to ElevenLabs.
         if not self._realtime_engine_active:
+            await self._drain_publish_task(publish_task)
             logger.error(
                 "livekit_agent_realtime_engine_unavailable session_id=%s job_id=%s "
                 "reason=LIVEKIT_REALTIME_ENGINE_ENABLED_or_OPENAI_API_KEY_missing",
@@ -561,13 +621,45 @@ class PocAgentSession:
             await self._shutdown_and_signal("realtime_engine_unavailable")
             return
 
+        # Session verified + engine available: start the OpenAI Realtime session
+        # NOW so its WebSocket connect + session.update round trip overlaps the
+        # still-in-flight track publish above (previously that SFU round trip
+        # ran entirely BEFORE this point). RealtimeSession.start() only launches
+        # the background connect task and returns immediately, so this does not
+        # itself block on the provider network.
+        logger.info(
+            "livekit_agent_realtime_start_kickoff session_id=%s job_id=%s elapsed_ms=%.0f",
+            self.session_id, self._job_id, (time.monotonic() - self._started_at) * 1000,
+        )
         realtime_session = await self._maybe_start_realtime_session(
             self._student_identity or "unattached", "unattached",
         )
         self._realtime_session_started.set()
         if realtime_session is None:
+            await self._drain_publish_task(publish_task)
             await self._shutdown_and_signal("realtime_start_failed")
             return
+
+        # The outbound patient-voice track MUST be published before agent_ready
+        # is ever announced (a student must never be told "ready" before there
+        # is a track to hear from). Awaiting it HERE - after the OpenAI connect
+        # was kicked off, and BEFORE arming the ready task - both preserves that
+        # invariant (the ready task is what sets _realtime_configured_ready, the
+        # gate _maybe_send_realtime_agent_ready checks) and lets the publish
+        # overlap the OpenAI connect rather than block it.
+        try:
+            await publish_task
+        except Exception:
+            logger.exception(
+                "livekit_agent_track_publish_failed session_id=%s job_id=%s",
+                self.session_id, self._job_id,
+            )
+            await self._shutdown_and_signal("track_publish_failed")
+            return
+        logger.info(
+            "livekit_agent_track_published session_id=%s job_id=%s elapsed_ms=%.0f",
+            self.session_id, self._job_id, (time.monotonic() - self._started_at) * 1000,
+        )
         self._realtime_ready_task = asyncio.ensure_future(
             self._await_realtime_ready(realtime_session)
         )
@@ -578,6 +670,20 @@ class PocAgentSession:
             return SessionRepository(db).get(self.session_id) is not None
         finally:
             db.close()
+
+    async def _drain_publish_task(self, publish_task: "asyncio.Task[None]") -> None:
+        """Await an in-flight publish_track() task on an ABORT path, swallowing
+        any error. The job is shutting down (session-not-found / engine
+        unavailable / realtime start failed), so a publish failure here is moot
+        and must never mask the real shutdown reason or leave a dangling task.
+        Never raises."""
+        try:
+            await publish_task
+        except Exception:
+            logger.exception(
+                "livekit_agent_track_publish_drain_failed session_id=%s job_id=%s",
+                self.session_id, self._job_id,
+            )
 
     def _publish_control(self, payload: dict) -> None:
         data = json.dumps(payload).encode("utf-8")
@@ -602,6 +708,12 @@ class PocAgentSession:
         self._agent_ready_sent = True
         elapsed_ms = (time.monotonic() - self._started_at) * 1000
         self._log_agent_event("livekit_agent_ready_sent", elapsed_ms=elapsed_ms)
+        # Distribution visibility: which worker machine actually voiced this
+        # interview (host/pid/instance + framework worker_id). No PII/secrets.
+        logger.info(
+            "livekit_agent_realtime_ready session_id=%s job_id=%s worker_id=%s %s elapsed_ms=%.0f",
+            self.session_id, self._job_id, self._worker_id, _worker_ident(), elapsed_ms,
+        )
         # `semanticTurnControl` is always false now - the experimental
         # semantic-turn-control pipeline was removed; kept in the payload
         # shape only so an older frontend build parsing this field is
@@ -782,7 +894,10 @@ class PocAgentSession:
         if self._shutdown_called:
             return
         self._shutdown_called = True
-        logger.info("livekit_agent_job_shutdown session_id=%s reason=%s", self.session_id, reason)
+        logger.info(
+            "livekit_agent_job_shutdown session_id=%s job_id=%s worker_id=%s %s reason=%s",
+            self.session_id, self._job_id, self._worker_id, _worker_ident(), reason,
+        )
         self._accepting_audio_producers = False
         try:
             loop = asyncio.get_running_loop()
@@ -1279,6 +1394,13 @@ async def _handle_job_request(request: JobRequest) -> None:
     with a FIXED, predictable identity (AGENT_PARTICIPANT_IDENTITY) rather
     than the framework's default "agent-<job_id>" - see that constant's
     docstring for why."""
+    # Startup-latency marker: the moment LiveKit's job dispatch reached this
+    # worker and we accepted it (the top of the worker-side critical path).
+    # getattr: the real JobRequest exposes `.id`; a minimal test fake may not.
+    logger.info(
+        "livekit_agent_job_accepted job_id=%s %s monotonic_ms=%.0f",
+        getattr(request, "id", "-"), _worker_ident(), time.monotonic() * 1000,
+    )
     await request.accept(identity=AGENT_PARTICIPANT_IDENTITY, name="PT AI Patient")
 
 
@@ -1288,6 +1410,15 @@ async def entrypoint(ctx: JobContext) -> None:
     state that could leak between two concurrent interviews (see the module
     docstring's isolation notes) - this is also what makes running many
     copies of this worker process, on one machine or many, safe."""
+    # Startup-latency marker: entrypoint invoked. Monotonic wall clock (ms) so
+    # the worker-side critical path (job_accepted -> entrypoint -> job_connected
+    # -> realtime_start_kickoff -> track_published -> agent_ready_sent) can be
+    # reconstructed from logs alone. No secrets/PII - only ids and timings.
+    entrypoint_started_at = time.monotonic()
+    logger.info(
+        "livekit_agent_entrypoint_started job_id=%s worker_id=%s %s monotonic_ms=%.0f",
+        ctx.job.id, ctx.worker_id, _worker_ident(), entrypoint_started_at * 1000,
+    )
     parsed = parse_job_metadata(ctx.job.metadata)
     if parsed is None:
         logger.error("livekit_agent_job_missing_metadata job_id=%s", ctx.job.id)
@@ -1306,8 +1437,9 @@ async def entrypoint(ctx: JobContext) -> None:
     # _maybe_subscribe_student_audio.
     await ctx.connect(auto_subscribe=AutoSubscribe.SUBSCRIBE_NONE)
     logger.info(
-        "livekit_agent_job_connected job_id=%s session_id=%s case_id=%s room=%s",
-        ctx.job.id, session_id, case_id, ctx.room.name,
+        "livekit_agent_job_connected job_id=%s worker_id=%s %s session_id=%s case_id=%s room=%s elapsed_ms=%.0f",
+        ctx.job.id, ctx.worker_id, _worker_ident(), session_id, case_id, ctx.room.name,
+        (time.monotonic() - entrypoint_started_at) * 1000,
     )
 
     done = asyncio.Event()
@@ -1331,6 +1463,7 @@ async def entrypoint(ctx: JobContext) -> None:
     poc_session = PocAgentSession(
         room=ctx.room, session_id=session_id, case_id=case_id,
         job_id=ctx.job.id, room_id=ctx.room.name, on_shutdown=_on_session_shutdown,
+        worker_id=ctx.worker_id,
     )
     await poc_session.start()
 
@@ -1354,6 +1487,19 @@ def _build_worker_options() -> WorkerOptions:
             "not fully set. This worker will not start without real LiveKit Cloud "
             "credentials AND LIVEKIT_POC_ENABLED=true - see backend/.env.example."
         )
+    # Capacity/observability visibility (requirement 6): log the EFFECTIVE
+    # configured worker capacity once at startup - no new monitoring system,
+    # just the values this process will advertise to LiveKit Cloud.
+    logger.info(
+        "livekit_worker_options agent_name=%s load_threshold=%.2f num_idle_processes=%d "
+        "job_memory_warn_mb=%d job_memory_limit_mb=%d job_executor=PROCESS %s",
+        settings.livekit_agent_name,
+        settings.livekit_worker_load_threshold,
+        settings.livekit_worker_num_idle_processes,
+        settings.livekit_worker_job_memory_warn_mb,
+        settings.livekit_worker_job_memory_limit_mb,
+        _worker_ident(),
+    )
     return WorkerOptions(
         entrypoint_fnc=entrypoint,
         request_fnc=_handle_job_request,
@@ -1364,8 +1510,9 @@ def _build_worker_options() -> WorkerOptions:
         # user_can_access_session ownership check every other session-scoped
         # endpoint uses). This SAME agent_name is also the entire mechanism
         # LiveKit Cloud uses to load-balance jobs across multiple identical
-        # worker processes - see the module docstring's "Horizontal scaling"
-        # section; nothing else needs to change to run more than one.
+        # worker processes/machines - running N copies of this service with the
+        # SAME agent_name is the whole horizontal-scaling story; nothing else
+        # needs to change (see docs/DEPLOYMENT.md's multi-worker topology).
         agent_name=settings.livekit_agent_name,
         # Explicit, not the framework's own os.environ fallback - single
         # source of truth stays app.core.config.get_settings(), exactly like
@@ -1373,6 +1520,21 @@ def _build_worker_options() -> WorkerOptions:
         ws_url=settings.livekit_url,
         api_key=settings.livekit_api_key,
         api_secret=settings.livekit_api_secret,
+        # Explicit worker capacity (requirement 2/3): plain values so they apply
+        # in BOTH the `dev` and `start` CLI modes, instead of the framework's
+        # dev/prod ServerEnvOption split (inf/0.7 for load, 0/4 for idle procs).
+        # load_threshold: THIS worker stops taking new jobs above this CPU load
+        # so LiveKit Cloud routes to a less-loaded peer sharing agent_name. This
+        # is the intended "dispatch by availability/load" model - deliberately
+        # NOT a fixed hard per-machine job cap (livekit-agents has no such safe
+        # native option; load-based backpressure is the supported mechanism).
+        load_threshold=settings.livekit_worker_load_threshold,
+        num_idle_processes=settings.livekit_worker_num_idle_processes,
+        job_memory_warn_mb=settings.livekit_worker_job_memory_warn_mb,
+        job_memory_limit_mb=settings.livekit_worker_job_memory_limit_mb,
+        # job_executor_type is intentionally left at the framework default
+        # (JobExecutorType.PROCESS): per-job OS-process isolation is exactly the
+        # property the module docstring's multi-interview isolation relies on.
     )
 
 

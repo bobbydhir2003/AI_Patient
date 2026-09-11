@@ -1,0 +1,258 @@
+.headerBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-5);
+}
+
+.title {
+  font-size: 1.6rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.subtitle {
+  color: var(--color-text-secondary);
+  line-height: 1.55;
+  max-width: 60ch;
+}
+
+/* Two-column layout (survey + case sidebar) for the pre-survey. */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 320px);
+  gap: var(--space-5);
+  align-items: start;
+}
+
+/* Single, centered column for the post-survey (clean and focused). */
+.single {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+.card {
+  padding: var(--space-6);
+}
+
+.questionList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.groupTitle {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--space-4);
+}
+
+.scaleLegend {
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin-bottom: var(--space-5);
+}
+
+/* Open-ended question block */
+.openItem {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.openPrompt {
+  color: var(--color-text-primary);
+  font-size: 0.98rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.textarea {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-primary);
+  font: inherit;
+  line-height: 1.55;
+}
+
+.textarea:focus {
+  outline: none;
+  border-color: var(--color-accent-hover);
+}
+
+.textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+  background-color: var(--color-bg-elevated);
+}
+
+/* Subtle background-assessment note (POST only). No spinner/progress/percent. */
+.note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.noteDot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background-color: var(--color-accent-hover);
+}
+
+.banner {
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  background-color: var(--color-accent-soft);
+  border: 1px solid var(--color-accent-border);
+  color: var(--color-text-primary);
+  line-height: 1.5;
+}
+
+.completedBanner {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border-radius: var(--radius-md);
+  background-color: var(--color-accent-soft);
+  border: 2px solid var(--color-accent-border);
+  color: var(--color-text-primary);
+  margin-bottom: var(--space-5);
+}
+
+.completedTitle {
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.completedMessage {
+  color: var(--color-text-secondary);
+  line-height: 1.55;
+}
+
+.readOnlyCard {
+  opacity: 0.72;
+}
+
+.errorText {
+  color: var(--color-accent-hover);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.actions {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+/* Case summary sidebar (PRE) */
+.sidebar {
+  position: sticky;
+  top: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.sidebarIdentity {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.sidebarPortrait {
+  flex-shrink: 0;
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  object-position: center top;
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+}
+
+.sidebarName {
+  font-size: 1.1rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.sidebarMeta {
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+}
+
+.sidebarBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sidebarLabel {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.sidebarBody {
+  color: var(--color-text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: static;
+    order: -1;
+  }
+}
+
+@media (max-width: 560px) {
+  .card {
+    padding: var(--space-5);
+  }
+
+  .actions {
+    flex-direction: column-reverse;
+  }
+
+  .actions button {
+    width: 100%;
+  }
+}

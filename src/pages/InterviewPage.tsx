@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import {
   ApiError,
   completeSession,
+  createAssessment,
   createSession,
   fetchSession,
   fetchSessionTurns,
@@ -64,7 +65,13 @@ function badgeFor(state: VoiceConversationState, typedBusy: boolean): { label: s
     case "LISTENING":
       return { label: "Listening", css: "listening" };
     case "REQUESTING_PERMISSION":
-      return { label: "Mic access", css: "processing" };
+      // In the LiveKit + OpenAI Realtime path (the only voice architecture),
+      // this state covers the whole "connecting"/"waiting_for_agent" setup
+      // window (token fetch, room join, worker dispatch, OpenAI session setup)
+      // - mic acquisition happens internally, not via a browser permission
+      // prompt. "Connecting" is what the student is actually waiting on, so it
+      // is shown instead of the misleading "Mic access".
+      return { label: "Connecting", css: "processing" };
     case "PROCESSING":
       return { label: "Processing", css: "processing" };
     case "SPEAKING":
@@ -318,10 +325,20 @@ export function InterviewPage() {
       setEndPhase("completing");
       await completeSession(completedSessionId);
 
-      // 4) Navigate to the assessment loading screen.
-      // The loading screen is responsible for triggering the generation and polling status.
+      // 4) Start assessment generation IMMEDIATELY, in the background. This is
+      //    the same fire-and-forget kickoff the loading screen used to make; the
+      //    backend enqueues it and a worker runs it independently. We do it here
+      //    so grading is already underway while the student fills the Post-Survey.
+      //    createAssessment is idempotent, so the loading page re-triggering it
+      //    later (if the student lands there) is harmless.
+      createAssessment(completedSessionId).catch((err) => {
+        if (import.meta.env.DEV) console.error("assessment kickoff failed:", err);
+      });
+
+      // 5) Navigate to the Post-Interview Survey (NOT the assessment loading
+      //    screen). The survey routes onward to the assessment on submit.
       clearInterview();
-      navigate(`/assessment/${completedSessionId}/loading`, { replace: true });
+      navigate(`/survey/${completedSessionId}/post`, { replace: true });
     } catch (err) {
       console.error("End-interview pipeline failed:", err);
       setEndPhase(null);

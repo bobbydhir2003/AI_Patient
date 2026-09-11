@@ -22,6 +22,30 @@ const welcomeCard = read("src/components/interview/InterviewWelcomeCard.tsx");
 const messageBubble = read("src/components/interview/MessageBubble.tsx");
 const conversationPanel = read("src/components/interview/ConversationPanel.tsx");
 const patientProfile = read("src/components/cases/PatientProfile.tsx");
+const conversationControl = read("src/components/interview/ConversationControl.tsx");
+
+// Strip comments so prose that mentions old copy (e.g. explaining WHY we no
+// longer say "Mic access") can't self-match the negative assertions below.
+const stripComments = (src) =>
+  src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+
+// P1 startup UX: the LiveKit + OpenAI Realtime setup window must read
+// "Connecting", not the misleading "Mic access"/"Requesting microphone" (mic
+// acquisition is internal to the engine, not a browser permission prompt).
+test("startup status copy shows 'Connecting', never the misleading 'Mic access'/'Requesting microphone'", () => {
+  const pageCode = stripComments(interviewPage);
+  const controlCode = stripComments(conversationControl);
+
+  // InterviewPage badge for the setup state (REQUESTING_PERMISSION, which
+  // mapPocState produces from connecting/waiting_for_agent) reads "Connecting".
+  assert.match(pageCode, /case "REQUESTING_PERMISSION":[\s\S]*?label: "Connecting"/);
+  assert.doesNotMatch(pageCode, /"Mic access"/);
+
+  // ConversationControl status text + main button copy read "Connecting...".
+  assert.match(controlCode, /case "REQUESTING_PERMISSION":[\s\S]*?return "Connecting\.\.\."/);
+  assert.match(controlCode, /mainLabel = "Connecting\.\.\."/);
+  assert.doesNotMatch(controlCode, /Requesting microphone/);
+});
 
 // 1 + 2 + 3: patient image / name / age come from the case object.
 test("interview profile is driven by the real case image/name/age", () => {

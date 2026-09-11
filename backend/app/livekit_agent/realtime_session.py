@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -190,6 +191,10 @@ class RealtimeSession:
         self._frames_sent = 0
         self._frames_dropped = 0
         self._event_counts: dict[str, int] = {}
+        # Startup-latency instrumentation: monotonic clock at construction, used
+        # only to log elapsed_ms for the connect -> session.updated window (the
+        # single longest hop in interview startup). No secrets/PII.
+        self._created_at = time.monotonic()
 
     async def start(self) -> None:
         """Launches the background connection task and returns immediately - the
@@ -273,6 +278,12 @@ class RealtimeSession:
         Any failure is logged and ends the session cleanly - it never escapes
         into the ingest task that owns this object."""
         try:
+            # Startup-latency marker: the OpenAI Realtime WebSocket connect is
+            # about to begin (the single longest hop in interview startup).
+            logger.info(
+                "realtime_connect_started session_id=%s track=%s",
+                self._session_id, self._track_sid,
+            )
             async with self._client.connect() as conn:
                 self._conn = conn
                 self._connected = True
@@ -452,8 +463,9 @@ class RealtimeSession:
                     self._configured_ready.set()
                     self._ready_or_terminated.set()
                     logger.info(
-                        "realtime_session_configured_ready session_id=%s track=%s",
+                        "realtime_session_configured_ready session_id=%s track=%s elapsed_ms=%.0f",
                         self._session_id, self._track_sid,
+                        (time.monotonic() - self._created_at) * 1000,
                     )
                     # Log the EFFECTIVE configuration OpenAI applied (hosted
                     # prompt defaults merged with our session.update overrides).

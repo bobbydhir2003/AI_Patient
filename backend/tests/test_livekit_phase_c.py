@@ -204,6 +204,74 @@ def test_agent_ready_never_sent_when_session_does_not_exist(monkeypatch, engine)
     assert shutdown_reasons == ["session_not_found"]
 
 
+def test_failed_verification_starts_no_realtime_session_and_leaves_no_orphan(monkeypatch, engine):
+    """P1 startup reorder: publish_track and verify_session_exists now run
+    CONCURRENTLY, and the OpenAI Realtime session is started only AFTER verify
+    passes. A nonexistent session must therefore fail closed with NO Realtime
+    session ever started or retained - so a bogus session can never leave an
+    orphan provider connection (the reorder's key safety property). Realtime
+    engine is enabled here on purpose, proving the gate is the verify result,
+    not the engine flag."""
+    from sqlalchemy.orm import sessionmaker
+
+    factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr("app.livekit_agent.worker.get_db_factory", lambda: factory)
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "livekit_realtime_engine_enabled", True)
+    monkeypatch.setattr(settings, "openai_api_key", "sk-x")
+
+    shutdown_reasons: list[str] = []
+    realtime_start_calls: list[tuple] = []
+    with _fake_rtc_for_worker():
+        room = _FakeAgentRoom()
+        session = PocAgentSession(
+            room=room, session_id="never-seeded-session", case_id="carly",
+            on_shutdown=lambda reason: shutdown_reasons.append(reason),
+        )
+
+        async def spy_start(identity, track_sid):
+            realtime_start_calls.append((identity, track_sid))
+            return None
+
+        monkeypatch.setattr(session, "_maybe_start_realtime_session", spy_start)
+        asyncio.run(session.start())
+
+    # OpenAI Realtime session was NEVER started (verify gated it) ...
+    assert realtime_start_calls == []
+    # ... and none is retained (no orphan to leak) ...
+    assert session._realtime_session is None
+    # ... and the job failed closed with the session-not-found reason, no ready.
+    assert _control_messages(room, "agent_ready") == []
+    assert shutdown_reasons == ["session_not_found"]
+
+
+def test_realtime_session_started_after_verification_and_track_published_before_ready(monkeypatch, engine):
+    """P1 startup reorder positive path: once verify passes the OpenAI Realtime
+    session IS started, and the outbound patient-voice track is still published
+    BEFORE agent_ready is announced (a student must never be told 'ready'
+    before there is a track to hear from). This is the invariant the reorder
+    preserves by awaiting publish_task before arming the ready task."""
+    with _fake_rtc_for_worker():
+        session, room, _sid = _make_ready_session(engine, monkeypatch)
+        _enable_realtime_and_fake_session(monkeypatch, session)
+
+        start_calls: list[tuple] = []
+        orig = session._maybe_start_realtime_session
+
+        async def spy(identity, track_sid):
+            start_calls.append((identity, track_sid))
+            return await orig(identity, track_sid)
+
+        monkeypatch.setattr(session, "_maybe_start_realtime_session", spy)
+        asyncio.run(_start_and_drain(session))
+
+    assert len(start_calls) == 1
+    assert len(_control_messages(room, "agent_ready")) == 1
+    # agent_ready is the LAST data published - i.e. after the track publish.
+    assert room.local_participant.published_data[-1][1]["type"] == "agent_ready"
+
+
 def test_agent_ready_targets_the_student_identity_when_known(monkeypatch, engine):
     """Part 2: agent->browser messages target the student identity once
     known, instead of blindly broadcasting - the student is typically

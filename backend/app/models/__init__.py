@@ -11,10 +11,12 @@ from app.models.runtime_config import (
     SystemSetting,
 )
 from app.models.student import Student
+from app.models.survey_receipt import SurveyReceipt
 from app.models.user import User
 
 __all__ = [
     "Student",
+    "SurveyReceipt",
     "User",
     "AccessRequest",
     "AiUsageEvent",

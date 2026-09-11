@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "test:interview": "tsc src/services/interviewErrors.ts --ignoreConfig --rootDir src --outDir .test-build --target es2022 --module esnext --moduleResolution bundler --skipLibCheck && node --test scripts/test-interview-errors.mjs",
     "test:routing": "tsc src/services/authRouting.ts --ignoreConfig --rootDir src --outDir .test-build --target es2022 --module esnext --moduleResolution bundler --skipLibCheck && node --test scripts/test-auth-routing.mjs",
+    "test:surveyflow": "tsc src/services/surveyFlow.ts --ignoreConfig --rootDir src --outDir .test-build --target es2022 --module esnext --moduleResolution bundler --skipLibCheck && node --test scripts/test-survey-flow.mjs",
     "test:landing": "node --test scripts/test-landing-ui.mjs",
     "test:dashboard": "node --test scripts/test-student-dashboard.mjs",
     "test:assessment": "node --test scripts/test-assessment-review.mjs",

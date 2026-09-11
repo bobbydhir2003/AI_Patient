@@ -428,6 +428,11 @@ export class LiveKitPocEngine {
 
   private ended = false;
   private diagnostics: PocDiagnostics = { ...INITIAL_DIAGNOSTICS };
+  /** Startup-latency instrumentation (P1): monotonic timestamp (performance.now
+   * where available, else Date.now) captured at the top of start(), so every
+   * startup milestone can log meta.sinceStartMs = elapsed-since-click. Reset on
+   * each start(). Measurement only - never affects any protocol/state. */
+  private startupStartedAt = 0;
   private readonly callbacks: LiveKitPocCallbacks;
 
   constructor(callbacks: LiveKitPocCallbacks) {
@@ -525,6 +530,17 @@ export class LiveKitPocEngine {
     return generation === this.startupGeneration && !this.ended;
   }
 
+  /** Monotonic milliseconds since this start() attempt began (see
+   * startupStartedAt). Uses performance.now() when available so it is immune
+   * to wall-clock adjustments; falls back to Date.now(). Measurement only. */
+  private sinceStart(): number {
+    const now =
+      typeof performance !== "undefined" && typeof performance.now === "function"
+        ? performance.now()
+        : Date.now();
+    return Math.round(now - this.startupStartedAt);
+  }
+
   /**
    * The Start Interview gesture: join the room, then coordinate microphone
    * readiness and agent readiness INDEPENDENTLY of each other (Phase C2) -
@@ -547,6 +563,13 @@ export class LiveKitPocEngine {
   ): Promise<void> {
     if (this.state !== "idle" && this.state !== "ended" && this.state !== "error") return;
     this.ended = false;
+    // Startup-latency instrumentation (P1): stamp the click/start moment so
+    // every milestone below can report sinceStartMs. This is the "mic button
+    // click" origin of the click -> Listening timeline.
+    this.startupStartedAt =
+      typeof performance !== "undefined" && typeof performance.now === "function"
+        ? performance.now()
+        : Date.now();
     const generation = ++this.startupGeneration;
     this.micReady = false;
     this.agentReadyReceived = false;
@@ -562,6 +585,7 @@ export class LiveKitPocEngine {
     logVoiceEvent("livekit_room_connecting", {});
 
     let tokenInfo: LiveKitTokenResponse;
+    logVoiceEvent("livekit_token_fetch_started", { sinceStartMs: this.sinceStart() });
     try {
       tokenInfo = await fetchToken(sessionId);
     } catch {
@@ -571,6 +595,7 @@ export class LiveKitPocEngine {
       return;
     }
     if (!this.isCurrentGeneration(generation)) return;
+    logVoiceEvent("livekit_token_fetch_resolved", { sinceStartMs: this.sinceStart() });
     this.connectionId = tokenInfo.connectionId ?? null;
     logVoiceEvent("livekit_voice_connection_created", {
       connectionId: this.connectionId ?? undefined, engineState: this.state,
@@ -675,6 +700,9 @@ export class LiveKitPocEngine {
       }
     });
 
+    logVoiceEvent("livekit_room_connect_started", {
+      connectionId: this.connectionId ?? undefined, sinceStartMs: this.sinceStart(),
+    });
     try {
       await room.connect(tokenInfo.url, tokenInfo.token);
     } catch {
@@ -684,7 +712,9 @@ export class LiveKitPocEngine {
       return;
     }
     if (!this.isCurrentGeneration(generation)) return;
-    logVoiceEvent("livekit_room_connected", { connectionId: this.connectionId ?? undefined });
+    logVoiceEvent("livekit_room_connected", {
+      connectionId: this.connectionId ?? undefined, sinceStartMs: this.sinceStart(),
+    });
     this.patchDiagnostics({ roomConnected: true });
     // The agent may already have joined before we did (or via ParticipantConnected above).
     if (room.remoteParticipants.has(AGENT_IDENTITY)) {
@@ -735,7 +765,9 @@ export class LiveKitPocEngine {
     if (!this.isCurrentGeneration(generation)) return;
     if (this.state !== "waiting_for_agent") return; // already transitioned, or in error/ended
     if (!this.micReady || !this.agentReadyReceived) return;
-    logVoiceEvent("livekit_startup_reconciled", { engineState: this.state, startupGeneration: generation });
+    logVoiceEvent("livekit_startup_reconciled", {
+      engineState: this.state, startupGeneration: generation, sinceStartMs: this.sinceStart(),
+    });
     this.setState("listening");
     this.startRecognition();
   }
@@ -766,7 +798,7 @@ export class LiveKitPocEngine {
       logVoiceEvent("livekit_agent_ready_received", {
         startupGeneration: generation, connectionId: this.connectionId ?? undefined,
         semanticTurnControlActive: this.semanticTurnControlActive,
-        promptAgentMode: this.promptAgentMode,
+        promptAgentMode: this.promptAgentMode, sinceStartMs: this.sinceStart(),
       });
       this.maybeEnterListening(generation);
       return;
@@ -843,7 +875,7 @@ export class LiveKitPocEngine {
         this.micReady = true;
         logVoiceEvent("livekit_mic_ready", {
           engineState: this.state, durationMs: elapsedMs, startupGeneration: generation,
-          connectionId: this.connectionId ?? undefined,
+          connectionId: this.connectionId ?? undefined, sinceStartMs: this.sinceStart(),
         });
         this.maybeEnterListening(generation);
         return;
