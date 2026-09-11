@@ -89,35 +89,42 @@ The per-case **event** design above is simpler and deterministic (no instance
 counter, no REDCap round-trip to find the next instance, no race), so it is the
 chosen structure.
 
-## Migration safety (production held at 0018)
+## Migration safety (production verified at 0018)
 
-Production is intentionally at Alembic **0018**. The survey work lives in
-**0020** (creates the never-deployed `survey_submissions`) and **0021**
-(drops it, creates `survey_receipts`). Between 0018 and 0021 sits **0019**,
-which **drops `patient_voice_settings`** — a destructive step that must not be
-run implicitly.
+Production is verified at Alembic **0018**, with `patient_voice_settings`
+present and neither survey table present. The undeployed survey revisions are
+finalized as an independent branch:
 
-**Do not run `alembic upgrade head` blindly on production.** Recommended path:
+```text
+0018 -> 0019  (unrelated patient_voice_settings cleanup)
+0018 -> 0020  (final survey_receipts schema)
+(0019, 0020) -> 0021  (no-op merge revision)
+```
 
-1. Back up the production database first.
-2. Review 0019 explicitly and decide when to drop `patient_voice_settings`
-   (that is the reason prod was pinned at 0018 — it is unrelated to surveys).
-3. Because production has **no** survey rows (0020 never deployed) and
-   `survey_receipts` stores **no answers**, the survey table can be created
-   directly. Two safe options:
-   - **Preferred (surgical):** create `survey_receipts` in a one-off, reviewed
-     step (either `alembic upgrade 0021` *after* consciously accepting 0019, or
-     a hand-applied `CREATE TABLE survey_receipts (...)` matching
-     `0021_survey_receipts.py`), leaving the 0019 decision to a separate change
-     window.
-   - **Full chain:** once the 0019 drop is approved, `alembic upgrade 0021`
-     applies 0019 → 0020 → 0021 in order. 0020's `survey_submissions` is created
-     and immediately dropped by 0021; harmless, no data involved.
-4. On PostgreSQL the whole chain runs natively. On SQLite the *full* chain is
-   not runnable (pre-existing: migration 0008 uses an `ALTER`-style
-   `create_unique_constraint` unsupported by SQLite outside batch mode) — local
-   dev/test build the schema from the models via `Base.metadata.create_all`, and
-   `0021` itself was validated on SQLite in isolation (upgrade + downgrade).
+For the survey release, target **0020 explicitly**:
+
+```bash
+cd backend
+alembic upgrade 0020
+```
+
+Revision 0019 is not an ancestor of 0020, so this command creates only the
+final `survey_receipts` table and its indexes. It does not create the obsolete
+`survey_submissions` table, does not run the merge revision, and does not touch
+`patient_voice_settings`. The resulting production `alembic_version` is
+`0020`.
+
+Do **not** use `alembic upgrade head` for this release: reaching merge revision
+0021 requires both branches and would therefore execute 0019. Back up the
+database and verify the current revision/table inventory immediately before the
+eventual targeted migration.
+
+Downgrading explicitly from 0020 to 0018 removes only `survey_receipts` and its
+indexes:
+
+```bash
+alembic downgrade 0018
+```
 
 Never point the app at a database where `survey_receipts` lacks the
 `UNIQUE(student_id, case_id)` constraint — that constraint is the case-level
