@@ -41,9 +41,12 @@ test("startup status copy shows 'Connecting', never the misleading 'Mic access'/
   assert.match(pageCode, /case "REQUESTING_PERMISSION":[\s\S]*?label: "Connecting"/);
   assert.doesNotMatch(pageCode, /"Mic access"/);
 
-  // ConversationControl status text + main button copy read "Connecting...".
+  // ConversationControl status text + main button copy read "Connecting..."
+  // by default. Phase 2: when a concrete startup stage is known the button
+  // shows that stage's label instead (see startupStageLabel), falling back to
+  // "Connecting..." otherwise - never the misleading "Requesting microphone".
   assert.match(controlCode, /case "REQUESTING_PERMISSION":[\s\S]*?return "Connecting\.\.\."/);
-  assert.match(controlCode, /mainLabel = "Connecting\.\.\."/);
+  assert.match(controlCode, /mainLabel = startupStage \? startupStageLabel\(startupStage\) : "Connecting\.\.\."/);
   assert.doesNotMatch(controlCode, /Requesting microphone/);
 });
 

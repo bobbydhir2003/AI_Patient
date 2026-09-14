@@ -78,6 +78,17 @@ export type PocState =
   | "error"
   | "ended";
 
+/** Phase 2: coarse, forward-only startup milestones surfaced to the UI so the
+ * student sees concrete progress ("Preparing microphone", "Starting patient")
+ * instead of one indefinite "Connecting". Purely presentational - it NEVER
+ * gates any state transition (PocState above is still the single source of
+ * truth for behavior); a stage is emitted at most once per Start, in order. */
+export type PocStartupStage =
+  | "connecting_room"
+  | "preparing_microphone"
+  | "starting_patient"
+  | "ready";
+
 export interface LiveKitTokenResponse {
   token: string;
   url: string;
@@ -168,6 +179,16 @@ const MIC_START_TIMEOUT_MS = 7_000;
  * is needed before this retry in either case. */
 const MAX_MIC_RETRIES = 1;
 
+/** Phase 2: after a LiveKit transport RECONNECT, how long to wait for the
+ * conversation to re-validate (patient agent still present + mic still ready +
+ * the SAME connection's agent_ready still standing) before giving up with a
+ * restartable error, rather than falsely resuming LISTENING against a room
+ * whose worker may have died during the outage. Bounded and stage-specific -
+ * NOT a change to any startup timeout. Generous enough to absorb the brief
+ * window where the SDK has reconnected transport but not yet re-reconciled the
+ * remote participant list. */
+const RECONNECT_REVALIDATION_TIMEOUT_MS = 10_000;
+
 const STUDENT_TEXT_TOPIC = "student_text";
 const PATIENT_TURN_STATUS_TOPIC = "patient_turn_status";
 const AGENT_CONTROL_TOPIC = "agent_control";
@@ -179,13 +200,23 @@ const TRANSCRIPT_SYNC_TOPIC = "transcript_sync";
 /** Injectable so this ONE engine can serve both the admin POC page and the
  * real student InterviewPage - each passes a function pointing at its own
  * token endpoint; the engine itself has no opinion on which. */
-export type FetchLiveKitToken = (sessionId: string) => Promise<LiveKitTokenResponse>;
+export type FetchLiveKitToken = (
+  sessionId: string,
+  signal?: AbortSignal,
+) => Promise<LiveKitTokenResponse>;
 
-async function postForToken(url: string, sessionId: string): Promise<LiveKitTokenResponse> {
+async function postForToken(
+  url: string,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<LiveKitTokenResponse> {
   const response = await fetch(url, {
     method: "POST",
     headers: withAuthHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ sessionId }),
+    // Phase 1: Stop during startup aborts this in-flight fetch (see end()'s
+    // tokenAbort) instead of letting a dead request complete after teardown.
+    signal,
   });
   if (!response.ok) {
     throw new Error(`livekit_token_http_${response.status}`);
@@ -195,18 +226,25 @@ async function postForToken(url: string, sessionId: string): Promise<LiveKitToke
 
 /** Admin POC token source (require_admin-gated) - the DEFAULT for
  * LiveKitPocEngine.start(), so LiveKitTestPage.tsx needs no changes at all. */
-export function fetchAdminPocLiveKitToken(sessionId: string): Promise<LiveKitTokenResponse> {
-  return postForToken(`${API_BASE_URL}/api/livekit/token`, sessionId);
+export function fetchAdminPocLiveKitToken(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<LiveKitTokenResponse> {
+  return postForToken(`${API_BASE_URL}/api/livekit/token`, sessionId, signal);
 }
 
 /** Student-safe token source (require_session_access-gated) - the real
  * InterviewPage's token source (see useLiveKitInterviewVoice.ts). That
  * endpoint takes session_id from the URL path, not the body - the body sent
  * here is simply unread server-side, kept only for a uniform call shape. */
-export function fetchStudentLiveKitToken(sessionId: string): Promise<LiveKitTokenResponse> {
+export function fetchStudentLiveKitToken(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<LiveKitTokenResponse> {
   return postForToken(
     `${API_BASE_URL}/api/interviews/${encodeURIComponent(sessionId)}/livekit-token`,
     sessionId,
+    signal,
   );
 }
 
@@ -253,6 +291,11 @@ interface TurnStatusPayload {
 interface AgentControlPayload {
   type?: "agent_ready" | "turn_ack" | "semantic_turn_started" | "semantic_fallback";
   clientTurnId?: string;
+  /** Phase 2: the server-generated connection id (see LiveKitTokenResponse.
+   * connectionId) the worker echoes back in agent_ready, so the browser can
+   * drop a stale agent_ready from a PREVIOUS Start's worker. Absent for the
+   * admin POC path / an older worker build - treated as "unscoped, accept". */
+  connectionId?: string;
   semanticTurnControl?: boolean;
   semanticIgnored?: boolean;
   reason?: string;
@@ -336,6 +379,10 @@ export interface LiveKitPocCallbacks {
     text: string,
     meta: StudentTextMeta,
   ) => void;
+  /** Phase 2: forward-only startup progress for the UI (see PocStartupStage).
+   * OPTIONAL - callers that don't care (the admin POC page, existing tests)
+   * simply omit it; it never affects behavior. */
+  onStartupStage?: (stage: PocStartupStage) => void;
 }
 
 /** Agent process's fixed participant identity (see worker.py AGENT_IDENTITY). */
@@ -418,6 +465,19 @@ export class LiveKitPocEngine {
   private startupGeneration = 0;
   private micReady = false;
   private agentReadyReceived = false;
+  /** Phase 2: whether the patient-agent participant is currently present in the
+   * room. Set true when we first observe the agent (connect-time snapshot,
+   * ParticipantConnected, or the arrival of a connection-matched agent_ready -
+   * the agent must exist to have sent it), and false on ParticipantDisconnected
+   * for the agent. Reconnect revalidation reads this rather than snapshotting
+   * room.remoteParticipants at the (racy) instant of RoomEvent.Reconnected. */
+  private agentPresent = false;
+  /** Phase 2: the last startup stage emitted to onStartupStage, so a stage is
+   * reported at most once (forward-only) per Start. Reset per start()/end(). */
+  private startupStage: PocStartupStage | null = null;
+  /** Phase 2: bounded post-reconnect revalidation watchdog (see
+   * RECONNECT_REVALIDATION_TIMEOUT_MS / revalidateAfterReconnect). */
+  private reconnectWatchdog: number | null = null;
 
   /** Phase C3: the current voice connection's server-generated id (see
    * LiveKitTokenResponse.connectionId) - telemetry-only, threaded through
@@ -427,6 +487,16 @@ export class LiveKitPocEngine {
   private connectionId: string | null = null;
 
   private ended = false;
+  /** Phase 1: the single owned teardown promise. end() is idempotent - the
+   * first call runs performEnd() once and stores its promise; every later
+   * call (a repeated Stop, an unmount racing a Stop, End Interview awaiting
+   * cleanup) returns the SAME promise rather than tearing down twice or
+   * racing a second room.disconnect(). */
+  private endPromise: Promise<void> | null = null;
+  /** Phase 1: aborts an in-flight token fetch when Stop happens during
+   * startup (before room.connect()). Created per start(), cleared once the
+   * fetch resolves or teardown runs. */
+  private tokenAbort: AbortController | null = null;
   private diagnostics: PocDiagnostics = { ...INITIAL_DIAGNOSTICS };
   /** Startup-latency instrumentation (P1): monotonic timestamp (performance.now
    * where available, else Date.now) captured at the top of start(), so every
@@ -522,6 +592,25 @@ export class LiveKitPocEngine {
     }
   }
 
+  private clearReconnectWatchdog(): void {
+    if (this.reconnectWatchdog !== null) {
+      window.clearTimeout(this.reconnectWatchdog);
+      this.reconnectWatchdog = null;
+    }
+  }
+
+  /** Emit a startup milestone at most once, only ever moving forward (see
+   * PocStartupStage). Purely presentational - never gates state. */
+  private setStartupStage(stage: PocStartupStage): void {
+    if (this.startupStage === stage) return;
+    this.startupStage = stage;
+    logVoiceEvent("livekit_startup_stage", {
+      stage, engineState: this.state,
+      connectionId: this.connectionId ?? undefined, sinceStartMs: this.sinceStart(),
+    });
+    this.callbacks.onStartupStage?.(stage);
+  }
+
   /** True iff `generation` is still the CURRENT startup attempt and the
    * engine has not been told to end - the single guard every async
    * continuation started during start() must pass before mutating instance
@@ -563,6 +652,11 @@ export class LiveKitPocEngine {
   ): Promise<void> {
     if (this.state !== "idle" && this.state !== "ended" && this.state !== "error") return;
     this.ended = false;
+    // Phase 1: a fresh Start after a prior Stop/error gets a clean teardown
+    // slate - the previous end()'s stored promise must not be reused for this
+    // new lifecycle.
+    this.endPromise = null;
+    this.tokenAbort = new AbortController();
     // Startup-latency instrumentation (P1): stamp the click/start moment so
     // every milestone below can report sinceStartMs. This is the "mic button
     // click" origin of the click -> Listening timeline.
@@ -573,6 +667,9 @@ export class LiveKitPocEngine {
     const generation = ++this.startupGeneration;
     this.micReady = false;
     this.agentReadyReceived = false;
+    this.agentPresent = false;
+    this.startupStage = null;
+    this.clearReconnectWatchdog();
     this.semanticTurnControlActive = false;
     // P0-2/session reset: transcript-sync epoch + authoritative Realtime turn
     // are scoped to THIS connection. A fresh worker session starts at a low
@@ -582,12 +679,13 @@ export class LiveKitPocEngine {
     this.diagnostics = { ...INITIAL_DIAGNOSTICS };
     this.callbacks.onDiagnostics(this.diagnostics);
     this.setState("connecting");
+    this.setStartupStage("connecting_room");
     logVoiceEvent("livekit_room_connecting", {});
 
     let tokenInfo: LiveKitTokenResponse;
     logVoiceEvent("livekit_token_fetch_started", { sinceStartMs: this.sinceStart() });
     try {
-      tokenInfo = await fetchToken(sessionId);
+      tokenInfo = await fetchToken(sessionId, this.tokenAbort?.signal);
     } catch {
       if (!this.isCurrentGeneration(generation)) return;
       this.emitError("Could not get a LiveKit connection token from the server.", "token_fetch_failed");
@@ -595,6 +693,8 @@ export class LiveKitPocEngine {
       return;
     }
     if (!this.isCurrentGeneration(generation)) return;
+    // Token is in hand - a later Stop tears down the room, not this fetch.
+    this.tokenAbort = null;
     logVoiceEvent("livekit_token_fetch_resolved", { sinceStartMs: this.sinceStart() });
     this.connectionId = tokenInfo.connectionId ?? null;
     logVoiceEvent("livekit_voice_connection_created", {
@@ -635,7 +735,10 @@ export class LiveKitPocEngine {
     room.on(RoomEvent.Reconnected, () => {
       if (!this.isCurrentGeneration(generation)) return;
       logVoiceEvent("livekit_room_reconnected", {});
-      this.setState("listening");
+      // Phase 2: transport reconnecting is NOT proof the conversation is still
+      // live. Revalidate (agent still present + mic ready + this connection's
+      // agent_ready still standing) before resuming LISTENING.
+      this.revalidateAfterReconnect(generation);
     });
     room.on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
       if (!this.isCurrentGeneration(generation)) return;
@@ -677,7 +780,21 @@ export class LiveKitPocEngine {
       if (!this.isCurrentGeneration(generation)) return;
       if (participant.identity !== AGENT_IDENTITY) return;
       logVoiceEvent("livekit_agent_started", {});
+      this.agentPresent = true;
       this.patchDiagnostics({ agentConnected: true });
+      // Phase 2: if we are mid post-reconnect revalidation waiting for the
+      // agent to reappear, its arrival is exactly the signal to re-check.
+      if (this.state === "reconnecting") this.revalidateAfterReconnect(generation);
+    });
+    room.on(RoomEvent.ParticipantDisconnected, (participant: RemoteParticipant) => {
+      if (!this.isCurrentGeneration(generation)) return;
+      if (participant.identity !== AGENT_IDENTITY) return;
+      // Phase 2: the patient agent (worker) left. Record it so a subsequent
+      // reconnect revalidation cannot falsely resume LISTENING against a room
+      // with no patient. Deliberately NOT an immediate error here - the
+      // Disconnected/reconnect handlers own the lifecycle decision.
+      logVoiceEvent("livekit_agent_disconnected", { engineState: this.state });
+      this.agentPresent = false;
     });
     room.on(RoomEvent.DataReceived, (payload: Uint8Array, _participant, _kind, topic?: string) => {
       if (!this.isCurrentGeneration(generation)) return;
@@ -719,6 +836,7 @@ export class LiveKitPocEngine {
     // The agent may already have joined before we did (or via ParticipantConnected above).
     if (room.remoteParticipants.has(AGENT_IDENTITY)) {
       logVoiceEvent("livekit_agent_started", {});
+      this.agentPresent = true;
       this.patchDiagnostics({ agentConnected: true });
     }
 
@@ -728,6 +846,10 @@ export class LiveKitPocEngine {
     // transitions to LISTENING exactly once, whichever finishes last (Cases
     // A/B/C in the module docstring).
     this.setState("waiting_for_agent");
+    // Room is up; the two parallel legs (mic acquisition + patient/agent
+    // readiness) begin now. "Preparing microphone" is the honest label until
+    // the mic leg resolves (runMicrophoneAcquisition then advances the stage).
+    this.setStartupStage("preparing_microphone");
     this.armAgentReadyWatchdog(generation);
     void this.runMicrophoneAcquisition(generation, room);
   }
@@ -768,8 +890,60 @@ export class LiveKitPocEngine {
     logVoiceEvent("livekit_startup_reconciled", {
       engineState: this.state, startupGeneration: generation, sinceStartMs: this.sinceStart(),
     });
+    this.setStartupStage("ready");
     this.setState("listening");
     this.startRecognition();
+  }
+
+  /**
+   * Phase 2: post-reconnect revalidation. RoomEvent.Reconnected only means the
+   * WebSocket transport came back - it is NOT proof the patient agent survived
+   * the outage. Resume LISTENING only when all three hold for the CURRENT
+   * connection: the patient agent is still present, the mic is still ready,
+   * and this connection's agent_ready was already validated. Otherwise park in
+   * "reconnecting" and give the agent a bounded window to reappear (its
+   * ParticipantConnected re-invokes this); if it never does, surface a
+   * restartable error instead of a false LISTENING. Only ever runs for the
+   * current generation and never resurrects an ended engine.
+   */
+  private revalidateAfterReconnect(generation: number): void {
+    if (!this.isCurrentGeneration(generation)) return;
+    if (this.state !== "reconnecting") return; // already resolved (listening/error/ended)
+    if (this.micReady && this.agentReadyReceived && this.agentPresent) {
+      this.clearReconnectWatchdog();
+      logVoiceEvent("livekit_reconnect_revalidated", {
+        connectionId: this.connectionId ?? undefined, engineState: this.state,
+        sinceStartMs: this.sinceStart(),
+      });
+      this.setState("listening");
+      this.startRecognition();
+      return;
+    }
+    logVoiceEvent("livekit_reconnect_revalidating", {
+      connectionId: this.connectionId ?? undefined,
+      micReady: this.micReady, agentReadyReceived: this.agentReadyReceived,
+      agentPresent: this.agentPresent, engineState: this.state,
+    });
+    this.armReconnectWatchdog(generation);
+  }
+
+  /** Bounds the post-reconnect revalidation wait: if the conversation has not
+   * re-validated within RECONNECT_REVALIDATION_TIMEOUT_MS, fail with a
+   * restartable error rather than sit in "reconnecting" forever or falsely
+   * resume LISTENING. Idempotent - re-arming while already armed is a no-op so
+   * a repeated ParticipantConnected/Reconnected cannot extend the deadline. */
+  private armReconnectWatchdog(generation: number): void {
+    if (this.reconnectWatchdog !== null) return;
+    this.reconnectWatchdog = window.setTimeout(() => {
+      this.reconnectWatchdog = null;
+      if (!this.isCurrentGeneration(generation)) return;
+      if (this.state !== "reconnecting") return; // already recovered
+      this.emitError(
+        "The patient connection was lost and could not be re-established.",
+        "reconnect_revalidation_failed",
+      );
+      this.setState("error");
+    }, RECONNECT_REVALIDATION_TIMEOUT_MS);
   }
 
   private handleAgentControl(payload: Uint8Array, generation: number): void {
@@ -780,11 +954,29 @@ export class LiveKitPocEngine {
       return;
     }
     if (parsed.type === "agent_ready") {
-      // Recorded UNCONDITIONALLY (as long as this is still the current
-      // startup generation) - NEVER gated on the engine's current state.
-      // This is the exact fix for the confirmed bug: a valid agent_ready
-      // arriving while still "connecting" (mic acquisition in flight) is
-      // now remembered instead of discarded, satisfying Case A.
+      // Phase 2 (connection-scoped): drop an agent_ready that carries a
+      // DIFFERENT connectionId than this engine's current connection - a
+      // straggler from a previous Start's worker must never mark THIS
+      // connection ready. A missing connectionId (older worker) or a null
+      // local connectionId (admin POC path) means "unscoped" and is accepted,
+      // still protected by the existing generation/room-identity guards.
+      if (
+        parsed.connectionId &&
+        this.connectionId &&
+        parsed.connectionId !== this.connectionId
+      ) {
+        logVoiceEvent("livekit_agent_ready_stale_connection", {
+          connectionId: this.connectionId ?? undefined, engineState: this.state,
+        });
+        return;
+      }
+      // The agent must be present in the room to have sent this - record it so
+      // reconnect revalidation has an accurate presence signal even if the
+      // ParticipantConnected event was missed/coalesced.
+      this.agentPresent = true;
+      // Phase 2 (bounded resend): the worker now sends agent_ready several
+      // times, so a duplicate/late resend after we've already recorded it is
+      // expected and simply ignored here.
       if (this.agentReadyReceived) return; // duplicate/late resend - already recorded
       this.agentReadyReceived = true;
       this.clearAgentReadyWatchdog();
@@ -865,7 +1057,15 @@ export class LiveKitPocEngine {
       logVoiceEvent("livekit_mic_request_started", { attempt, engineState: this.state });
       const startedAt = Date.now();
       const outcome = await this.attemptEnableMicrophone(room, generation);
-      if (!this.isCurrentGeneration(generation)) return;
+      if (!this.isCurrentGeneration(generation)) {
+        // Phase 1: Stop/end happened while this attempt was in flight.
+        // getUserMedia can't be cancelled, so if it DID open a track,
+        // quarantine it immediately - never let a late success publish a live
+        // mic into a room that is being (or has been) torn down. Fire-and-
+        // forget; the room disconnect already in progress also stops it.
+        if (outcome.ok) room.localParticipant.setMicrophoneEnabled(false).catch(() => undefined);
+        return;
+      }
       const elapsedMs = Date.now() - startedAt;
 
       if (outcome.ok) {
@@ -877,6 +1077,11 @@ export class LiveKitPocEngine {
           engineState: this.state, durationMs: elapsedMs, startupGeneration: generation,
           connectionId: this.connectionId ?? undefined, sinceStartMs: this.sinceStart(),
         });
+        // Mic leg done. If the patient/agent leg is still outstanding (the
+        // common case - OpenAI Realtime is the long pole), show "Starting
+        // patient" so the remaining wait reads as forward progress rather than
+        // a stall. maybeEnterListening below emits "ready" if it transitions.
+        if (!this.agentReadyReceived) this.setStartupStage("starting_patient");
         this.maybeEnterListening(generation);
         return;
       }
@@ -1512,7 +1717,21 @@ export class LiveKitPocEngine {
    * discipline (stop pending work, detach media, never leave a dangling
    * recognizer or a stale "speaking" state). */
   async end(): Promise<void> {
+    // Phase 1: idempotent. The first call owns teardown; every later call
+    // (repeated Stop, unmount racing Stop, End Interview awaiting cleanup)
+    // returns the SAME promise - never a second room.disconnect() race.
+    if (this.endPromise) return this.endPromise;
+    this.endPromise = this.performEnd();
+    return this.endPromise;
+  }
+
+  private async performEnd(): Promise<void> {
     this.ended = true;
+    // Stop during startup: abort a token fetch that may still be in flight
+    // (before room.connect() ever ran) so a dead request cannot resolve into
+    // a torn-down engine.
+    this.tokenAbort?.abort();
+    this.tokenAbort = null;
     if (this.connectionId) {
       // Only fires if a connection was actually created (Start reached the
       // token-fetch stage) - a no-op end() on a never-started engine stays
@@ -1529,6 +1748,8 @@ export class LiveKitPocEngine {
     this.startupGeneration += 1;
     this.micReady = false;
     this.agentReadyReceived = false;
+    this.agentPresent = false;
+    this.startupStage = null;
     this.semanticTurnControlActive = false;
     this.promptAgentMode = false;
     this.connectionId = null;
@@ -1538,6 +1759,7 @@ export class LiveKitPocEngine {
     this.clearThinkingWatchdog("engine_end");
     this.clearSpeakingWatchdog();
     this.clearInterruptWatchdog();
+    this.clearReconnectWatchdog();
     this.pendingDeliveryTurnId = null;
     this.pendingProcessingTurnId = null;
     this.stopRecognition();

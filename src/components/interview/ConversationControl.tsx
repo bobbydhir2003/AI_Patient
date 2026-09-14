@@ -1,3 +1,4 @@
+import type { PocStartupStage } from "../../hooks/useLiveKitInterviewVoice";
 import type { VoiceConversationState } from "../../hooks/voiceStateMachine";
 import styles from "./ConversationControl.module.css";
 
@@ -9,6 +10,11 @@ interface ConversationControlProps {
    * clear this button controls VOICE mode, not the conversation itself. */
   hasConversation?: boolean;
   state: VoiceConversationState;
+  /** Phase 2: forward-only startup milestone. When present during the
+   * connecting window it replaces the generic "Connecting..." copy with a
+   * concrete step, so a slow startup (OpenAI Realtime is the long pole) reads
+   * as progress rather than a freeze. Presentational only. */
+  startupStage?: PocStartupStage | null;
   errorMessage: string | null;
   onStart: () => void;
   onStop: () => void;
@@ -21,6 +27,21 @@ interface ConversationControlProps {
    * out of scope by product requirement. Defaults to false so the legacy
    * voice path's existing behavior is unchanged. */
   retryDisabled?: boolean;
+}
+
+/** Phase 2: concrete label for the connecting window's current milestone.
+ * Deliberately student-facing copy (not the raw enum). */
+function startupStageLabel(stage: PocStartupStage): string {
+  switch (stage) {
+    case "connecting_room":
+      return "Connecting to room...";
+    case "preparing_microphone":
+      return "Preparing microphone...";
+    case "starting_patient":
+      return "Starting patient...";
+    case "ready":
+      return "Ready";
+  }
 }
 
 function statusText(state: VoiceConversationState, patientName: string): string {
@@ -41,6 +62,8 @@ function statusText(state: VoiceConversationState, patientName: string): string 
       return "Listening to your interruption...";
     case "COOLDOWN":
       return "One moment...";
+    case "STOPPING":
+      return "Stopping...";
     case "PAUSED":
       return "Conversation paused";
     case "ERROR":
@@ -56,6 +79,7 @@ export function ConversationControl({
   enabled,
   hasConversation = false,
   state,
+  startupStage = null,
   errorMessage,
   onStart,
   onStop,
@@ -91,7 +115,8 @@ export function ConversationControl({
       mainAction = onStart;
       break;
     case "REQUESTING_PERMISSION":
-      mainLabel = "Connecting...";
+      // Phase 2: show the concrete startup milestone when known.
+      mainLabel = startupStage ? startupStageLabel(startupStage) : "Connecting...";
       mainAria = "Connecting to the patient session";
       mainAction = null;
       break;
@@ -113,6 +138,12 @@ export function ConversationControl({
     case "INTERRUPTING":
       mainLabel = "Listening to your interruption...";
       mainAria = "Listening to your interruption";
+      mainAction = null;
+      break;
+    case "STOPPING":
+      // Phase 1: teardown in progress - no action until it resolves to IDLE.
+      mainLabel = "Stopping...";
+      mainAria = "Stopping the voice conversation";
       mainAction = null;
       break;
     case "COOLDOWN":
@@ -189,7 +220,9 @@ export function ConversationControl({
         )}
       </div>
       <p className={styles.status} aria-live="polite">
-        {statusText(state, patientName)}
+        {state === "REQUESTING_PERMISSION" && startupStage
+          ? startupStageLabel(startupStage)
+          : statusText(state, patientName)}
         {state === "ERROR" && errorMessage ? ` — ${errorMessage}` : ""}
       </p>
     </div>

@@ -171,6 +171,21 @@ globalThis.window = {
   },
 };
 
+// Phase 1: the voice eligibility gate is now WebRTC + getUserMedia (NOT the
+// browser SpeechRecognition API - see useLiveKitInterviewVoice.ts's
+// isRealtimeVoiceSupported). Provide just enough of navigator/RTCPeerConnection
+// for that check to pass in this Node harness, so the hook's startConversation
+// is not gated off. (The real getUserMedia is exercised via the FakeRoom's
+// setMicrophoneEnabled, never these globals.)
+// Node 21+ exposes `navigator` as a getter-only global, so a plain assignment
+// throws - define a data property instead.
+Object.defineProperty(globalThis, "navigator", {
+  value: { mediaDevices: { getUserMedia: async () => ({}) } },
+  configurable: true,
+  writable: true,
+});
+globalThis.RTCPeerConnection = class {};
+
 // ---------------------------------------------------------------------------
 // Fake `livekit-client` module (real SDK never contacted in this test).
 // ---------------------------------------------------------------------------
@@ -180,6 +195,7 @@ const RoomEvent = {
   Reconnected: "reconnected",
   TrackSubscribed: "trackSubscribed",
   ParticipantConnected: "participantConnected",
+  ParticipantDisconnected: "participantDisconnected",
   DataReceived: "dataReceived",
 };
 const Track = { Kind: { Audio: "audio" } };
@@ -204,6 +220,12 @@ class FakeRoom {
     this.publishedData = [];
     this.micCallCount = 0;
     this.micDisableCallCount = 0;
+    // Phase 1: let a test hold disconnect() unresolved so it can observe the
+    // hook parked in STOPPING (never prematurely IDLE) until teardown really
+    // finishes. Default off = disconnect resolves immediately (all pre-Phase-1
+    // tests keep their existing timing).
+    this._delayDisconnect = false;
+    this._disconnectResolvers = [];
     const micBehavior = nextMicBehavior ?? (() => Promise.resolve());
     nextMicBehavior = null;
     this.localParticipant = {
@@ -237,6 +259,19 @@ class FakeRoom {
   }
   async disconnect() {
     this.disconnectCalls += 1;
+    if (this._delayDisconnect) {
+      await new Promise((resolve) => {
+        this._disconnectResolvers.push(resolve);
+      });
+    }
+  }
+  /** Phase 1 test helper: resolve a disconnect() that was held open by
+   * _delayDisconnect, letting the engine's teardown (and the hook's cleanup
+   * promise) finally settle. */
+  resolveDisconnect() {
+    const resolvers = this._disconnectResolvers;
+    this._disconnectResolvers = [];
+    for (const r of resolvers) r();
   }
 }
 
@@ -402,6 +437,11 @@ const { useLiveKitInterviewVoice } = await import(
 );
 const { mapSessionMessages, reconcileLiveKitPatientMessage } = await import(
   path.join(buildDir, "livekit", "liveKitTranscriptMessages.js")
+);
+// Phase 1: same module instance the hook imports, so isAudioUnlocked() reflects
+// the hook's synchronous unlockAudioPlayback() call on Start.
+const { isAudioUnlocked, _resetAudioUnlockForTests } = await import(
+  path.join(buildDir, "audioUnlock.js")
 );
 
 function makeCallbackRecorder() {
@@ -2118,14 +2158,17 @@ test("PHASE D1 A: Stop sets IDLE, and the old engine's own delayed ended-state c
   assert.equal(tester.getResult().state, "LISTENING");
 
   tester.getResult().stopConversation();
-  assert.equal(tester.getResult().state, "IDLE", "Stop must synchronously read as IDLE, never FINISHED");
+  // Phase 1: Stop enters STOPPING synchronously and only advances to IDLE once
+  // teardown resolves - it must NEVER flash FINISHED, and must NOT prematurely
+  // read as IDLE while the room is still disconnecting.
+  assert.equal(tester.getResult().state, "STOPPING", "Stop reads as STOPPING until cleanup completes");
 
   // Let engine1's own end() chain (await room.disconnect() -> setState("ended"))
   // resolve - this delayed onStateChange("ended") is the exact call that used
-  // to silently clobber the IDLE just set above.
+  // to silently clobber the terminal state.
   await flushMicrotasks();
   assert.equal(room1.disconnectCalls, 1);
-  assert.equal(tester.getResult().state, "IDLE", "a late 'ended' callback from the stopped engine must be ignored");
+  assert.equal(tester.getResult().state, "IDLE", "once teardown resolves the hook lands on IDLE, never FINISHED");
 });
 
 test("PHASE D1 B: reset() (used by End Interview) also reads as IDLE immediately and is protected from the same old-engine late callback", async () => {
@@ -2140,11 +2183,13 @@ test("PHASE D1 B: reset() (used by End Interview) also reads as IDLE immediately
   await flushMicrotasks();
 
   tester.getResult().reset();
-  assert.equal(tester.getResult().state, "IDLE");
+  // Phase 1: reset() clears the error synchronously but teardown is awaited -
+  // STOPPING until the room finishes disconnecting, then IDLE.
+  assert.equal(tester.getResult().state, "STOPPING");
   assert.equal(tester.getResult().errorMessage, null);
 
   await flushMicrotasks();
-  assert.equal(tester.getResult().state, "IDLE", "a late 'ended' callback after reset() must be ignored");
+  assert.equal(tester.getResult().state, "IDLE", "reset() lands on IDLE once teardown resolves");
 });
 
 test("PHASE D1 C: Resume (Start again after Stop) mints a fresh token, joins a brand-new room, and reaches LISTENING again", async () => {
@@ -2193,7 +2238,8 @@ test("PHASE D1 D: retry() after an engine error builds a new engine, unaffected 
   assert.equal(tester.getResult().state, "ERROR");
   const room1 = createdRooms.at(-1);
 
-  tester.getResult().retry();
+  // Phase 1: retry() now awaits the fatal-error cleanup before starting fresh.
+  await tester.getResult().retry();
   await flushMicrotasks();
   const room2 = createdRooms.at(-1);
   assert.notEqual(room2, room1, "retry() must build a new engine/room, not reuse the errored one");
@@ -2260,6 +2306,468 @@ test("PHASE D1: STATIC - stopConversation/reset never call completeSession, navi
     .replace(/\/\/.*$/gm, "");
   assert.ok(!/completeSession|navigate\(|assessment/i.test(rawSource),
     "useLiveKitInterviewVoice.ts must stay unaware of session-completion/assessment/navigation concerns - those belong to InterviewPage.tsx's separate End Interview flow");
+});
+
+// ===========================================================================
+// PHASE 1: deterministic Start/Stop lifecycle. Awaitable STOPPING, idempotent
+// engine teardown, and a hard guarantee that a new Start never overlaps a
+// still-dying room. Plus the getUserMedia/WebRTC support gate (no longer the
+// browser SpeechRecognition API) and synchronous mobile audio unlock. Driven
+// through the REAL hook (createHookTester) + engine against the SAME
+// FakeRoom/fetch mocks every other test uses.
+// ===========================================================================
+
+test("PHASE 1: normal Start -> Stop disconnects exactly once and lands on IDLE", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p1-1" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReady(room);
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "LISTENING");
+
+  await tester.getResult().stopConversation();
+  assert.equal(room.disconnectCalls, 1, "Stop disconnects the room exactly once");
+  assert.equal(tester.getResult().state, "IDLE");
+  assert.equal(tester.getResult().active, false);
+});
+
+test("PHASE 1: Stop stays STOPPING until a delayed disconnect() actually resolves", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p1-2" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReady(room);
+  await flushMicrotasks();
+
+  room._delayDisconnect = true; // hold teardown open
+  const stopped = tester.getResult().stopConversation();
+  assert.equal(tester.getResult().state, "STOPPING");
+  await flushMicrotasks();
+  // Even after microtasks flush, disconnect() has NOT resolved - the hook must
+  // still read STOPPING, never a premature IDLE.
+  assert.equal(tester.getResult().state, "STOPPING", "must not show IDLE while the room is still disconnecting");
+  assert.equal(room.disconnectCalls, 1);
+
+  room.resolveDisconnect();
+  await stopped;
+  assert.equal(tester.getResult().state, "IDLE", "IDLE only after teardown truly completes");
+});
+
+test("PHASE 1: a Start attempted during STOPPING is refused - no new engine, not queued", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p1-3" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room1 = createdRooms.at(-1);
+  sendAgentReady(room1);
+  await flushMicrotasks();
+
+  room1._delayDisconnect = true;
+  const stopped = tester.getResult().stopConversation();
+  assert.equal(tester.getResult().state, "STOPPING");
+
+  const roomsBefore = createdRooms.length;
+  tester.getResult().startConversation(); // must be a no-op during STOPPING
+  await flushMicrotasks();
+  assert.equal(createdRooms.length, roomsBefore, "no new room may be created while cleanup is in flight");
+  assert.equal(tester.getResult().state, "STOPPING", "Start during STOPPING must not change state");
+
+  room1.resolveDisconnect();
+  await stopped;
+  // Not queued: the engine simply settles on IDLE; the student may Start again now.
+  assert.equal(tester.getResult().state, "IDLE");
+  assert.equal(createdRooms.length, roomsBefore, "the refused Start was never queued to run later");
+});
+
+test("PHASE 1: duplicate Stop disconnects once and returns the SAME cleanup promise", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p1-4" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReady(room);
+  await flushMicrotasks();
+
+  room._delayDisconnect = true;
+  const stop1 = tester.getResult().stopConversation();
+  const stop2 = tester.getResult().stopConversation();
+  assert.equal(stop1, stop2, "a repeated Stop returns the identical in-flight cleanup promise");
+  await flushMicrotasks();
+  assert.equal(room.disconnectCalls, 1, "the room is disconnected exactly once despite two Stop calls");
+
+  room.resolveDisconnect();
+  await stop1;
+  assert.equal(tester.getResult().state, "IDLE");
+});
+
+test("PHASE 1: Start -> Stop -> Start builds a fresh room only AFTER cleanup completes", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p1-5" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room1 = createdRooms.at(-1);
+  sendAgentReady(room1);
+  await flushMicrotasks();
+
+  await tester.getResult().stopConversation(); // fully awaited teardown
+  assert.equal(tester.getResult().state, "IDLE");
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room2 = createdRooms.at(-1);
+  assert.notEqual(room2, room1, "the second Start joins a brand-new room");
+  sendAgentReady(room2);
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "LISTENING");
+  assert.equal(tokenMintCalls().length, 2);
+});
+
+test("PHASE 1: five Start/Stop cycles never overlap rooms (distinct rooms, one disconnect each)", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p1-6" }));
+
+  const seen = [];
+  for (let cycle = 1; cycle <= 5; cycle += 1) {
+    tester.getResult().startConversation();
+    await flushMicrotasks();
+    const room = createdRooms.at(-1);
+    assert.ok(!seen.includes(room), `cycle ${cycle}: must be a fresh room, never a reused one`);
+    seen.push(room);
+    sendAgentReady(room);
+    await flushMicrotasks();
+    assert.equal(tester.getResult().state, "LISTENING", `cycle ${cycle}: reaches LISTENING`);
+
+    await tester.getResult().stopConversation();
+    assert.equal(room.disconnectCalls, 1, `cycle ${cycle}: exactly one disconnect`);
+    assert.equal(tester.getResult().state, "IDLE", `cycle ${cycle}: back to IDLE`);
+  }
+  assert.equal(new Set(seen).size, 5, "all five cycles used distinct rooms - no overlap");
+  assert.equal(tokenMintCalls().length, 5);
+});
+
+test("PHASE 1: end() during the token fetch aborts it and settles cleanly (no room ever created, no error)", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+
+  let sawAbort = false;
+  const gatedFetch = (_sessionId, signal) =>
+    new Promise((_resolve, reject) => {
+      // Never resolves on its own - only an abort settles it.
+      if (signal) signal.addEventListener("abort", () => {
+        sawAbort = true;
+        reject(new Error("aborted"));
+      });
+    });
+
+  const startPromise = engine.start("session-p1-tok", gatedFetch);
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "connecting", "still awaiting the token");
+  assert.equal(createdRooms.length, 0, "no room until the token resolves");
+
+  await engine.end();
+  await startPromise;
+  assert.ok(sawAbort, "the in-flight token fetch was aborted on end()");
+  assert.equal(createdRooms.length, 0, "still no room after Stop-during-token-fetch");
+  assert.equal(engine.getState(), "ended");
+  assert.deepEqual(rec.errors, [], "aborting our own fetch on Stop is not a user-facing error");
+});
+
+test("PHASE 1: Stop while WAITING_FOR_AGENT tears down and lands IDLE (no agent_ready needed)", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p1-wait" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  // No agent_ready sent - the hook is parked in REQUESTING_PERMISSION.
+  assert.equal(tester.getResult().state, "REQUESTING_PERMISSION");
+
+  await tester.getResult().stopConversation();
+  assert.equal(room.disconnectCalls, 1);
+  assert.equal(tester.getResult().state, "IDLE");
+});
+
+test("PHASE 1: fatal error auto-cleans the engine, then Retry starts a fresh one", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p1-err" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "REQUESTING_PERMISSION");
+  const room1 = createdRooms.at(-1);
+
+  fireTimerById(latestTimerId()); // agent-ready watchdog fires -> fatal error
+  assert.equal(tester.getResult().state, "ERROR");
+  await flushMicrotasks();
+  // The errored engine's room was torn down as part of entering ERROR (it is
+  // no longer left connected the way the pre-Phase-1 code left it).
+  assert.equal(room1.disconnectCalls, 1, "fatal error must clean up the old room, not leave it connected");
+
+  await tester.getResult().retry();
+  await flushMicrotasks();
+  const room2 = createdRooms.at(-1);
+  assert.notEqual(room2, room1, "Retry builds a brand-new engine/room");
+  sendAgentReady(room2);
+  await flushMicrotasks();
+  assert.equal(tester.getResult().state, "LISTENING", "Retry succeeds in the fresh engine");
+});
+
+test("PHASE 1: reset() (used by End Interview) resolves only AFTER teardown completes", async () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p1-end" }));
+
+  tester.getResult().startConversation();
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReady(room);
+  await flushMicrotasks();
+
+  room._delayDisconnect = true;
+  let resolved = false;
+  const done = tester.getResult().reset().then(() => { resolved = true; });
+  await flushMicrotasks();
+  assert.equal(resolved, false, "reset() must not resolve while the room is still disconnecting");
+  assert.equal(tester.getResult().state, "STOPPING");
+
+  room.resolveDisconnect();
+  await done;
+  assert.equal(resolved, true, "reset() resolves once teardown finishes - End Interview can safely await it");
+  assert.equal(tester.getResult().state, "IDLE");
+});
+
+test("PHASE 1: STATIC - InterviewPage's End Interview awaits voice cleanup before completing the session", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "src", "pages", "InterviewPage.tsx"), "utf8");
+  assert.ok(/await\s+voice\.reset\(\)/.test(src), "handleConfirmEnd must await voice.reset() before proceeding");
+  const afterAwait = src.slice(src.indexOf("await voice.reset()"));
+  assert.ok(afterAwait.includes("completeSession("), "completeSession must occur AFTER the awaited voice cleanup");
+});
+
+test("PHASE 1: voice eligibility uses WebRTC/getUserMedia, NOT browser SpeechRecognition", () => {
+  resetFixtures();
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p1-sup" }));
+  assert.equal(tester.getResult().supported, true, "supported when getUserMedia + RTCPeerConnection are present");
+
+  // Removing WebRTC support flips it off...
+  const savedRTC = globalThis.RTCPeerConnection;
+  delete globalThis.RTCPeerConnection;
+  tester.render(hookOptions({ sessionId: "session-p1-sup" }));
+  assert.equal(tester.getResult().supported, false, "unsupported when WebRTC is absent");
+  globalThis.RTCPeerConnection = savedRTC;
+
+  // ...but SpeechRecognition is NOT part of the gate: its absence must leave
+  // voice fully supported (prompt-agent mode never needs it).
+  const savedSR = globalThis.window.SpeechRecognition;
+  delete globalThis.window.SpeechRecognition;
+  tester.render(hookOptions({ sessionId: "session-p1-sup" }));
+  assert.equal(tester.getResult().supported, true, "SpeechRecognition absence must NOT gate voice off");
+  globalThis.window.SpeechRecognition = savedSR;
+});
+
+test("PHASE 1: STATIC - the hook no longer gates voice on isSpeechRecognitionSupported", () => {
+  // Strip comments first - the new capability-check docstring explains (in
+  // prose) which obsolete gate it replaces, which would otherwise self-match.
+  const src = fs
+    .readFileSync(path.join(repoRoot, "src", "hooks", "useLiveKitInterviewVoice.ts"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+  assert.ok(!src.includes("isSpeechRecognitionSupported"), "the obsolete SpeechRecognition support gate must be gone");
+});
+
+test("PHASE 1: unlockAudioPlayback() runs synchronously on Start, on every Start", async () => {
+  resetFixtures();
+  _resetAudioUnlockForTests();
+  assert.equal(isAudioUnlocked(), false);
+
+  const tester = createHookTester(useLiveKitInterviewVoice);
+  tester.render(hookOptions({ sessionId: "session-p1-unlock" }));
+
+  tester.getResult().startConversation();
+  // Synchronous: unlocked must be true immediately, before any microtask/await.
+  assert.equal(isAudioUnlocked(), true, "audio must be unlocked synchronously within the Start gesture");
+
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReady(room);
+  await flushMicrotasks();
+  await tester.getResult().stopConversation();
+
+  // Every Start unlocks (idempotent no-op after the first, but always invoked).
+  _resetAudioUnlockForTests();
+  assert.equal(isAudioUnlocked(), false);
+  tester.getResult().startConversation();
+  assert.equal(isAudioUnlocked(), true, "every Start unlocks, not just the first");
+  tester.unmount();
+});
+
+// ===========================================================================
+// PHASE 2: connection-scoped readiness + reconnect correctness + startup
+// progress. connection_id filtering and reconnect revalidation are driven at
+// the engine level (mirroring the PHASE C tests) against the SAME FakeRoom.
+// ===========================================================================
+
+test("PHASE 2: agent_ready with a NON-matching connectionId is ignored (stale worker), matching one is accepted", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-p2-stale", fetchStudentLiveKitToken);
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+
+  // This connection's id is the token's conn-1; a ready for conn-999 belongs
+  // to a previous Start's worker and must be ignored.
+  sendAgentReady(room, { connectionId: "conn-999", promptAgent: true });
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "waiting_for_agent", "a stale-connection agent_ready must not make us ready");
+
+  // The matching one IS accepted.
+  sendAgentReady(room, { connectionId: "conn-1", promptAgent: true });
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "listening");
+  await engine.end();
+});
+
+test("PHASE 2: a connectionId-less agent_ready is still accepted (backward compat / admin POC)", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-p2-compat", fetchStudentLiveKitToken);
+  await flushMicrotasks();
+  const room = createdRooms.at(-1);
+  sendAgentReady(room); // no connectionId field at all
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "listening", "an unscoped agent_ready (older worker) must still be honored");
+  await engine.end();
+});
+
+test("PHASE 2: Start -> Stop -> Start uses a new connection; the previous connection's agent_ready is ignored", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  await engine.start("session-p2-restart", fetchStudentLiveKitToken);
+  await flushMicrotasks();
+  await engine.end();
+
+  await engine.start("session-p2-restart", fetchStudentLiveKitToken);
+  await flushMicrotasks();
+  const room2 = createdRooms.at(-1);
+
+  // The second connection is conn-2. A ready for conn-1 (the previous Start) is stale.
+  sendAgentReady(room2, { connectionId: "conn-1", promptAgent: true });
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "waiting_for_agent", "the previous connection's agent_ready must be ignored");
+
+  sendAgentReady(room2, { connectionId: "conn-2", promptAgent: true });
+  await flushMicrotasks();
+  assert.equal(engine.getState(), "listening");
+  assert.equal(tokenMintCalls().length, 2, "each Start mints its own distinct connection id");
+  await engine.end();
+});
+
+test("PHASE 2: a healthy reconnect (agent still present) revalidates straight back to LISTENING", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-p2-recon-ok");
+  assert.equal(engine.getState(), "listening");
+
+  room.emit(RoomEvent.Reconnecting);
+  assert.equal(engine.getState(), "reconnecting");
+  room.emit(RoomEvent.Reconnected);
+  // agent never left, mic + agent_ready still stand -> revalidated immediately.
+  assert.equal(engine.getState(), "listening");
+  await engine.end();
+});
+
+test("PHASE 2: after the patient agent leaves, Reconnected does NOT immediately resume LISTENING", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-p2-recon-gone");
+  assert.equal(engine.getState(), "listening");
+
+  room.emit(RoomEvent.ParticipantDisconnected, { identity: "patient-agent" });
+  room.emit(RoomEvent.Reconnecting);
+  assert.equal(engine.getState(), "reconnecting");
+  room.emit(RoomEvent.Reconnected);
+  // Agent is gone -> must stay in reconnecting pending revalidation, NEVER
+  // falsely resume LISTENING against a room with no patient.
+  assert.equal(engine.getState(), "reconnecting", "must not resume LISTENING while the patient agent is absent");
+  await engine.end();
+});
+
+test("PHASE 2: reconnect resumes LISTENING only once the agent returns and readiness is re-established", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-p2-recon-return");
+
+  room.emit(RoomEvent.ParticipantDisconnected, { identity: "patient-agent" });
+  room.emit(RoomEvent.Reconnecting);
+  room.emit(RoomEvent.Reconnected);
+  assert.equal(engine.getState(), "reconnecting");
+
+  // The agent (worker) rejoins the reconnected room -> revalidation succeeds.
+  room.emit(RoomEvent.ParticipantConnected, { identity: "patient-agent" });
+  assert.equal(engine.getState(), "listening", "revalidation resumes LISTENING once the agent is back");
+  await engine.end();
+});
+
+test("PHASE 2: if the agent never returns after reconnect, a bounded watchdog surfaces a restartable error", async () => {
+  resetFixtures();
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine(rec.callbacks);
+  const room = await startReady(engine, "session-p2-recon-timeout");
+
+  room.emit(RoomEvent.ParticipantDisconnected, { identity: "patient-agent" });
+  room.emit(RoomEvent.Reconnecting);
+  room.emit(RoomEvent.Reconnected);
+  assert.equal(engine.getState(), "reconnecting");
+
+  fireTimerById(latestTimerId()); // the reconnect revalidation watchdog
+  assert.equal(engine.getState(), "error");
+  assert.ok(rec.errors.length >= 1);
+  const events = telemetryEvents().filter((e) => e.event === "livekit_engine_error");
+  assert.ok(events.some((e) => e.reason === "reconnect_revalidation_failed"));
+  await engine.end();
+});
+
+test("PHASE 2: startup emits forward-only progress stages ending at 'ready'", async () => {
+  resetFixtures();
+  const stages = [];
+  const rec = makeCallbackRecorder();
+  const engine = new LiveKitPocEngine({ ...rec.callbacks, onStartupStage: (s) => stages.push(s) });
+  await engine.start("session-p2-stage", fetchStudentLiveKitToken);
+  await flushMicrotasks();
+  // Room connected + mic acquired (fake mic resolves immediately) but the
+  // patient/agent leg is still outstanding.
+  assert.deepEqual(stages, ["connecting_room", "preparing_microphone", "starting_patient"]);
+
+  const room = createdRooms.at(-1);
+  sendAgentReady(room, { connectionId: "conn-1", promptAgent: true });
+  await flushMicrotasks();
+  assert.equal(stages.at(-1), "ready");
+  assert.equal(engine.getState(), "listening");
+  await engine.end();
 });
 
 // ---------------------------------------------------------------------------
@@ -2492,9 +3000,9 @@ test("PHASE D1+D2 P: Interrupt mid-flight, then Stop, then Resume still works en
 
   // Stop wins even with an interrupt still pending.
   tester.getResult().stopConversation();
-  assert.equal(tester.getResult().state, "IDLE");
+  assert.equal(tester.getResult().state, "STOPPING");
   await flushMicrotasks();
-  assert.equal(tester.getResult().state, "IDLE", "must remain IDLE - never resurrected by a late interrupt/ended callback");
+  assert.equal(tester.getResult().state, "IDLE", "must land on IDLE - never resurrected by a late interrupt/ended callback");
 
   // Resume: fresh token, fresh room, reaches LISTENING again - unaffected by
   // the interrupt that was in flight before Stop.

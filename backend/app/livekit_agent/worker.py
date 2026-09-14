@@ -203,6 +203,19 @@ _STUDENT_AUDIO_LOG_INTERVAL_SECONDS = 10.0
 # VAD, turn, generation, or response latency behavior.
 _REALTIME_READY_TIMEOUT_SECONDS = 15.0
 
+# Phase 2: bounded agent_ready resend. LiveKit "reliable" data delivery only
+# guarantees delivery to participants ALREADY present, so the very first
+# agent_ready can still be lost if it races the student's subscription. We
+# therefore send it once immediately, then resend a small, FIXED number of
+# times at a short interval so a single lost packet still reaches the browser.
+# The browser dedupes duplicates (connection-scoped agent_ready), so extra
+# copies are harmless. Strictly bounded - never an unbounded/heartbeat loop -
+# and stopped early on shutdown. Total window (~1.6s) stays well inside both
+# the worker's 15s realtime-ready bound and the browser's 20s agent-ready
+# watchdog. Module-level so tests can shrink them for fast, deterministic runs.
+_AGENT_READY_RESEND_COUNT = 4
+_AGENT_READY_RESEND_INTERVAL_SECONDS = 0.4
+
 class TurnSource(str, Enum):
     """Turn-origin label, used purely for logging/observability: a browser
     SpeechRecognition final is always non-authoritative under prompt_agent
@@ -225,6 +238,22 @@ def parse_job_metadata(raw: str) -> tuple[str, str] | None:
     if not session_id or not case_id:
         return None
     return session_id, case_id
+
+
+def parse_connection_id(raw: str) -> str:
+    """Phase 2: extract the OPTIONAL connection_id from job metadata (see
+    livekit_token_service dispatch metadata). Returns "" when absent or
+    malformed - a legacy dispatch without it is fully supported: the worker
+    simply echoes an empty connectionId in agent_ready, which the browser
+    treats as unscoped/acceptable. Kept separate from parse_job_metadata so the
+    latter's (session_id, case_id) contract - and its fail-closed semantics -
+    stay unchanged; connection_id is telemetry/correlation only and must never
+    gate whether a job runs."""
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return ""
+    return str(data.get("connection_id") or "").strip()
 
 
 class PocAgentSession:
@@ -268,10 +297,15 @@ class PocAgentSession:
         job_id: str = "",
         room_id: str = "",
         worker_id: str = "",
+        connection_id: str = "",
     ) -> None:
         self._room = room
         self.session_id = session_id
         self.case_id = case_id
+        # Phase 2: server-generated per-Start connection id (echoed in
+        # agent_ready so the browser can reject a stale ready from a previous
+        # Start's worker). "" for the admin POC path / a legacy dispatch.
+        self._connection_id = connection_id
         self._job_id = job_id
         # LiveKit Cloud's framework worker id (log-only, for distribution
         # visibility across Worker A/B/C). Optional so existing tests that
@@ -304,6 +338,10 @@ class PocAgentSession:
         self._realtime_producer_track_sid: str | None = None
         self._realtime_producer_attached = False
         self._agent_ready_sent = False
+        # Phase 2: bounded agent_ready resend task (see _send_agent_ready /
+        # _resend_agent_ready). Cancelled on shutdown/aclose so it never
+        # outlives the job.
+        self._agent_ready_task: "asyncio.Task[None] | None" = None
         # Orthogonal raw-audio candidate state, set/cleared by teardown paths
         # (_release_realtime_speech_waiters) - the audio-driven speech_started/
         # stopped signal itself is prompt_agent-native now (_on_prompt_speech_
@@ -714,18 +752,41 @@ class PocAgentSession:
             "livekit_agent_realtime_ready session_id=%s job_id=%s worker_id=%s %s elapsed_ms=%.0f",
             self.session_id, self._job_id, self._worker_id, _worker_ident(), elapsed_ms,
         )
+        # Send once immediately, then a bounded number of resends (see
+        # _AGENT_READY_RESEND_*) so a single lost data packet still reaches the
+        # browser. The browser dedupes duplicates by connection id.
+        self._publish_agent_ready()
+        self._agent_ready_task = asyncio.ensure_future(self._resend_agent_ready())
+
+    def _publish_agent_ready(self) -> None:
         # `semanticTurnControl` is always false now - the experimental
         # semantic-turn-control pipeline was removed; kept in the payload
         # shape only so an older frontend build parsing this field is
         # unaffected. `promptAgent` tells the frontend that OpenAI Realtime
         # OWNS speech detection, turn-taking AND transcription for this
         # session, so the browser must NOT run its own SpeechRecognition (it
-        # would be redundant dead weight and cause UI flicker).
+        # would be redundant dead weight and cause UI flicker). `connectionId`
+        # (Phase 2) lets the browser reject a stale ready from a previous
+        # Start's worker; "" for the admin POC / legacy dispatch = unscoped.
         self._publish_control({
             "type": "agent_ready",
+            "connectionId": self._connection_id,
             "semanticTurnControl": False,
             "promptAgent": self._realtime_prompt_agent_active,
         })
+
+    async def _resend_agent_ready(self) -> None:
+        """Phase 2: bounded, FIXED-count resend of agent_ready - never an
+        unbounded heartbeat. Stops early the moment the job is shutting down or
+        closed. Any publish error is already swallowed by _publish_control."""
+        try:
+            for _ in range(_AGENT_READY_RESEND_COUNT):
+                await asyncio.sleep(_AGENT_READY_RESEND_INTERVAL_SECONDS)
+                if self._shutdown_called or self._closed:
+                    return
+                self._publish_agent_ready()
+        except asyncio.CancelledError:
+            raise
 
     def _maybe_send_realtime_agent_ready(self) -> None:
         """Compatibility signal, delayed until provider + mic path are real."""
@@ -750,6 +811,18 @@ class PocAgentSession:
             )
             self._trigger_shutdown("realtime_not_ready")
             return
+        # Phase 3: restore prior conversation context (Stop -> Start continuity)
+        # into this NEW Realtime session BEFORE announcing agent_ready, so the
+        # restarted patient understands references to earlier dialogue and the
+        # student is never told "ready" before that context is in. Runs once per
+        # session (the runtime guards re-entry), so a normal reconnect of the
+        # SAME running job never re-injects history. A first Start (empty
+        # transcript) returns immediately; a restore failure is fail-open inside
+        # restore_context and never blocks readiness.
+        if self._prompt_agent_runtime is not None:
+            await self._prompt_agent_runtime.restore_context()
+            if self._realtime_session is not realtime_session or self._shutdown_called:
+                return
         self._realtime_configured_ready = True
         self._log_agent_event("realtime_session_configured_ready")
         self._maybe_send_realtime_agent_ready()
@@ -932,6 +1005,10 @@ class PocAgentSession:
             self._stop_all_student_audio_ingest(reason=reason)
             if producer_tasks:
                 await asyncio.gather(*producer_tasks, return_exceptions=True)
+            if self._agent_ready_task is not None and not self._agent_ready_task.done():
+                if self._agent_ready_task is not asyncio.current_task():
+                    self._agent_ready_task.cancel()
+                    await asyncio.gather(self._agent_ready_task, return_exceptions=True)
             if self._realtime_ready_task is not None and not self._realtime_ready_task.done():
                 if self._realtime_ready_task is not asyncio.current_task():
                     self._realtime_ready_task.cancel()
@@ -1425,6 +1502,9 @@ async def entrypoint(ctx: JobContext) -> None:
         ctx.shutdown(reason="missing_or_invalid_metadata")
         return
     session_id, case_id = parsed
+    # Phase 2: optional server-generated connection id (echoed back in
+    # agent_ready). Absent for a legacy dispatch/admin POC -> "" -> unscoped.
+    connection_id = parse_connection_id(ctx.job.metadata)
 
     # SUBSCRIBE_NONE: the conversation itself still never depends on the
     # student's raw mic audio (transcription is client-side via the browser's
@@ -1463,7 +1543,7 @@ async def entrypoint(ctx: JobContext) -> None:
     poc_session = PocAgentSession(
         room=ctx.room, session_id=session_id, case_id=case_id,
         job_id=ctx.job.id, room_id=ctx.room.name, on_shutdown=_on_session_shutdown,
-        worker_id=ctx.worker_id,
+        worker_id=ctx.worker_id, connection_id=connection_id,
     )
     await poc_session.start()
 

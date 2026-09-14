@@ -128,7 +128,18 @@ def _mint_token(
         agents=[
             RoomAgentDispatch(
                 agent_name=settings.livekit_agent_name,
-                metadata=json.dumps({"session_id": session.id, "case_id": session.case_id}),
+                # Phase 2: the server-generated connection_id is carried into
+                # dispatch metadata too (in addition to the room-name suffix),
+                # so the worker echoes the SAME value back in agent_ready and
+                # the browser can drop a stale agent_ready from a previous
+                # Start's worker. Empty for the admin POC path (deterministic
+                # room, no per-connection id) - the worker treats "" as
+                # unscoped, so nothing changes there.
+                metadata=json.dumps({
+                    "session_id": session.id,
+                    "case_id": session.case_id,
+                    "connection_id": connection_id,
+                }),
             )
         ]
     )

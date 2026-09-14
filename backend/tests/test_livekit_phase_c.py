@@ -171,12 +171,18 @@ def test_agent_ready_sent_after_track_published_and_session_verified(monkeypatch
         asyncio.run(_start_and_drain(session))
 
     ready_messages = _control_messages(room, "agent_ready")
-    assert len(ready_messages) == 1
+    # Phase 2: agent_ready is now resent a bounded number of times, so one or
+    # more identical copies may be observed within the drain window.
+    assert len(ready_messages) >= 1
     # semanticTurnControl is always false now (the experimental pipeline was
     # removed). promptAgent is true - prompt_agent is the only Realtime mode.
+    # connectionId is "" here (this fixture constructs the session without a
+    # connection_id) - Phase 2 always includes the field, empty = unscoped.
     assert ready_messages[0] == {
-        "type": "agent_ready", "semanticTurnControl": False, "promptAgent": True,
+        "type": "agent_ready", "connectionId": "", "semanticTurnControl": False, "promptAgent": True,
     }
+    # Every resent copy is identical (same connection-scoped payload).
+    assert all(m == ready_messages[0] for m in ready_messages)
     # Track publish must happen BEFORE agent_ready is announced - a student
     # must never be told "ready" before there is anything to hear from.
     assert room.local_participant.published_data[-1][1]["type"] == "agent_ready"
@@ -267,7 +273,8 @@ def test_realtime_session_started_after_verification_and_track_published_before_
         asyncio.run(_start_and_drain(session))
 
     assert len(start_calls) == 1
-    assert len(_control_messages(room, "agent_ready")) == 1
+    # Phase 2: bounded resend may produce >1 identical agent_ready copies.
+    assert len(_control_messages(room, "agent_ready")) >= 1
     # agent_ready is the LAST data published - i.e. after the track publish.
     assert room.local_participant.published_data[-1][1]["type"] == "agent_ready"
 
@@ -285,7 +292,9 @@ def test_agent_ready_targets_the_student_identity_when_known(monkeypatch, engine
         dest for topic, body, dest in room.local_participant.published_data
         if topic == "agent_control" and body.get("type") == "agent_ready"
     ]
-    assert entries == [["student-1"]]
+    # Phase 2: agent_ready is resent a bounded number of times; EVERY copy must
+    # still be targeted at the student identity (never a blind broadcast).
+    assert entries and all(e == ["student-1"] for e in entries)
 
 
 def test_student_identity_learned_via_participant_connected_when_not_yet_present(monkeypatch, engine):
@@ -398,3 +407,99 @@ def test_two_sessions_deliver_turn_ack_to_their_own_room_only(monkeypatch, engin
 
     assert _control_messages(room_a, "turn_ack") == [{"type": "turn_ack", "clientTurnId": "turn-a"}]
     assert _control_messages(room_b, "turn_ack") == []
+
+
+# =================================================================
+# Phase 2: connection-scoped readiness reliability
+# =================================================================
+
+def test_phase2_agent_ready_echoes_connection_id_and_is_bounded_resent(monkeypatch, engine):
+    """Phase 2: agent_ready echoes the dispatch connection_id and is resent a
+    FIXED, bounded number of times (once immediately + N resends) so a single
+    lost data packet still reaches the browser - never once-only, never an
+    unbounded heartbeat. Every copy is identical."""
+    import app.livekit_agent.worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_AGENT_READY_RESEND_COUNT", 3)
+    monkeypatch.setattr(worker_mod, "_AGENT_READY_RESEND_INTERVAL_SECONDS", 0.01)
+
+    with _fake_rtc_for_worker():
+        factory, session_id = _seed_session(engine)
+        monkeypatch.setattr("app.livekit_agent.worker.get_db_factory", lambda: factory)
+        room = _FakeAgentRoom()
+        session = PocAgentSession(
+            room=room, session_id=session_id, case_id="carly",
+            job_id="job-1", room_id="room-1", on_shutdown=lambda reason: None,
+            connection_id="conn-xyz",
+        )
+        _enable_realtime_and_fake_session(monkeypatch, session)
+
+        async def scenario():
+            await session.start()
+            # Immediate send + all 3 resends (3 * 0.01s) with generous margin.
+            await asyncio.sleep(0.15)
+            await session.aclose(reason="test")
+
+        asyncio.run(scenario())
+
+    ready = _control_messages(room, "agent_ready")
+    # 1 immediate + 3 bounded resends = 4, never more (bounded).
+    assert len(ready) == 4
+    assert all(m["connectionId"] == "conn-xyz" for m in ready)
+    assert all(
+        m == {
+            "type": "agent_ready", "connectionId": "conn-xyz",
+            "semanticTurnControl": False, "promptAgent": True,
+        }
+        for m in ready
+    )
+
+
+def test_phase2_shutdown_cancels_agent_ready_resend(monkeypatch, engine):
+    """Phase 2: shutting the job down STOPS the bounded resend - no further
+    agent_ready copies after aclose, and far fewer than the configured count
+    ever fire (proving the resend was cancelled, not merely finished)."""
+    import app.livekit_agent.worker as worker_mod
+
+    monkeypatch.setattr(worker_mod, "_AGENT_READY_RESEND_COUNT", 50)
+    monkeypatch.setattr(worker_mod, "_AGENT_READY_RESEND_INTERVAL_SECONDS", 0.02)
+
+    with _fake_rtc_for_worker():
+        factory, session_id = _seed_session(engine)
+        monkeypatch.setattr("app.livekit_agent.worker.get_db_factory", lambda: factory)
+        room = _FakeAgentRoom()
+        session = PocAgentSession(
+            room=room, session_id=session_id, case_id="carly",
+            on_shutdown=lambda reason: None, connection_id="conn-stop",
+        )
+        _enable_realtime_and_fake_session(monkeypatch, session)
+
+        async def scenario():
+            await session.start()
+            await asyncio.sleep(0.05)  # a couple of resends fire
+            await session.aclose(reason="test")
+            await asyncio.sleep(0)      # flush any already-scheduled publish
+            stopped = len(_control_messages(room, "agent_ready"))
+            await asyncio.sleep(0.2)    # far longer than many resend intervals
+            final = len(_control_messages(room, "agent_ready"))
+            return stopped, final
+
+        stopped, final = asyncio.run(scenario())
+
+    assert final == stopped, "no agent_ready may be published after shutdown"
+    assert final < 50, "the resend was cancelled early, never ran the full count"
+
+
+def test_phase2_parse_connection_id_optional_and_fail_soft():
+    """parse_connection_id extracts the id when present, and returns "" for a
+    legacy dispatch without it or malformed metadata - never raising, never
+    gating the job."""
+    from app.livekit_agent.worker import parse_connection_id
+
+    assert parse_connection_id(
+        '{"session_id": "s", "case_id": "carly", "connection_id": "c-1"}'
+    ) == "c-1"
+    # Absent connection_id (legacy dispatch) -> "" (unscoped, still runs).
+    assert parse_connection_id('{"session_id": "s", "case_id": "carly"}') == ""
+    # Malformed -> "" (fail soft; parse_job_metadata separately fails the job closed).
+    assert parse_connection_id("not json") == ""

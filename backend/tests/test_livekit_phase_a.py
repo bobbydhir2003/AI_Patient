@@ -164,10 +164,11 @@ def test_room_session_and_case_metadata_are_correct_and_server_derived(engine, m
     decoded = jwt.decode(
         body["token"], LIVEKIT_API_SECRET, algorithms=["HS256"], options={"verify_aud": False}
     )
-    # Phase C3: the room name embeds the fresh connection_id, but the
-    # dispatch metadata below must be COMPLETELY unaffected by it - the
-    # worker must keep learning the real session_id/case_id from metadata,
-    # never from parsing the room-name string (see student_room_name).
+    # Phase C3: the room name embeds the fresh connection_id. The worker still
+    # learns the authoritative session_id/case_id from metadata, never from
+    # parsing the room-name string (see student_room_name). Phase 2: metadata
+    # ALSO carries that same connection_id, which the worker echoes back in
+    # agent_ready so the browser can reject a stale ready from a previous Start.
     assert decoded["video"]["room"] == f"ptai-interview-{session_id}-{body['connectionId']}"
     assert decoded["video"]["roomJoin"] is True
 
@@ -175,7 +176,9 @@ def test_room_session_and_case_metadata_are_correct_and_server_derived(engine, m
     assert len(agents) == 1
     assert agents[0]["agentName"] == get_settings().livekit_agent_name == "ptai-patient-agent"
     metadata = json.loads(agents[0]["metadata"])
-    assert metadata == {"session_id": session_id, "case_id": "carly"}
+    assert metadata == {
+        "session_id": session_id, "case_id": "carly", "connection_id": body["connectionId"],
+    }
 
 
 def test_student_token_response_never_contains_api_secret(engine, monkeypatch):

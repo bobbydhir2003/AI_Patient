@@ -25,14 +25,27 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 from typing import Any, Awaitable, Callable
 
-from app.core.constants import PROMPT_VERSION, ROLE_PATIENT
+from app.core.constants import PROMPT_VERSION, ROLE_PATIENT, ROLE_STUDENT
 from app.core.logging import get_logger
 from app.livekit_agent.turn_persistence import persist_student_turn_once
 from app.repositories.transcript_repository import TranscriptRepository
 
 logger = get_logger("app.livekit_agent.realtime")
+
+# Phase 3: bounded conversation-context restoration when a NEW Realtime session
+# is created for an interview that already has prior turns (Stop -> Start within
+# ONE interview). We inject only the MOST RECENT finalized turns, newest-biased,
+# so pronoun/reference continuity ("has it gotten worse since then?") survives a
+# restart WITHOUT replaying audio or injecting an unbounded transcript.
+#   _MAX_RESTORED_TURNS 40   - ~20 student/patient exchanges; comfortably covers
+#     a single PT interview's dialogue while bounding provider context and cost.
+#   _MAX_RESTORED_CHARS 12000 - ~3k-token hard ceiling; the OLDEST turns are
+#     dropped first if the recent tail is unusually verbose.
+_MAX_RESTORED_TURNS = 40
+_MAX_RESTORED_CHARS = 12000
 
 # Bounds the decoupled outbound patient-audio queue. OpenAI streams a whole
 # response's audio faster than real time, but the publisher drains it at real
@@ -117,6 +130,10 @@ class PromptAgentRuntime:
         self._publisher_task: "asyncio.Task[None] | None" = None
         self._closed = False
         self._out_frames_dropped = 0
+        # Phase 3: prior-conversation restoration runs at most ONCE per runtime
+        # (i.e. once per newly-created Realtime session). A normal reconnect of
+        # the SAME running job reuses this runtime and never re-injects history.
+        self._context_restored = False
 
     # ---- decoupled publisher lifecycle -----------------------------------
     def start(self) -> None:
@@ -204,6 +221,102 @@ class PromptAgentRuntime:
 
     def bind_session(self, session: Any) -> None:
         self._session = session
+
+    # ---- Phase 3: prior-conversation context restoration -------------------
+    async def restore_context(self) -> None:
+        """Seed this freshly-created Realtime session with the prior conversation
+        for THIS interview (Stop -> Start continuity) so the restarted patient
+        understands references to earlier dialogue.
+
+        Runs exactly once per runtime, BEFORE the browser is told the agent is
+        ready (the worker gates agent_ready on this completing). Loads the most
+        recent finalized student/patient turns for this session_id ONLY - a
+        trusted, server-resolved id, never frontend-supplied - and injects them
+        as conversation items via the supported `conversation.item.create`
+        client event. Text-only, and no `response.create` is ever sent, so:
+          - historical patient audio is NEVER replayed,
+          - no transcript_sync is emitted (no duplicate UI turns, no assessment),
+          - no DB write happens (these are context, not new turns).
+
+        Fail-open: any retrieval/send failure is logged WITHOUT transcript text
+        and leaves the session usable with a fresh context (voice is never made
+        unusable by a restore problem). A first Start (empty transcript) returns
+        immediately with no meaningful startup penalty."""
+        if self._context_restored or self._session is None:
+            return
+        self._context_restored = True
+        started = time.monotonic()
+        try:
+            turns = await asyncio.get_running_loop().run_in_executor(
+                None, self._load_prior_turns_sync,
+            )
+        except Exception:
+            logger.exception(
+                "realtime_context_restore_load_failed session_id=%s", self._session_id,
+            )
+            return
+        if not turns:
+            return  # first Start (or nothing finalized) - no restore work
+        logger.info(
+            "realtime_context_restore_started session_id=%s restored_turn_count=%d",
+            self._session_id, len(turns),
+        )
+        injected = 0
+        for role, text in turns:
+            item_role = "assistant" if role == ROLE_PATIENT else "user"
+            content_type = "output_text" if item_role == "assistant" else "input_text"
+            try:
+                await self._session.send_event({
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": item_role,
+                        "content": [{"type": content_type, "text": text}],
+                    },
+                })
+            except Exception:
+                # Session died mid-restore: stop cleanly with the partial
+                # context already accepted. Never log transcript contents.
+                logger.exception(
+                    "realtime_context_restore_send_failed session_id=%s injected=%d",
+                    self._session_id, injected,
+                )
+                break
+            injected += 1
+        logger.info(
+            "realtime_context_restore_completed session_id=%s restored_turn_count=%d elapsed_ms=%.0f",
+            self._session_id, injected, (time.monotonic() - started) * 1000,
+        )
+
+    def _load_prior_turns_sync(self) -> list[tuple[str, str]]:
+        """Read-only load of this interview's finalized turns, newest-biased and
+        bounded. Returns (role, text) pairs in CHRONOLOGICAL order (turn_index).
+        Malformed/empty/unknown-role turns are SKIPPED rather than raising, so a
+        single bad row can never break the voice session."""
+        db = self._db_factory()
+        try:
+            rows = TranscriptRepository(db).list_turns(self._session_id)
+        finally:
+            db.close()
+        cleaned: list[tuple[str, str]] = []
+        for turn in rows:
+            role = getattr(turn, "role", None)
+            if role not in (ROLE_STUDENT, ROLE_PATIENT):
+                continue
+            text = (getattr(turn, "content", None) or "").strip()
+            if not text:
+                continue
+            cleaned.append((role, text))
+        # Keep only the most recent turns, preserving chronological order.
+        if len(cleaned) > _MAX_RESTORED_TURNS:
+            cleaned = cleaned[-_MAX_RESTORED_TURNS:]
+        # Character ceiling: drop from the OLDEST end first so the freshest
+        # context always survives a verbose tail.
+        total = sum(len(text) for _role, text in cleaned)
+        while cleaned and total > _MAX_RESTORED_CHARS:
+            _role, dropped = cleaned.pop(0)
+            total -= len(dropped)
+        return cleaned
 
     def _next_epoch(self) -> int:
         self._epoch += 1

@@ -12,6 +12,11 @@ export type VoiceConversationState =
   | "SPEAKING"
   | "INTERRUPTING"
   | "COOLDOWN"
+  // Phase 1 lifecycle: a real, awaited teardown state. Stop enters STOPPING
+  // immediately and the UI never shows IDLE again until the underlying
+  // LiveKit room/mic/timers have fully finished tearing down - which is what
+  // makes Start -> Stop -> Start safe (no overlap with a still-dying room).
+  | "STOPPING"
   | "PAUSED"
   | "ERROR"
   | "FINISHED";
@@ -32,6 +37,9 @@ export function isConversationActive(state: VoiceConversationState): boolean {
     state === "PROCESSING" ||
     state === "SPEAKING" ||
     state === "INTERRUPTING" ||
-    state === "COOLDOWN"
+    state === "COOLDOWN" ||
+    // STOPPING still "owns" the mic/room until teardown resolves, so the UI
+    // must keep treating it as active (show Stop, never offer a fresh Start).
+    state === "STOPPING"
   );
 }

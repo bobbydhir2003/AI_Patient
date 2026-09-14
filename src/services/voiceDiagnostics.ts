@@ -166,7 +166,16 @@ export type VoiceEvent =
   // server) actually drove/skipped a given turn.
   | "livekit_semantic_turn_started_received"
   | "livekit_semantic_fallback_received"
-  | "livekit_browser_final_ignored_semantic_control";
+  | "livekit_browser_final_ignored_semantic_control"
+  // --- Phase 2: connection-scoped readiness, reconnect revalidation, and
+  // forward-only startup progress (see livekitPocEngine.ts). Let a report
+  // distinguish a stale-connection ready, a reconnect that resumed vs failed
+  // revalidation, and which startup stage a slow start stalled on.
+  | "livekit_agent_ready_stale_connection"
+  | "livekit_agent_disconnected"
+  | "livekit_reconnect_revalidated"
+  | "livekit_reconnect_revalidating"
+  | "livekit_startup_stage";
 
 /** Stage-level failure category. See file header for how these map to the
  * report categories STATUS_PROBE_TRANSIENT / STATUS_CONFIRMED_UNAVAILABLE /
@@ -246,6 +255,16 @@ export interface VoiceEventMeta {
    * transcription end to end, so the browser recognizer stays off. Engine
    * lifecycle only. */
   promptAgentMode?: boolean;
+  /** Phase 2: the forward-only startup milestone this event reports (see
+   * PocStartupStage / livekit_startup_stage). Presentational lifecycle only. */
+  stage?: string;
+  /** Phase 2 (reconnect revalidation, livekit_reconnect_revalidating): the
+   * individual readiness signals at the moment revalidation could not yet
+   * resume LISTENING, so a "stuck after reconnect" report shows WHICH signal
+   * was missing. Engine lifecycle booleans only - never patient content. */
+  micReady?: boolean;
+  agentReadyReceived?: boolean;
+  agentPresent?: boolean;
 }
 
 export interface VoiceCounters {

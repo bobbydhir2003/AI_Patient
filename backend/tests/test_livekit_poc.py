@@ -167,7 +167,9 @@ def test_token_embeds_explicit_agent_dispatch_with_fixed_agent_name(engine, monk
     assert len(agents) == 1
     assert agents[0]["agentName"] == settings.livekit_agent_name == "ptai-patient-agent"
     metadata = json.loads(agents[0]["metadata"])
-    assert metadata == {"session_id": session_id, "case_id": "carly"}
+    # Phase 2: metadata also carries connection_id (echoed by the worker in
+    # agent_ready). The admin POC path has no per-connection id, so it is "".
+    assert metadata == {"session_id": session_id, "case_id": "carly", "connection_id": ""}
 
 
 def test_token_not_configured_returns_503(engine, monkeypatch):

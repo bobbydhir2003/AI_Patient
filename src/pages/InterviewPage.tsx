@@ -78,6 +78,8 @@ function badgeFor(state: VoiceConversationState, typedBusy: boolean): { label: s
       return { label: "Patient Speaking", css: "speaking" };
     case "INTERRUPTING":
       return { label: "Interrupting", css: "listening" };
+    case "STOPPING":
+      return { label: "Stopping", css: "processing" };
     case "COOLDOWN":
       return { label: "One moment", css: "cooldown" };
     case "ERROR":
@@ -194,7 +196,7 @@ export function InterviewPage() {
     if (!caseId) return;
     let cancelled = false;
 
-    voiceRef.current.reset();
+    void voiceRef.current.reset();
     setMessages([]);
     setDraft("");
     setBanner(null);
@@ -253,7 +255,7 @@ export function InterviewPage() {
     void initializeInterview(caseId);
     return () => {
       cancelled = true;
-      voiceRef.current.reset();
+      void voiceRef.current.reset();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseId, connectAttempt]);
@@ -291,7 +293,13 @@ export function InterviewPage() {
   async function handleConfirmEnd() {
     if (endPhase) return; // prevent duplicate clicks while a request runs
     setShowEndModal(false);
-    voice.reset();
+    // Phase 1: await voice teardown BEFORE verifying the transcript / locking
+    // the session / kicking off assessment. reset() now resolves only once the
+    // LiveKit room/mic/OpenAI Realtime session have fully closed, so there is
+    // no in-flight turn still persisting when we read the "final" transcript
+    // below. (reset() does NOT complete the interview or create a session -
+    // that remains this handler's job.)
+    await voice.reset();
     if (!activeInterview) {
       clearInterview();
       navigate("/interview/complete");
@@ -597,7 +605,8 @@ export function InterviewPage() {
                 endPhase !== null ||
                 voice.state === "PROCESSING" ||
                 voice.state === "REQUESTING_PERMISSION" ||
-                voice.state === "INTERRUPTING",
+                voice.state === "INTERRUPTING" ||
+                voice.state === "STOPPING",
               label: voice.active
                 ? "Stop voice conversation"
                 : `Start voice conversation with ${patientCase.name}`,
@@ -610,6 +619,7 @@ export function InterviewPage() {
                 enabled={sessionReady}
                 hasConversation={messages.length > 0}
                 state={voice.state}
+                startupStage={voice.startupStage}
                 errorMessage={voice.errorMessage}
                 onStart={voice.startConversation}
                 onStop={voice.stopConversation}
