@@ -93,6 +93,9 @@ class SurveyStatusOut(CamelModel):
     global_survey_status: str = "not_started"
     # The single case that owns the student's survey package (slug), or None.
     survey_owner_case_id: str | None = None
+    # Human-readable display name of the owning case (e.g. "Carly"), resolved
+    # server-side from the slug for clear survey messaging. None when no owner.
+    survey_owner_case_name: str | None = None
     # True when this session's case IS the owning case (collect its Pre/Post per
     # the receipt's own stage state); False -> this case must skip.
     is_survey_owner_case: bool = False

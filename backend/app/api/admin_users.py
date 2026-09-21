@@ -14,6 +14,7 @@ from app.dependencies.auth import require_admin
 from app.models import User
 from app.schemas.auth import (
     BulkUserActionIn,
+    BulkUserDeleteIn,
     BulkUserResultOut,
     ReviewNoteIn,
     RoleChangeIn,
@@ -63,6 +64,24 @@ def bulk_reject(
 ) -> BulkUserResultOut:
     res = user_admin_service.bulk_reject(db, admin, payload.user_ids, payload.note)
     return _bulk_result(payload, res)
+
+
+@router.post("/bulk-delete", response_model=BulkUserResultOut)
+def bulk_delete(
+    payload: BulkUserDeleteIn, admin: User = Depends(require_admin), db: Session = Depends(get_db)
+) -> BulkUserResultOut:
+    """Permanently HARD-delete the selected accounts and all of their local data
+    (student profile, sessions, transcripts, assessments, survey receipts). Never
+    deletes the acting admin or the last active administrator; per-account
+    failures are returned in `skipped` without aborting the batch. REDCap answers
+    are never touched."""
+    res = user_admin_service.bulk_delete(db, admin, payload.user_ids, payload.confirm)
+    return BulkUserResultOut(
+        requested=len(payload.user_ids),
+        succeeded=res["succeeded"],
+        skipped=[{"userId": s["user_id"], "reason": s["reason"]} for s in res["skipped"]],
+        summary=UserSummaryOut(**res["summary"]),
+    )
 
 
 @router.post("/approve-all-pending", response_model=BulkUserResultOut)

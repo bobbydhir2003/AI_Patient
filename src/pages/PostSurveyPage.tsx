@@ -19,6 +19,10 @@ export function PostSurveyPage() {
   const [nuidMissing, setNuidMissing] = useState(false);
   const [checkingStatus, setCheckingStatus] = useState(true);
   const [alreadyCompleted, setAlreadyCompleted] = useState(false);
+  // Owner-aware context for the skip messaging.
+  const [ownerName, setOwnerName] = useState<string | null>(null);
+  const [globalStatus, setGlobalStatus] = useState<string>("not_started");
+  const [currentCaseName, setCurrentCaseName] = useState<string>("this case");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const routedRef = useRef(false);
@@ -49,6 +53,9 @@ export function PostSurveyPage() {
         const status = await getSurveyStatus(sessionId);
         if (cancelled) return;
         if (!status.nuidOnFile) setNuidMissing(true);
+        setOwnerName(status.surveyOwnerCaseName);
+        setGlobalStatus(status.globalSurveyStatus);
+        if (status.caseName) setCurrentCaseName(status.caseName);
         // GLOBAL gate: only the owning case whose package is not yet completed
         // collects Post. Every other case (and a completed package) shows the
         // "already submitted / skip" state.
@@ -116,6 +123,22 @@ export function PostSurveyPage() {
     );
   }
 
+  // Owner-aware copy for the skip banner (only shown when alreadyCompleted).
+  // Owner name/current case fall back safely; never crashes.
+  const ownerLabel = ownerName || "your original survey case";
+  const isCompleted = globalStatus === "completed";
+  const skipBanner = isCompleted
+    ? {
+        // Case C / D — global survey COMPLETED (owner or non-owner).
+        title: "Survey already completed",
+        message: `You already completed your survey with ${ownerLabel}. No additional survey is required for ${currentCaseName}.`,
+      }
+    : {
+        // Case B — non-owner case while the owner's survey is IN_PROGRESS.
+        title: "No additional survey required",
+        message: `Your survey is being completed with ${ownerLabel}. No survey response is required for ${currentCaseName}.`,
+      };
+
   return (
     <div className="page">
       <ProgressSteps steps={PROGRESS_STEPS} currentStepIndex={3} />
@@ -132,10 +155,8 @@ export function PostSurveyPage() {
         <div className={styles.main}>
           {alreadyCompleted && (
             <div className={styles.completedBanner} role="alert">
-              <h2 className={styles.completedTitle}>Survey already submitted</h2>
-              <p className={styles.completedMessage}>
-                You have already submitted the survey. Thank you for your feedback.
-              </p>
+              <h2 className={styles.completedTitle}>{skipBanner.title}</h2>
+              <p className={styles.completedMessage}>{skipBanner.message}</p>
               <button
                 type="button"
                 className="btn btn-primary"

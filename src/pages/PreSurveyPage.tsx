@@ -55,6 +55,10 @@ export function PreSurveyPage() {
   //   continue → owning case, Pre already submitted → continue (no re-ask)
   //   skip     → a DIFFERENT case owns the one global package → skip & continue
   const [gateMode, setGateMode] = useState<GateMode>("collect");
+  // Owner-aware context for the skip/continue messaging (owner display name +
+  // whether the global package is IN_PROGRESS vs COMPLETED).
+  const [ownerName, setOwnerName] = useState<string | null>(null);
+  const [globalStatus, setGlobalStatus] = useState<string>("not_started");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const initRef = useRef(false);
@@ -109,6 +113,8 @@ export function PreSurveyPage() {
         if (cancelled) return;
         setIdentity({ nuid: status.nuid, caseNumber: status.caseNumber, caseName: status.caseName });
         if (!status.nuidOnFile) setNuidMissing(true);
+        setOwnerName(status.surveyOwnerCaseName);
+        setGlobalStatus(status.globalSurveyStatus);
         setGateMode(
           globalPreGate(status.globalSurveyStatus, status.isSurveyOwnerCase, status.preSubmitted),
         );
@@ -239,6 +245,46 @@ export function PreSurveyPage() {
   const isContinue = gateMode === "continue";
   const readOnly = isSkip || isContinue;
 
+  // Owner-aware copy for the skip/continue banner. Owner name falls back to a
+  // neutral phrase if the backend unexpectedly omitted it; current case name
+  // falls back to "this case". Never crashes.
+  const ownerLabel = ownerName || "your original survey case";
+  const currentCaseName = identity?.caseName || patientCase?.name || "this case";
+  const isCompleted = globalStatus === "completed";
+
+  let banner: { title: string; message: string; button: string } | null = null;
+  if (isContinue) {
+    // Owner case, Pre already submitted.
+    banner = isCompleted
+      ? {
+          // Case D — owner case fully completed.
+          title: "Survey already completed",
+          message: `You already completed your survey with ${ownerLabel}. No additional survey is required.`,
+          button: "Continue to Interview",
+        }
+      : {
+          // Case A — owner case, Pre done, Post still pending.
+          title: "Pre-Survey already submitted",
+          message: `You already submitted the Pre-Survey for ${ownerLabel}. Complete this interview to finish the Post-Survey afterward.`,
+          button: "Continue to Interview",
+        };
+  } else if (isSkip) {
+    // Non-owner case: the one survey belongs to another case.
+    banner = isCompleted
+      ? {
+          // Case C — non-owner, owner survey COMPLETED.
+          title: "Survey already completed",
+          message: `You already completed your survey with ${ownerLabel}. No additional survey is required for ${currentCaseName}.`,
+          button: "Skip Survey & Continue to Interview",
+        }
+      : {
+          // Case B — non-owner, owner survey IN_PROGRESS.
+          title: `Survey already assigned to ${ownerLabel}`,
+          message: `You started your survey with ${ownerLabel}. Only the ${ownerLabel} case will collect your survey responses. You can continue ${currentCaseName} without completing another survey.`,
+          button: "Skip Survey & Continue to Interview",
+        };
+  }
+
   return (
     <div className="page">
       <ProgressSteps steps={PROGRESS_STEPS} currentStepIndex={1} />
@@ -251,37 +297,17 @@ export function PreSurveyPage() {
         </p>
       </div>
 
-      {isSkip && (
+      {banner && (
         <div className={styles.completedBanner} role="alert">
-          <h2 className={styles.completedTitle}>Survey already submitted</h2>
-          <p className={styles.completedMessage}>
-            You have already submitted the survey. Thank you for your feedback.
-          </p>
+          <h2 className={styles.completedTitle}>{banner.title}</h2>
+          <p className={styles.completedMessage}>{banner.message}</p>
           <button
             type="button"
             className="btn btn-primary"
             onClick={() => caseId && void proceedToInterview(caseId)}
             disabled={!sessionId}
           >
-            Skip Survey &amp; Continue to Interview
-          </button>
-        </div>
-      )}
-
-      {isContinue && (
-        <div className={styles.completedBanner} role="alert">
-          <h2 className={styles.completedTitle}>Pre-Survey complete</h2>
-          <p className={styles.completedMessage}>
-            You have already completed the pre-survey for this case. You can continue to your
-            interview.
-          </p>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => caseId && void proceedToInterview(caseId)}
-            disabled={!sessionId}
-          >
-            Continue to Interview
+            {banner.button}
           </button>
         </div>
       )}

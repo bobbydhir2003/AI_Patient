@@ -89,6 +89,15 @@ class BulkUserActionIn(CamelModel):
     note: str = Field(default="", max_length=1000)
 
 
+class BulkUserDeleteIn(CamelModel):
+    """IDs to PERMANENTLY hard-delete, with a typed confirmation. `confirm` must
+    equal "DELETE" (case-insensitive) - the same guard as the single-student
+    delete - so a bulk hard delete can never fire on an empty/accidental POST."""
+
+    user_ids: list[str] = Field(default_factory=list, max_length=1000)
+    confirm: str = Field(default="")
+
+
 class UserSummaryOut(CamelModel):
     """Real per-status account counts for the summary cards."""
 

@@ -159,15 +159,28 @@ const postSurveyPage = read("src/pages/PostSurveyPage.tsx");
 const interviewPage = read("src/pages/InterviewPage.tsx");
 const surveyLikert = read("src/components/survey/SurveyLikert.tsx");
 
-test("PreSurveyPage: global gate + always-visible step with skip/continue panels", () => {
+test("PreSurveyPage: owner-aware skip/continue messaging (A-D)", () => {
   assert.match(preSurveyPage, /globalPreGate\(/);
   assert.match(preSurveyPage, /Pre-Interview Survey/);
   assert.match(preSurveyPage, /PRE_LIKERT\.map/);
   assert.match(preSurveyPage, /styles\.completedBanner/);
-  // Global wording (not "for Carly"), plus both skip and continue affordances.
-  assert.match(preSurveyPage, /You have already submitted the survey\. Thank you for your feedback\./);
-  assert.match(preSurveyPage, /Skip Survey &amp; Continue to Interview/);
+  // Owner name comes from the backend field, with a safe fallback (no crash).
+  assert.match(preSurveyPage, /status\.surveyOwnerCaseName/);
+  assert.match(preSurveyPage, /ownerName \|\| "your original survey case"/);
+  assert.match(preSurveyPage, /identity\?\.caseName \|\| patientCase\?\.name \|\| "this case"/);
+  // Case A — owner, Pre done, Post pending (NOT "completed").
+  assert.match(preSurveyPage, /Pre-Survey already submitted/);
+  assert.match(preSurveyPage, /Complete this interview to finish the Post-Survey afterward\./);
+  // Case B — non-owner, in progress.
+  assert.match(preSurveyPage, /Survey already assigned to \$\{ownerLabel\}/);
+  assert.match(preSurveyPage, /Only the \$\{ownerLabel\} case will collect your survey responses/);
+  // Case C / D — completed.
+  assert.match(preSurveyPage, /Survey already completed/);
+  assert.match(preSurveyPage, /You already completed your survey with \$\{ownerLabel\}/);
+  // Buttons + branching on completed vs in-progress.
+  assert.match(preSurveyPage, /Skip Survey & Continue to Interview/);
   assert.match(preSurveyPage, /Continue to Interview/);
+  assert.match(preSurveyPage, /globalStatus === "completed"/);
   assert.match(preSurveyPage, /checkingStatus/);
   // Handles both race codes on submit without resubmitting.
   assert.match(preSurveyPage, /survey_already_completed/);
@@ -198,7 +211,7 @@ test("PreSurveyPage: resume mode reuses session + skips the queue", () => {
   assert.match(preSurveyPage, /readOnly/);
 });
 
-test("PostSurveyPage: global gate + always-visible step with skip panel", () => {
+test("PostSurveyPage: owner-aware skip messaging (B/C)", () => {
   assert.match(postSurveyPage, /globalPostGate\(/);
   assert.match(postSurveyPage, /survey_already_completed/);
   assert.match(postSurveyPage, /survey_owned_by_other_case/);
@@ -206,8 +219,16 @@ test("PostSurveyPage: global gate + always-visible step with skip panel", () => 
   assert.match(postSurveyPage, /POST_LIKERT\.map/);
   assert.match(postSurveyPage, /POST_OPEN_ENDED\.map/);
   assert.match(postSurveyPage, /styles\.completedBanner/);
-  assert.match(postSurveyPage, /Survey already submitted/);
-  assert.match(postSurveyPage, /You have already submitted the survey\. Thank you for your feedback\./);
+  // Owner name from backend + safe fallback + current case fallback.
+  assert.match(postSurveyPage, /status\.surveyOwnerCaseName/);
+  assert.match(postSurveyPage, /ownerName \|\| "your original survey case"/);
+  // Case B — non-owner, owner survey in progress.
+  assert.match(postSurveyPage, /No additional survey required/);
+  assert.match(postSurveyPage, /Your survey is being completed with \$\{ownerLabel\}/);
+  // Case C / D — completed.
+  assert.match(postSurveyPage, /Survey already completed/);
+  assert.match(postSurveyPage, /No additional survey is required for \$\{currentCaseName\}/);
+  assert.match(postSurveyPage, /globalStatus === "completed"/);
   assert.match(postSurveyPage, /Skip Survey &amp; Continue to Assessment/);
 });
 

@@ -58,6 +58,8 @@ export interface SurveyStatus {
   globalSurveyStatus: string;
   /** The single case that owns this student's survey package, or null. */
   surveyOwnerCaseId: string | null;
+  /** Human-readable display name of the owning case (e.g. "Carly"), or null. */
+  surveyOwnerCaseName: string | null;
   /** True when THIS session's case is the owning case. */
   isSurveyOwnerCase: boolean;
   /** Convenience flag: the whole global package is completed. */

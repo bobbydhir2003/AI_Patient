@@ -26,12 +26,13 @@ from app.core.constants import (
     USER_ROLES,
 )
 from app.core.exceptions import (
+    DeleteConfirmationError,
     ForbiddenError,
     UserNotFoundError,
     ValidationFailedError,
 )
 from app.core.logging import get_logger
-from app.models import User
+from app.models import Student, User
 from app.repositories.audit_repository import AuditRepository
 
 logger = get_logger(__name__)
@@ -243,6 +244,89 @@ def bulk_reject(db: Session, actor: User, user_ids: list[str], note: str | None 
     db.commit()
     logger.info("bulk_reject actor=%s rejected=%d skipped=%d", actor.email, len(succeeded), len(skipped))
     return {"succeeded": succeeded, "skipped": skipped, "summary": status_summary(db)}
+
+
+# ---------------------------------------------------------------- delete ops
+def bulk_delete(db: Session, actor: User, user_ids: list[str], confirm: str) -> dict:
+    """PERMANENTLY delete every account in `user_ids` and its ENTIRE local data
+    tree (student profile, interview sessions, transcripts, assessment runs/
+    results/evidence, and survey receipts), in ONE transaction.
+
+    This is a HARD delete, deliberately distinct from `disable` (which only blocks
+    access and preserves all data). Each account is deleted inside its OWN
+    SAVEPOINT, so a single account's failure is recorded in `skipped` and never
+    corrupts or rolls back the rest of the batch.
+
+    Safety: requires the typed confirmation ("DELETE"); never deletes the acting
+    admin (`cannot_delete_self`) or the last active administrator
+    (`cannot_delete_last_admin`, enforced cumulatively across the batch).
+
+    REDCap: survey *answers* live exclusively in REDCap and are NEVER touched -
+    only the LOCAL SurveyReceipt linkage rows are removed. No REDCap request is
+    made by this path.
+    """
+    from app.services import admin_service  # local import avoids an import cycle
+
+    if (confirm or "").strip().upper() != "DELETE":
+        raise DeleteConfirmationError()
+
+    succeeded: list[str] = []
+    skipped: list[dict] = []
+    seen: set[str] = set()
+    for uid in user_ids:
+        if uid in seen:
+            continue
+        seen.add(uid)
+        target = db.get(User, uid)
+        if target is None:
+            skipped.append({"user_id": uid, "reason": "not_found"})
+            continue
+        if target.id == actor.id:
+            skipped.append({"user_id": uid, "reason": "cannot_delete_self"})
+            continue
+        try:
+            _guard_not_last_admin(db, target, "delete")
+        except ForbiddenError as exc:
+            skipped.append({"user_id": uid, "reason": str(exc)})
+            continue
+        # Capture identity BEFORE the row is queued for deletion (attributes are
+        # still readable but we avoid relying on post-delete access).
+        email = target.email
+        prior_status = target.account_status
+        student_id = target.student_id
+        try:
+            with db.begin_nested():
+                if student_id:
+                    student = db.get(Student, student_id)
+                    if student is not None:
+                        # Deletes the student's whole tree AND this login account
+                        # (student.user), and writes its own AUDIT_STUDENT_DELETED.
+                        admin_service.purge_student_tree(db, actor, student)
+                    else:
+                        db.delete(target)  # dangling student_id: remove login only
+                        _audit_delete(db, actor, uid, email, prior_status)
+                else:
+                    db.delete(target)  # admin-only / studentless account
+                    _audit_delete(db, actor, uid, email, prior_status)
+                db.flush()
+        except Exception as exc:  # savepoint auto-rolled back; batch continues
+            skipped.append({"user_id": uid, "reason": f"delete_failed: {exc.__class__.__name__}"})
+            continue
+        succeeded.append(uid)
+    db.commit()
+    logger.info("bulk_delete actor=%s deleted=%d skipped=%d", actor.email, len(succeeded), len(skipped))
+    return {"succeeded": succeeded, "skipped": skipped, "summary": status_summary(db)}
+
+
+def _audit_delete(db: Session, actor: User, user_id: str, email: str, prior_status: str) -> None:
+    AuditRepository(db).record(
+        admin_user_id=actor.id,
+        admin_email=actor.email,
+        action_type="ACCOUNT_DELETED",
+        record_type="user",
+        record_id=user_id,
+        description=f"{email}: {prior_status} -> permanently deleted (account + all local data).",
+    )
 
 
 # ---------------------------------------------------------------- role ops

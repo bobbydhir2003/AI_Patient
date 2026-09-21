@@ -67,6 +67,31 @@ def test_global_status_transitions(student_api, captured):
 
 
 # --------------------------------------------------------------------------
+# surveyOwnerCaseName: display name resolved server-side for clear messaging.
+# --------------------------------------------------------------------------
+def test_survey_owner_case_name_is_returned(student_api, captured):
+    sid = _new_session(student_api, CARLY)
+    # No owner yet -> name is null.
+    s0 = _status(student_api, sid)
+    assert s0["surveyOwnerCaseId"] is None
+    assert s0["surveyOwnerCaseName"] is None
+
+    # After Carly Pre establishes ownership, the owner display name is populated.
+    student_api.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS)
+    s1 = _status(student_api, sid)
+    assert s1["surveyOwnerCaseId"] == CARLY
+    assert s1["surveyOwnerCaseName"] == "Carly"
+
+    # A DIFFERENT case sees the owner name too (for the "assigned to Carly" copy).
+    sofia = _new_session(student_api, SOFIA)
+    s2 = _status(student_api, sofia)
+    assert s2["isSurveyOwnerCase"] is False
+    assert s2["surveyOwnerCaseId"] == CARLY
+    assert s2["surveyOwnerCaseName"] == "Carly"
+    assert s2["caseName"] == "Sofia"  # current-case name unchanged/additive
+
+
+# --------------------------------------------------------------------------
 # C. Non-owner while owner IN_PROGRESS: Pre and Post both skip; no package.
 # --------------------------------------------------------------------------
 def test_non_owner_skipped_while_owner_in_progress(student_api, captured, engine):

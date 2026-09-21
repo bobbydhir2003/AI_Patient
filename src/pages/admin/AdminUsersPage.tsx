@@ -6,6 +6,7 @@ import {
   approveAllPending,
   approveUser,
   bulkApproveUsers,
+  bulkDeleteUsers,
   bulkRejectUsers,
   changeUserRole,
   disableUser,
@@ -87,6 +88,7 @@ function RoleBadge({ role }: { role: string }) {
 // Icons (inline, no new deps)
 const ICheck = () => <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12.5l4 4 10-10" /></svg>;
 const IX = () => <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 6l12 12M18 6L6 18" /></svg>;
+const ITrash = () => <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6" /></svg>;
 const IDots = () => <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="12" cy="19" r="1.8" /></svg>;
 const ISearch = () => <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.2-3.2" /></svg>;
 const IFilter = () => <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 5h18M6 12h12M10 19h4" /></svg>;
@@ -173,6 +175,7 @@ type RowConfirm =
   | { kind: "approve-all"; count: number }
   | { kind: "approve-selected"; ids: string[] }
   | { kind: "reject-selected"; ids: string[] }
+  | { kind: "delete-selected"; ids: string[] }
   | null;
 
 export function AdminUsersPage() {
@@ -261,6 +264,13 @@ export function AdminUsersPage() {
       .map((u) => u.id),
     [rows, selected, user?.id],
   );
+  // Anything selected except your own account can be hard-deleted; the backend is
+  // the final authority (it also skips the last active admin) and reports any
+  // skips in the result.
+  const selectedDeletable = useMemo(
+    () => (rows ?? []).filter((u) => selected.has(u.id) && u.id !== user?.id).map((u) => u.id),
+    [rows, selected, user?.id],
+  );
 
   function toggleRow(id: string) {
     setSelected((prev) => {
@@ -326,6 +336,7 @@ export function AdminUsersPage() {
     if (confirm.kind === "approve-all") return runBulk(() => approveAllPending(token), "Approved");
     if (confirm.kind === "approve-selected") return runBulk(() => bulkApproveUsers(token, confirm.ids), "Approved");
     if (confirm.kind === "reject-selected") return runBulk(() => bulkRejectUsers(token, confirm.ids), "Rejected");
+    if (confirm.kind === "delete-selected") return runBulk(() => bulkDeleteUsers(token, confirm.ids), "Deleted");
     const u = confirm.kind === "role" ? confirm.user : confirm.user;
     setConfirm(null);
     if (confirm.kind === "reject") return run(u.id, () => rejectUser(token, u.id), "Account rejected.");
@@ -416,6 +427,8 @@ export function AdminUsersPage() {
         return { title: "Approve selected users?", body: `You are about to approve ${confirm.ids.length} pending account${confirm.ids.length === 1 ? "" : "s"}.`, label: `Approve ${confirm.ids.length}`, danger: false };
       case "reject-selected":
         return { title: "Reject selected users?", body: `You are about to reject ${confirm.ids.length} account request${confirm.ids.length === 1 ? "" : "s"}.`, label: `Reject ${confirm.ids.length}`, danger: true };
+      case "delete-selected":
+        return { title: `Permanently delete ${confirm.ids.length} selected account${confirm.ids.length === 1 ? "" : "s"}?`, body: "This will permanently delete the selected accounts and all associated local sessions, transcripts, assessments, and survey records. This action cannot be undone.", label: "Delete Accounts", danger: true };
       case "reject":
         return { title: "Reject this account?", body: `Reject ${confirm.user.email}? They will not be able to sign in.`, label: "Reject account", danger: true };
       case "disable":
@@ -646,6 +659,14 @@ export function AdminUsersPage() {
               onClick={() => setConfirm({ kind: "reject-selected", ids: selectedRejectable })}
             >
               <IX /> Reject Selected{selectedRejectable.length ? ` (${selectedRejectable.length})` : ""}
+            </button>
+            <button
+              type="button"
+              className="pt-btn pt-btn-danger"
+              disabled={bulkBusy || selectedDeletable.length === 0}
+              onClick={() => setConfirm({ kind: "delete-selected", ids: selectedDeletable })}
+            >
+              <ITrash /> Delete Selected{selectedDeletable.length ? ` (${selectedDeletable.length})` : ""}
             </button>
           </div>
         </div>

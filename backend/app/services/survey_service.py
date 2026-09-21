@@ -277,6 +277,7 @@ def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut
     # these: a non-owning case shows the "already submitted / skip" state.
     student = session.student
     owner_case_id = student.survey_owner_case_id
+    owner_case_name = _case_name(owner_case_id) if owner_case_id else None
     global_status = _global_survey_status(student)
     is_owner_case = owner_case_id is not None and owner_case_id == session.case_id
     global_completed = global_status == SURVEY_OVERALL_COMPLETED
@@ -293,6 +294,7 @@ def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut
             post_submitted=False,
             global_survey_status=global_status,
             survey_owner_case_id=owner_case_id,
+            survey_owner_case_name=owner_case_name,
             is_survey_owner_case=is_owner_case,
             global_survey_completed=global_completed,
         )
@@ -309,6 +311,7 @@ def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut
         post_sync_status=receipt.post_sync_status,
         global_survey_status=global_status,
         survey_owner_case_id=owner_case_id,
+        survey_owner_case_name=owner_case_name,
         is_survey_owner_case=is_owner_case,
         global_survey_completed=global_completed,
     )

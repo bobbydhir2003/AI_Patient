@@ -26,6 +26,7 @@ from app.models import (
     ConversationTurn,
     InterviewSession,
     Student,
+    SurveyReceipt,
     User,
 )
 from app.repositories.audit_repository import AuditRepository
@@ -738,24 +739,39 @@ def delete_message(db: Session, admin: User, message_id: str) -> None:
     logger.info("message_deleted message_id=%s by=%s", message_id, admin.id)
 
 
-def delete_student(db: Session, admin: User, student_id: str, *, confirm: str) -> None:
-    if (confirm or "").strip().upper() != "DELETE":
-        raise DeleteConfirmationError()
-    student = _get_student_or_404(db, student_id)
-    if student.user is not None and student.user.id == admin.id:
-        raise SelfDeletionError()
+def purge_student_tree(db: Session, admin: User, student: Student) -> dict:
+    """Permanently delete a student's ENTIRE local data tree in FK-safe order and
+    write the audit row. Does NOT commit and does NOT re-check confirm/self - the
+    caller owns the transaction boundary and the guards. Safe to call inside a
+    per-item SAVEPOINT for batch deletes. Returns counts for logging.
 
+    Deletion order (PostgreSQL with FK enforcement; there are NO DB-level ON
+    DELETE cascades, only ORM ones):
+      1. assessment runs -> domain results -> evidence (ORM cascade). Evidence
+         references conversation_turns, so runs go BEFORE the turns.
+      2. survey receipts (LOCAL linkage only; REDCap answers are never touched):
+         before sessions (latest_session_id FK) and before the student
+         (student_id NOT NULL FK).
+      3. sessions (ORM-cascade their conversation turns).
+      4. the login account, then the student profile.
+    """
     session_ids = _student_session_ids(db, student.id)
-    # 1. Assessments + evidence + domains for every session.
     for sid in session_ids:
         _delete_assessment_runs_for_session(db, sid)
-    # 2. Sessions (cascades their conversation turns).
+    receipts = list(
+        db.execute(
+            select(SurveyReceipt).where(SurveyReceipt.student_id == student.id)
+        ).scalars().all()
+    )
+    for receipt in receipts:
+        db.delete(receipt)
+    db.flush()
     for sid in session_ids:
         s = db.get(InterviewSession, sid)
         if s is not None:
             db.delete(s)
     db.flush()
-    # 3. Login account, then the student profile itself.
+    student_id = student.id
     if student.user is not None:
         db.delete(student.user)
     name = student.name
@@ -765,9 +781,23 @@ def delete_student(db: Session, admin: User, student_id: str, *, confirm: str) -
         db, admin,
         action=constants.AUDIT_STUDENT_DELETED, record_type="student", record_id=student_id,
         description=(
-            f"Student '{name}' permanently deleted with {len(session_ids)} session(s) "
-            "and all connected transcripts and assessments."
+            f"Student '{name}' permanently deleted with {len(session_ids)} session(s), "
+            f"{len(receipts)} survey record(s), and all connected transcripts and assessments."
         ),
     )
+    db.flush()
+    logger.info(
+        "student_purged student_id=%s sessions=%d receipts=%d by=%s",
+        student_id, len(session_ids), len(receipts), admin.id,
+    )
+    return {"sessions": len(session_ids), "receipts": len(receipts)}
+
+
+def delete_student(db: Session, admin: User, student_id: str, *, confirm: str) -> None:
+    if (confirm or "").strip().upper() != "DELETE":
+        raise DeleteConfirmationError()
+    student = _get_student_or_404(db, student_id)
+    if student.user is not None and student.user.id == admin.id:
+        raise SelfDeletionError()
+    purge_student_tree(db, admin, student)
     db.commit()
-    logger.info("student_deleted student_id=%s sessions=%d by=%s", student_id, len(session_ids), admin.id)

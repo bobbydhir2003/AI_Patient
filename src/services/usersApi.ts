@@ -95,3 +95,9 @@ export const bulkApproveUsers = (t: string | null, userIds: string[]) =>
 export const bulkRejectUsers = (t: string | null, userIds: string[], note = "") =>
   bulk(t, "bulk-reject", { userIds, note });
 export const approveAllPending = (t: string | null) => bulk(t, "approve-all-pending");
+/** PERMANENT hard delete of the selected accounts AND all of their local data
+ * (student profile, sessions, transcripts, assessments, survey receipts). The
+ * typed confirmation ("DELETE") is required by the backend. REDCap answers are
+ * never touched. */
+export const bulkDeleteUsers = (t: string | null, userIds: string[]) =>
+  bulk(t, "bulk-delete", { userIds, confirm: "DELETE" });
