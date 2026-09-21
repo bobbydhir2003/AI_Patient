@@ -4,6 +4,7 @@ import { PavingWheel } from "../components/cases/PavingWheel";
 import { ProgressSteps } from "../components/layout/ProgressSteps";
 import { usePatientCase } from "../services/cases";
 import { useAuth } from "../state/AuthContext";
+import { useAppContext } from "../state/AppContext";
 import { caseHubPath } from "../services/authRouting";
 import styles from "./CaseIntroductionPage.module.css";
 
@@ -13,8 +14,15 @@ export function CaseIntroductionPage() {
   const { caseId } = useParams<{ caseId: string }>();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { activeInterview } = useAppContext();
   const { patientCase, loading, error, retry } = usePatientCase(caseId);
   const studentHome = caseHubPath(user?.role);
+
+  // RESUME mode when the persisted active session is bound to THIS case with the
+  // resume flag (set by Dashboard "Continue Last Session"). The page renders the
+  // same for new and resume; only the primary button label changes. The
+  // Pre-Survey (next step) owns the new-vs-resume session/queue decision.
+  const resumeMode = !!activeInterview && activeInterview.resume === true && activeInterview.caseId === caseId;
 
   // The Pre-Interview Survey now sits between the case introduction and the
   // interview. It creates/links the session and runs the capacity/queue check on
@@ -217,7 +225,7 @@ export function CaseIntroductionPage() {
             className="btn btn-primary"
             onClick={() => handleStart(patientCase.id)}
           >
-            Start Interview
+            {resumeMode ? "Resume Interview" : "Start Interview"}
           </button>
         </div>
       </div>

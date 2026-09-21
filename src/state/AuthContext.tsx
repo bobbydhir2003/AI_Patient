@@ -67,6 +67,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const current = token;
     persistToken(null);
     setUser(null);
+    // Clear the persisted interview/flow context (active session + resume mode)
+    // so the next account that logs in on this browser never inherits stale
+    // resume state that could misroute them into another student's session.
+    try {
+      localStorage.removeItem("ptai-app-state");
+    } catch {
+      /* localStorage unavailable; ignore */
+    }
     if (current) apiLogout(current).catch(() => undefined);
     // Single, consistent logout destination for EVERY user type (student, admin,
     // promoted professor, system admin): the main PT AI Patient Simulator

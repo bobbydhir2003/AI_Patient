@@ -73,3 +73,125 @@ export function postSurveyGate(
 ): PostSurveyGate {
   return isSurveyCompleted(overallStatus) ? "completed" : "collect";
 }
+
+// ---------------------------------------------------------------------------
+// GLOBAL survey gating (one survey PACKAGE per student, not per case). The
+// backend resolves the owning case + global lifecycle server-side; these pure
+// functions turn that into what each survey SCREEN renders. Every survey screen
+// stays visible in the flow - a non-owning case shows a skip panel, never a
+// silently removed step.
+// ---------------------------------------------------------------------------
+
+export type GlobalSurveyStatus = "not_started" | "in_progress" | "completed" | string;
+
+/**
+ * What the Pre-Survey screen should do:
+ *   - "collect"  : no owner yet (this case may claim it) OR this is the owning
+ *                  case and its Pre is not yet submitted → show Pre questions.
+ *   - "continue" : this IS the owning case and its Pre is already submitted →
+ *                  do not re-ask; show a "continue to interview" affordance.
+ *   - "skip"     : a DIFFERENT case owns the package (in progress or completed)
+ *                  → show "already submitted, thank you" + Skip & Continue.
+ */
+export type GlobalPreGate = "collect" | "continue" | "skip";
+
+export function globalPreGate(
+  globalStatus: GlobalSurveyStatus | null | undefined,
+  isOwnerCase: boolean,
+  preSubmitted: boolean,
+): GlobalPreGate {
+  if (globalStatus === "not_started") return "collect";
+  if (isOwnerCase) return preSubmitted ? "continue" : "collect";
+  return "skip";
+}
+
+/**
+ * What the Post-Survey screen should do:
+ *   - "collect" : this IS the owning case and the package is not yet completed
+ *                 → show Post questions.
+ *   - "skip"    : any other case, or the package is already completed → show
+ *                 "already submitted" + Skip & Continue to Assessment.
+ */
+export type GlobalPostGate = "collect" | "skip";
+
+export function globalPostGate(
+  globalStatus: GlobalSurveyStatus | null | undefined,
+  isOwnerCase: boolean,
+): GlobalPostGate {
+  return isOwnerCase && globalStatus !== "completed" ? "collect" : "skip";
+}
+
+// ---------------------------------------------------------------------------
+// Centralized interview flow resolution. One place decides where a session
+// belongs so NEW, RESUME, refresh and dashboard-continue all agree instead of
+// hard-coding navigation in each component. Pure + dependency-free (unit-tested
+// in scripts/test-survey-flow.mjs).
+// ---------------------------------------------------------------------------
+
+export interface SessionFlowState {
+  status: string; // "active" | "completed" | ...
+  locked: boolean;
+  hasAssessment: boolean;
+}
+
+export type InterviewDestination =
+  | { kind: "caseInfo" }
+  | { kind: "interview" }
+  | { kind: "postSurvey" }
+  | { kind: "assessmentLoading" }
+  | { kind: "assessment" };
+
+/** A session is genuinely resumable into the live interview only while it is
+ * ACTIVE and not locked. */
+export function isResumableSession(session: SessionFlowState | null | undefined): boolean {
+  return !!session && session.status === "active" && !session.locked;
+}
+
+/**
+ * Where a RESUME should ENTER from the dashboard "Continue Last Session":
+ *   - resumable active session → the Case Information screen (the full workflow
+ *     is shown; the existing session is reused later, no new session/queue).
+ *   - completed with an assessment → the Assessment review.
+ *   - completed without an assessment yet → the Post-Survey step.
+ * This never sends an active resume straight to the interview.
+ */
+export function resumeEntryDestination(session: SessionFlowState): InterviewDestination {
+  if (isResumableSession(session)) return { kind: "caseInfo" };
+  if (session.hasAssessment) return { kind: "assessment" };
+  return { kind: "postSurvey" };
+}
+
+/**
+ * Where the student should go AFTER the (resume) Pre-Survey step, based on the
+ * session's CURRENT backend state — so a session that went stale (locked /
+ * completed) while the student sat on Case Info / Pre-Survey is routed safely
+ * instead of blindly entering the interview.
+ */
+export function resolveInterviewDestination(
+  session: SessionFlowState | null,
+): InterviewDestination {
+  if (isResumableSession(session)) return { kind: "interview" };
+  if (!session) return { kind: "caseInfo" };
+  if (session.hasAssessment) return { kind: "assessment" };
+  return { kind: "postSurvey" };
+}
+
+/** Turn a resolved destination into a concrete route. Kept here (pure) so every
+ * caller builds the SAME URLs from the SAME decision. */
+export function destinationToPath(
+  dest: InterviewDestination,
+  ids: { caseId: string; sessionId: string },
+): string {
+  switch (dest.kind) {
+    case "caseInfo":
+      return `/cases/${ids.caseId}`;
+    case "interview":
+      return `/interview/${ids.caseId}`;
+    case "postSurvey":
+      return `/survey/${ids.sessionId}/post`;
+    case "assessmentLoading":
+      return `/assessment/${ids.sessionId}/loading`;
+    case "assessment":
+      return `/assessment/${ids.sessionId}`;
+  }
+}

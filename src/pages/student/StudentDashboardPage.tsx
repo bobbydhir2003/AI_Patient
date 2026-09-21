@@ -6,6 +6,7 @@ import { fetchMySessions, type SessionSummary } from "../../services/authApi";
 import { ApiError } from "../../services/api";
 import { useCaseCatalog } from "../../services/cases";
 import type { PatientCase } from "../../types/case";
+import { resumeEntryDestination, destinationToPath } from "../../services/surveyFlow";
 import { CaseCard } from "../../components/cases/CaseCard";
 import { AppImage } from "../../components/common/AppImage";
 import { ErrorState, Spinner } from "../../portal/ui";
@@ -119,8 +120,22 @@ export function StudentDashboardPage() {
   function resume(session: SessionSummary) {
     setStudentName(user?.fullName ?? "");
     setStudentId(user?.studentNumber ?? "");
-    setActiveInterview({ caseId: session.caseId, sessionId: session.sessionId, startedAt: Date.now() });
-    navigate(`/interview/${session.caseId}`);
+    // RESUME flow: bind to the EXISTING session and mark resume mode (persisted),
+    // then enter through the SAME visible workflow as a new interview via the
+    // centralized resolver — Case Info → Pre-Survey → the existing interview.
+    // We never jump straight to /interview and never create a new session/queue.
+    setActiveInterview({
+      caseId: session.caseId,
+      sessionId: session.sessionId,
+      startedAt: Date.now(),
+      resume: true,
+    });
+    const dest = resumeEntryDestination({
+      status: session.status,
+      locked: session.locked,
+      hasAssessment: session.hasAssessment,
+    });
+    navigate(destinationToPath(dest, { caseId: session.caseId, sessionId: session.sessionId }));
   }
 
   const statItems = [

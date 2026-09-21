@@ -12,11 +12,19 @@ import type { ConversationMessage } from "../types/interview";
 const STORAGE_KEY = "ptai-app-state";
 
 /** The backend session the UI is currently bound to. caseId and sessionId are
- * stored together so a session can never be reused for another patient. */
+ * stored together so a session can never be reused for another patient.
+ *
+ * ``resume`` distinguishes the RESUME flow (Dashboard "Continue Last Session" →
+ * Case Info → Pre-Survey → the SAME existing session) from the NEW flow. It is
+ * persisted so resume mode survives a browser refresh on Case Info / Pre-Survey.
+ * In resume mode the Pre-Survey must NOT create a new session and must NOT
+ * re-enter the admission queue. Optional/defaulted for backward compatibility
+ * with older persisted state that predates the field. */
 export interface ActiveInterview {
   caseId: string;
   sessionId: string;
   startedAt: number;
+  resume?: boolean;
 }
 
 /** Only identity + the active session pointer are persisted. The transcript
@@ -59,7 +67,14 @@ function loadStoredState(): StoredState {
         typeof parsed.activeInterview.caseId === "string" &&
         typeof parsed.activeInterview.sessionId === "string" &&
         typeof parsed.activeInterview.startedAt === "number"
-          ? parsed.activeInterview
+          ? {
+              caseId: parsed.activeInterview.caseId,
+              sessionId: parsed.activeInterview.sessionId,
+              startedAt: parsed.activeInterview.startedAt,
+              // Older persisted state predates ``resume``; default to the NEW
+              // flow (false) so a stale value can never spoof resume mode.
+              resume: parsed.activeInterview.resume === true,
+            }
           : null,
     };
   } catch {

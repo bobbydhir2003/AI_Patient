@@ -53,6 +53,15 @@ export interface SurveyStatus {
   postSubmitted: boolean;
   preSyncStatus: string | null;
   postSyncStatus: string | null;
+  /** GLOBAL (one survey PACKAGE per student) fields, resolved server-side.
+   * "not_started" | "in_progress" | "completed". */
+  globalSurveyStatus: string;
+  /** The single case that owns this student's survey package, or null. */
+  surveyOwnerCaseId: string | null;
+  /** True when THIS session's case is the owning case. */
+  isSurveyOwnerCase: boolean;
+  /** Convenience flag: the whole global package is completed. */
+  globalSurveyCompleted: boolean;
 }
 
 export interface SurveySubmitResult {
