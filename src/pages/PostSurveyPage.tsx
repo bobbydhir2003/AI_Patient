@@ -5,10 +5,10 @@ import { SurveyLikert } from "../components/survey/SurveyLikert";
 import { POST_LIKERT, POST_OPEN_ENDED, OPEN_ENDED_MAX_LEN } from "../services/surveyQuestions";
 import { getSurveyStatus, submitPostSurvey } from "../services/surveysApi";
 import { ApiError, getAssessmentStatus } from "../services/api";
-import { postSurveyDestination, postSurveyGate } from "../services/surveyFlow";
+import { postSurveyDestination, globalPostGate } from "../services/surveyFlow";
 import styles from "./SurveyPage.module.css";
 
-const PROGRESS_STEPS = ["Case Introduction", "Interview", "Post-Survey", "Assessment", "Complete"];
+const PROGRESS_STEPS = ["Case Introduction", "Pre Survey", "Interview", "Post Survey", "Assessment Results"];
 
 export function PostSurveyPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -19,7 +19,6 @@ export function PostSurveyPage() {
   const [nuidMissing, setNuidMissing] = useState(false);
   const [checkingStatus, setCheckingStatus] = useState(true);
   const [alreadyCompleted, setAlreadyCompleted] = useState(false);
-  const [caseName, setCaseName] = useState("this case");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const routedRef = useRef(false);
@@ -49,9 +48,11 @@ export function PostSurveyPage() {
       try {
         const status = await getSurveyStatus(sessionId);
         if (cancelled) return;
-        setCaseName(status.caseName || "this case");
         if (!status.nuidOnFile) setNuidMissing(true);
-        if (postSurveyGate(status.overallStatus) === "completed") {
+        // GLOBAL gate: only the owning case whose package is not yet completed
+        // collects Post. Every other case (and a completed package) shows the
+        // "already submitted / skip" state.
+        if (globalPostGate(status.globalSurveyStatus, status.isSurveyOwnerCase) === "skip") {
           setAlreadyCompleted(true);
         }
         setCheckingStatus(false);
@@ -84,9 +85,12 @@ export function PostSurveyPage() {
       if (err instanceof ApiError && err.code === "nuid_missing") {
         setNuidMissing(true);
         setError(err.message);
-      } else if (err instanceof ApiError && err.code === "survey_already_completed") {
-        // Race: show the completed read-only survey and never retry or call
-        // REDCap again.
+      } else if (
+        err instanceof ApiError &&
+        (err.code === "survey_already_completed" || err.code === "survey_owned_by_other_case")
+      ) {
+        // Race: the one global package was completed / is owned elsewhere. Show
+        // the skip state and never retry or call REDCap again.
         setLikert({});
         setOpenText({});
         setAlreadyCompleted(true);
@@ -102,7 +106,7 @@ export function PostSurveyPage() {
   if (checkingStatus) {
     return (
       <div className="page">
-        <ProgressSteps steps={PROGRESS_STEPS} currentStepIndex={2} />
+        <ProgressSteps steps={PROGRESS_STEPS} currentStepIndex={3} />
         <div className={`${styles.single}`}>
           <div className={`card ${styles.card}`} role="status">
             <p>Checking survey status…</p>
@@ -114,7 +118,7 @@ export function PostSurveyPage() {
 
   return (
     <div className="page">
-      <ProgressSteps steps={PROGRESS_STEPS} currentStepIndex={2} />
+      <ProgressSteps steps={PROGRESS_STEPS} currentStepIndex={3} />
 
       <div className={`${styles.single}`}>
         <div className={styles.headerBlock}>
@@ -128,10 +132,9 @@ export function PostSurveyPage() {
         <div className={styles.main}>
           {alreadyCompleted && (
             <div className={styles.completedBanner} role="alert">
-              <h2 className={styles.completedTitle}>Survey already completed</h2>
+              <h2 className={styles.completedTitle}>Survey already submitted</h2>
               <p className={styles.completedMessage}>
-                You have already completed the survey for {caseName}. No additional survey response
-                is required.
+                You have already submitted the survey. Thank you for your feedback.
               </p>
               <button
                 type="button"
@@ -156,52 +159,57 @@ export function PostSurveyPage() {
             </div>
           )}
 
-          {/* Likert section */}
-          <div className={`card ${styles.card} ${alreadyCompleted ? styles.readOnlyCard : ""}`}>
-            <p className={styles.scaleLegend}>
-              Rate each statement from 1 (Strongly disagree) to 5 (Strongly agree).
-            </p>
-            <div className={styles.questionList}>
-              {POST_LIKERT.map((q, i) => (
-                <SurveyLikert
-                  key={q.name}
-                  name={q.name}
-                  index={i + 1}
-                  prompt={q.prompt}
-                  value={likert[q.name]}
-                  onChange={(value) => setLikert((a) => ({ ...a, [q.name]: value }))}
-                  disabled={alreadyCompleted}
-                />
-              ))}
-            </div>
-          </div>
-
-          {/* Open-ended section */}
-          <div className={`card ${styles.card} ${alreadyCompleted ? styles.readOnlyCard : ""}`}>
-            <h2 className={styles.groupTitle}>Open-Ended Feedback (optional)</h2>
-            <div className={styles.questionList}>
-              {POST_OPEN_ENDED.map((q, i) => (
-                <div key={q.name} className={styles.openItem}>
-                  <label className={styles.openPrompt} htmlFor={q.name}>
-                    <span style={{ color: "var(--color-text-muted)", fontWeight: 700 }}>
-                      {POST_LIKERT.length + i + 1}.
-                    </span>{" "}
-                    {q.prompt}
-                  </label>
-                  <textarea
-                    id={q.name}
-                    className={styles.textarea}
-                    maxLength={OPEN_ENDED_MAX_LEN}
-                    disabled={alreadyCompleted}
-                    value={openText[q.name] ?? ""}
-                    onChange={(e) =>
-                      setOpenText((t) => ({ ...t, [q.name]: e.target.value }))
-                    }
-                  />
+          {/* In the skip/completed state the survey is already handled globally,
+              so the Likert AND open-ended cards are HIDDEN entirely (not rendered
+              read-only). The banner, assessment note and navigation stay. */}
+          {!alreadyCompleted && (
+            <>
+              {/* Likert section */}
+              <div className={`card ${styles.card}`}>
+                <p className={styles.scaleLegend}>
+                  Rate each statement from 1 (Strongly disagree) to 5 (Strongly agree).
+                </p>
+                <div className={styles.questionList}>
+                  {POST_LIKERT.map((q, i) => (
+                    <SurveyLikert
+                      key={q.name}
+                      name={q.name}
+                      index={i + 1}
+                      prompt={q.prompt}
+                      value={likert[q.name]}
+                      onChange={(value) => setLikert((a) => ({ ...a, [q.name]: value }))}
+                    />
+                  ))}
                 </div>
-              ))}
-            </div>
-          </div>
+              </div>
+
+              {/* Open-ended section */}
+              <div className={`card ${styles.card}`}>
+                <h2 className={styles.groupTitle}>Open-Ended Feedback (optional)</h2>
+                <div className={styles.questionList}>
+                  {POST_OPEN_ENDED.map((q, i) => (
+                    <div key={q.name} className={styles.openItem}>
+                      <label className={styles.openPrompt} htmlFor={q.name}>
+                        <span style={{ color: "var(--color-text-muted)", fontWeight: 700 }}>
+                          {POST_LIKERT.length + i + 1}.
+                        </span>{" "}
+                        {q.prompt}
+                      </label>
+                      <textarea
+                        id={q.name}
+                        className={styles.textarea}
+                        maxLength={OPEN_ENDED_MAX_LEN}
+                        value={openText[q.name] ?? ""}
+                        onChange={(e) =>
+                          setOpenText((t) => ({ ...t, [q.name]: e.target.value }))
+                        }
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
 
           {error && (
             <div className={styles.errorText} role="alert">

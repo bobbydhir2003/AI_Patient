@@ -5,8 +5,12 @@ import { AppImage } from "../components/common/AppImage";
 import { SurveyLikert } from "../components/survey/SurveyLikert";
 import { PRE_LIKERT } from "../services/surveyQuestions";
 import { getSurveyStatus, submitPreSurvey } from "../services/surveysApi";
-import { preSurveyGate } from "../services/surveyFlow";
-import { ApiError, createSession } from "../services/api";
+import {
+  globalPreGate,
+  resolveInterviewDestination,
+  destinationToPath,
+} from "../services/surveyFlow";
+import { ApiError, createSession, fetchSession } from "../services/api";
 import { joinQueue } from "../services/queueApi";
 import { usePatientCase } from "../services/cases";
 import { useAppContext } from "../state/AppContext";
@@ -16,6 +20,9 @@ import styles from "./SurveyPage.module.css";
 
 const PROGRESS_STEPS = ["Case Introduction", "Pre Survey", "Interview", "Post Survey", "Assessment Results"];
 
+/** What the Pre-Survey screen renders once status is known. */
+type GateMode = "collect" | "continue" | "skip";
+
 export function PreSurveyPage() {
   const { caseId } = useParams<{ caseId: string }>();
   const navigate = useNavigate();
@@ -23,6 +30,14 @@ export function PreSurveyPage() {
   const { patientCase } = usePatientCase(caseId);
   const { studentName, studentId, activeInterview, setActiveInterview } = useAppContext();
   const studentHome = caseHubPath(user?.role);
+
+  // RESUME mode: the persisted active session is bound to THIS case with the
+  // resume flag (Dashboard "Continue Last Session"). In resume mode we NEVER
+  // create a new session and NEVER re-enter the admission queue - we validate
+  // and continue the EXISTING session. Survives refresh because the flag is
+  // persisted in AppContext/localStorage.
+  const resumeMode =
+    !!activeInterview && activeInterview.resume === true && activeInterview.caseId === caseId;
 
   const [answers, setAnswers] = useState<Record<string, number>>({});
   // Read-only identity (NUID + case) resolved server-side from the session for
@@ -35,16 +50,37 @@ export function PreSurveyPage() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [checkingStatus, setCheckingStatus] = useState(true);
   const [nuidMissing, setNuidMissing] = useState(false);
-  // The one survey package for this case is already fully completed (Pre+Post).
-  // Only the survey is skipped; the new/repeated interview remains available.
-  const [alreadyCompleted, setAlreadyCompleted] = useState(false);
+  // How the screen renders once the GLOBAL survey status is known:
+  //   collect  → show Pre questions (this case owns/eligible, Pre not yet done)
+  //   continue → owning case, Pre already submitted → continue (no re-ask)
+  //   skip     → a DIFFERENT case owns the one global package → skip & continue
+  const [gateMode, setGateMode] = useState<GateMode>("collect");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const initRef = useRef(false);
 
-  // Advance from the pre-survey into the interview, preserving the EXISTING
-  // capacity/queue behavior (previously run on the Case Introduction page).
+  // Advance from the pre-survey into the interview.
+  //   NEW flow    → capacity/queue check (joinQueue), then interview or queue.
+  //   RESUME flow → NO joinQueue and NO new session: re-validate the existing
+  //                 session and route by its CURRENT backend state (a session
+  //                 that went stale/locked/completed is sent to Post/Assessment
+  //                 instead of blindly entering the interview).
   async function proceedToInterview(id: string) {
+    if (!sessionId) return;
+    if (resumeMode) {
+      try {
+        const s = await fetchSession(sessionId);
+        const dest = resolveInterviewDestination(
+          s.caseId === id ? { status: s.status, locked: s.locked, hasAssessment: false } : null,
+        );
+        navigate(destinationToPath(dest, { caseId: id, sessionId }), { replace: true });
+      } catch {
+        // Validation unavailable: fall back to the interview page, which has its
+        // own resume/guard logic and never fabricates a session.
+        navigate(`/interview/${id}`, { replace: true });
+      }
+      return;
+    }
     try {
       const r = await joinQueue(token, id);
       if (r.admitted || r.state === "admitted") {
@@ -59,12 +95,31 @@ export function PreSurveyPage() {
     }
   }
 
-  // Establish (or resume) the backend session so the pre-survey can be linked to
-  // it, then read survey status to handle already-submitted / missing-NUID. The
-  // interview page's own resume logic reuses this same session (no duplicate).
+  // Establish (or, in resume mode, VALIDATE) the backend session, then read the
+  // GLOBAL survey status to decide the gate. The interview page's own resume
+  // logic reuses this same session (no duplicate).
   useEffect(() => {
     if (!caseId) return;
     let cancelled = false;
+
+    async function loadGate(sid: string) {
+      setSessionId(sid);
+      try {
+        const status = await getSurveyStatus(sid);
+        if (cancelled) return;
+        setIdentity({ nuid: status.nuid, caseNumber: status.caseNumber, caseName: status.caseName });
+        if (!status.nuidOnFile) setNuidMissing(true);
+        setGateMode(
+          globalPreGate(status.globalSurveyStatus, status.isSurveyOwnerCase, status.preSubmitted),
+        );
+      } catch {
+        // Status is best-effort; submission is still guarded server-side. Default
+        // to collecting so the student is never wrongly blocked.
+        if (!cancelled) setGateMode("collect");
+      } finally {
+        if (!cancelled) setCheckingStatus(false);
+      }
+    }
 
     async function init(id: string) {
       // Yield one tick so React StrictMode's throwaway first mount is cancelled
@@ -73,6 +128,32 @@ export function PreSurveyPage() {
       if (cancelled || initRef.current) return;
       initRef.current = true;
       try {
+        if (resumeMode && activeInterview) {
+          // RESUME: reuse the existing session. Never create one. Validate it is
+          // still resumable; if it went stale, route by current backend state.
+          const sid = activeInterview.sessionId;
+          try {
+            const s = await fetchSession(sid);
+            if (cancelled) return;
+            if (s.caseId !== id || s.locked || s.status !== "active") {
+              const dest = resolveInterviewDestination(
+                s.caseId === id
+                  ? { status: s.status, locked: s.locked, hasAssessment: false }
+                  : null,
+              );
+              navigate(destinationToPath(dest, { caseId: id, sessionId: sid }), { replace: true });
+              return;
+            }
+          } catch {
+            /* validation unavailable: still show the Pre step against the stored
+               session; proceedToInterview has its own fallback. */
+          }
+          if (cancelled) return;
+          await loadGate(sid);
+          return;
+        }
+
+        // NEW flow: reuse a matching active session or create a fresh one.
         let sid: string;
         if (activeInterview && activeInterview.caseId === id) {
           sid = activeInterview.sessionId;
@@ -83,36 +164,16 @@ export function PreSurveyPage() {
             id,
           );
           if (cancelled) return;
-          setActiveInterview({ caseId: id, sessionId: session.sessionId, startedAt: Date.now() });
+          setActiveInterview({
+            caseId: id,
+            sessionId: session.sessionId,
+            startedAt: Date.now(),
+            resume: false,
+          });
           sid = session.sessionId;
         }
         if (cancelled) return;
-        setSessionId(sid);
-        try {
-          const status = await getSurveyStatus(sid);
-          if (cancelled) return;
-          setIdentity({
-            nuid: status.nuid,
-            caseNumber: status.caseNumber,
-            caseName: status.caseName,
-          });
-          if (!status.nuidOnFile) setNuidMissing(true);
-          const gate = preSurveyGate(status.overallStatus, status.preSubmitted);
-          if (gate === "completed") {
-            setAlreadyCompleted(true);
-            setCheckingStatus(false);
-          } else if (gate === "resume") {
-            // Pre already synced but the package is still in progress — do NOT
-            // re-ask Pre; continue straight to the interview/resume flow.
-            void proceedToInterview(id);
-          } else {
-            setCheckingStatus(false);
-          }
-          // gate === "collect": no receipt yet, or Pre not done → show normally.
-        } catch {
-          /* status is best-effort; submission is still guarded server-side */
-          if (!cancelled) setCheckingStatus(false);
-        }
+        await loadGate(sid);
       } catch {
         if (!cancelled) {
           setCheckingStatus(false);
@@ -129,7 +190,7 @@ export function PreSurveyPage() {
   }, [caseId]);
 
   async function handleSubmit() {
-    if (alreadyCompleted || submitting || nuidMissing || !sessionId || !caseId) return;
+    if (gateMode !== "collect" || submitting || nuidMissing || !sessionId || !caseId) return;
     const unanswered = PRE_LIKERT.some((q) => !answers[q.name]);
     if (unanswered) {
       setError("Please answer all questions before continuing.");
@@ -144,17 +205,22 @@ export function PreSurveyPage() {
       if (err instanceof ApiError && err.code === "nuid_missing") {
         setNuidMissing(true);
         setError(err.message);
-      } else if (err instanceof ApiError && err.code === "survey_already_completed") {
-        // Race: the package completed between load and submit. Show the same
-        // read-only survey and never retry the survey submission.
+      } else if (
+        err instanceof ApiError &&
+        (err.code === "survey_already_completed" || err.code === "survey_owned_by_other_case")
+      ) {
+        // Race: the one global package was established/completed (by this or
+        // another case) between load and submit. Flip to the skip state and
+        // never retry the survey submission.
         setAnswers({});
-        setAlreadyCompleted(true);
+        setGateMode("skip");
+        setSubmitting(false);
       } else {
         setError(
           err instanceof ApiError ? err.message : "Could not submit the survey. Please try again.",
         );
+        setSubmitting(false);
       }
-      setSubmitting(false);
     }
   }
 
@@ -169,6 +235,10 @@ export function PreSurveyPage() {
     );
   }
 
+  const isSkip = gateMode === "skip";
+  const isContinue = gateMode === "continue";
+  const readOnly = isSkip || isContinue;
+
   return (
     <div className="page">
       <ProgressSteps steps={PROGRESS_STEPS} currentStepIndex={1} />
@@ -181,12 +251,11 @@ export function PreSurveyPage() {
         </p>
       </div>
 
-      {alreadyCompleted && (
+      {isSkip && (
         <div className={styles.completedBanner} role="alert">
-          <h2 className={styles.completedTitle}>Survey already completed</h2>
+          <h2 className={styles.completedTitle}>Survey already submitted</h2>
           <p className={styles.completedMessage}>
-            You have already completed the survey for {patientCase?.name ?? "this case"}. You do
-            not need to complete it again.
+            You have already submitted the survey. Thank you for your feedback.
           </p>
           <button
             type="button"
@@ -195,6 +264,24 @@ export function PreSurveyPage() {
             disabled={!sessionId}
           >
             Skip Survey &amp; Continue to Interview
+          </button>
+        </div>
+      )}
+
+      {isContinue && (
+        <div className={styles.completedBanner} role="alert">
+          <h2 className={styles.completedTitle}>Pre-Survey complete</h2>
+          <p className={styles.completedMessage}>
+            You have already completed the pre-survey for this case. You can continue to your
+            interview.
+          </p>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => caseId && void proceedToInterview(caseId)}
+            disabled={!sessionId}
+          >
+            Continue to Interview
           </button>
         </div>
       )}
@@ -217,31 +304,35 @@ export function PreSurveyPage() {
             </div>
           )}
 
-          {!alreadyCompleted && nuidMissing && (
+          {!readOnly && nuidMissing && (
             <div className={styles.banner} role="alert">
               Your student number (NUID) is missing from your profile. Add it to your profile before
               submitting the survey. You can still start the interview from the case page.
             </div>
           )}
 
-          <div className={`card ${styles.card} ${alreadyCompleted ? styles.readOnlyCard : ""}`}>
-            <p className={styles.scaleLegend}>
-              Rate each statement from 1 (Strongly disagree) to 5 (Strongly agree).
-            </p>
-            <div className={styles.questionList}>
-              {PRE_LIKERT.map((q, i) => (
-                <SurveyLikert
-                  key={q.name}
-                  name={q.name}
-                  index={i + 1}
-                  prompt={q.prompt}
-                  value={answers[q.name]}
-                  onChange={(value) => setAnswers((a) => ({ ...a, [q.name]: value }))}
-                  disabled={alreadyCompleted}
-                />
-              ))}
+          {/* In skip/continue (readOnly) state the survey is already handled
+              globally, so the questions are HIDDEN entirely (not rendered
+              read-only) — the identity block, banners and navigation stay. */}
+          {!readOnly && (
+            <div className={`card ${styles.card}`}>
+              <p className={styles.scaleLegend}>
+                Rate each statement from 1 (Strongly disagree) to 5 (Strongly agree).
+              </p>
+              <div className={styles.questionList}>
+                {PRE_LIKERT.map((q, i) => (
+                  <SurveyLikert
+                    key={q.name}
+                    name={q.name}
+                    index={i + 1}
+                    prompt={q.prompt}
+                    value={answers[q.name]}
+                    onChange={(value) => setAnswers((a) => ({ ...a, [q.name]: value }))}
+                  />
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {error && (
             <div className={styles.errorText} role="alert">
@@ -257,7 +348,7 @@ export function PreSurveyPage() {
             >
               Back to Case
             </button>
-            {!alreadyCompleted && (
+            {!readOnly && (
               <button
                 type="button"
                 className="btn btn-primary"

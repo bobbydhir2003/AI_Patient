@@ -18,6 +18,12 @@ import {
   preSurveyGate,
   isSurveyCompleted,
   postSurveyGate,
+  globalPreGate,
+  globalPostGate,
+  isResumableSession,
+  resumeEntryDestination,
+  resolveInterviewDestination,
+  destinationToPath,
 } from "../.test-build/services/surveyFlow.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -80,6 +86,70 @@ test("postSurveyGate: only a completed package skips Post", () => {
 });
 
 // ---------------------------------------------------------------------------
+// GLOBAL survey gating (one package per student). isOwnerCase + globalStatus.
+// ---------------------------------------------------------------------------
+test("globalPreGate: not_started → collect (this case may claim ownership)", () => {
+  assert.equal(globalPreGate("not_started", false, false), "collect");
+  assert.equal(globalPreGate("not_started", true, false), "collect");
+});
+
+test("globalPreGate: owner case → collect if Pre pending, continue if Pre done", () => {
+  assert.equal(globalPreGate("in_progress", true, false), "collect");
+  assert.equal(globalPreGate("in_progress", true, true), "continue");
+  assert.equal(globalPreGate("completed", true, true), "continue");
+});
+
+test("globalPreGate: non-owner (in progress or completed) → skip", () => {
+  assert.equal(globalPreGate("in_progress", false, false), "skip");
+  assert.equal(globalPreGate("completed", false, false), "skip");
+});
+
+test("globalPostGate: only the owning, not-yet-completed case collects Post", () => {
+  assert.equal(globalPostGate("in_progress", true), "collect");
+  assert.equal(globalPostGate("completed", true), "skip");
+  assert.equal(globalPostGate("in_progress", false), "skip");
+  assert.equal(globalPostGate("completed", false), "skip");
+  assert.equal(globalPostGate("not_started", false), "skip");
+});
+
+// ---------------------------------------------------------------------------
+// Centralized interview flow resolution (new / resume / stale / refresh).
+// ---------------------------------------------------------------------------
+const ACTIVE = { status: "active", locked: false, hasAssessment: false };
+const LOCKED = { status: "active", locked: true, hasAssessment: false };
+const DONE_NO_ASSESS = { status: "completed", locked: true, hasAssessment: false };
+const DONE_ASSESS = { status: "completed", locked: true, hasAssessment: true };
+
+test("isResumableSession: only ACTIVE + unlocked is resumable", () => {
+  assert.equal(isResumableSession(ACTIVE), true);
+  assert.equal(isResumableSession(LOCKED), false);
+  assert.equal(isResumableSession(DONE_NO_ASSESS), false);
+  assert.equal(isResumableSession(null), false);
+});
+
+test("resumeEntryDestination: active resume ENTERS at Case Info, not the interview", () => {
+  assert.deepEqual(resumeEntryDestination(ACTIVE), { kind: "caseInfo" });
+  assert.deepEqual(resumeEntryDestination(DONE_ASSESS), { kind: "assessment" });
+  assert.deepEqual(resumeEntryDestination(DONE_NO_ASSESS), { kind: "postSurvey" });
+});
+
+test("resolveInterviewDestination: active → interview; stale → post/assessment", () => {
+  assert.deepEqual(resolveInterviewDestination(ACTIVE), { kind: "interview" });
+  assert.deepEqual(resolveInterviewDestination(LOCKED), { kind: "postSurvey" });
+  assert.deepEqual(resolveInterviewDestination(DONE_ASSESS), { kind: "assessment" });
+  assert.deepEqual(resolveInterviewDestination(null), { kind: "caseInfo" });
+});
+
+test("destinationToPath: builds the same routes for every caller", () => {
+  const ids = { caseId: "carly", sessionId: "sess123" };
+  assert.equal(destinationToPath({ kind: "caseInfo" }, ids), "/cases/carly");
+  assert.equal(destinationToPath({ kind: "interview" }, ids), "/interview/carly");
+  assert.equal(destinationToPath({ kind: "postSurvey" }, ids), "/survey/sess123/post");
+  assert.equal(destinationToPath({ kind: "assessmentLoading" }, ids), "/assessment/sess123/loading");
+  assert.equal(destinationToPath({ kind: "assessment" }, ids), "/assessment/sess123");
+});
+
+// ---------------------------------------------------------------------------
 // Static-source guarantees the pages are wired to the gate and preserve the
 // backgrounded-assessment behaviour (read source, same style as
 // test-interview-ui.mjs).
@@ -89,43 +159,76 @@ const postSurveyPage = read("src/pages/PostSurveyPage.tsx");
 const interviewPage = read("src/pages/InterviewPage.tsx");
 const surveyLikert = read("src/components/survey/SurveyLikert.tsx");
 
-test("PreSurveyPage: completed state keeps the normal survey structure and banner", () => {
-  assert.match(preSurveyPage, /preSurveyGate\(/);
+test("PreSurveyPage: global gate + always-visible step with skip/continue panels", () => {
+  assert.match(preSurveyPage, /globalPreGate\(/);
   assert.match(preSurveyPage, /Pre-Interview Survey/);
   assert.match(preSurveyPage, /PRE_LIKERT\.map/);
   assert.match(preSurveyPage, /styles\.completedBanner/);
-  assert.match(preSurveyPage, /already completed the survey for/i);
-  assert.match(preSurveyPage, /You do\s+not need to complete it again/);
+  // Global wording (not "for Carly"), plus both skip and continue affordances.
+  assert.match(preSurveyPage, /You have already submitted the survey\. Thank you for your feedback\./);
   assert.match(preSurveyPage, /Skip Survey &amp; Continue to Interview/);
+  assert.match(preSurveyPage, /Continue to Interview/);
   assert.match(preSurveyPage, /checkingStatus/);
-  // Handles the completed race on submit without resubmitting.
+  // Handles both race codes on submit without resubmitting.
   assert.match(preSurveyPage, /survey_already_completed/);
+  assert.match(preSurveyPage, /survey_owned_by_other_case/);
 });
 
-test("PreSurveyPage: completed questions are disabled and only Skip advances", () => {
-  assert.match(preSurveyPage, /disabled=\{alreadyCompleted\}/);
-  assert.match(preSurveyPage, /if \(alreadyCompleted \|\| submitting/);
-  assert.match(preSurveyPage, /onClick=\{\(\) => caseId && void proceedToInterview\(caseId\)\}/);
-  assert.match(preSurveyPage, /\{!alreadyCompleted && \([\s\S]*?Submit & Start Interview/);
+test("PreSurveyPage: Pre questions render ONLY when not skip/continue", () => {
+  // The Likert card is gated behind !readOnly (hidden, not read-only, in the
+  // skip/continue state).
+  assert.match(preSurveyPage, /\{!readOnly && \([\s\S]*?PRE_LIKERT\.map/);
+  // The identity (NUID + case) block is NOT gated by readOnly and stays visible.
+  assert.match(preSurveyPage, /aria-label="Your survey identity"/);
+  assert.match(preSurveyPage, /Student NUID/);
+  // No disabled read-only questions remain in the skip state.
+  assert.doesNotMatch(preSurveyPage, /disabled=\{readOnly\}/);
 });
 
-test("PostSurveyPage: completed state keeps the normal survey structure and banner", () => {
-  assert.match(postSurveyPage, /postSurveyGate\(/);
+test("PreSurveyPage: resume mode reuses session + skips the queue", () => {
+  // Resume mode is driven by the persisted resume flag, never a bare active
+  // session, and only for the matching case.
+  assert.match(preSurveyPage, /activeInterview\.resume === true && activeInterview\.caseId === caseId/);
+  // NEW flow creates a session; RESUME reuses it (no createSession under resume).
+  assert.match(preSurveyPage, /if \(resumeMode && activeInterview\)/);
+  assert.match(preSurveyPage, /createSession\(/);
+  // Resume proceeds WITHOUT joinQueue; new flow uses joinQueue.
+  assert.match(preSurveyPage, /if \(resumeMode\) \{[\s\S]*?resolveInterviewDestination/);
+  assert.match(preSurveyPage, /joinQueue\(token, id\)/);
+  assert.match(preSurveyPage, /readOnly/);
+});
+
+test("PostSurveyPage: global gate + always-visible step with skip panel", () => {
+  assert.match(postSurveyPage, /globalPostGate\(/);
   assert.match(postSurveyPage, /survey_already_completed/);
+  assert.match(postSurveyPage, /survey_owned_by_other_case/);
   assert.match(postSurveyPage, /Post-Interview Survey/);
   assert.match(postSurveyPage, /POST_LIKERT\.map/);
   assert.match(postSurveyPage, /POST_OPEN_ENDED\.map/);
   assert.match(postSurveyPage, /styles\.completedBanner/);
-  assert.match(postSurveyPage, /Survey already completed/);
-  assert.match(postSurveyPage, /No additional survey response\s+is required/);
+  assert.match(postSurveyPage, /Survey already submitted/);
+  assert.match(postSurveyPage, /You have already submitted the survey\. Thank you for your feedback\./);
   assert.match(postSurveyPage, /Skip Survey &amp; Continue to Assessment/);
 });
 
-test("PostSurveyPage: completed controls are disabled and only Skip advances", () => {
-  assert.match(postSurveyPage, /disabled=\{alreadyCompleted\}/);
-  assert.match(postSurveyPage, /if \(alreadyCompleted \|\| submitting/);
+test("PostSurveyPage: Likert + open-ended render ONLY when not skip", () => {
+  // Both survey cards are gated behind !alreadyCompleted (hidden in skip state).
+  assert.match(postSurveyPage, /\{!alreadyCompleted && \([\s\S]*?POST_LIKERT\.map/);
+  assert.match(postSurveyPage, /\{!alreadyCompleted && \([\s\S]*?POST_OPEN_ENDED\.map/);
+  // No disabled read-only questions remain in the skip state.
+  assert.doesNotMatch(postSurveyPage, /disabled=\{alreadyCompleted\}/);
+  // Only Skip advances from the completed state.
   assert.match(postSurveyPage, /onClick=\{\(\) => sessionId && void routeToAssessment\(sessionId\)\}/);
   assert.match(postSurveyPage, /\{!alreadyCompleted && \([\s\S]*?Submit & Continue/);
+});
+
+test("Dashboard resume uses the centralized resolver, not a hard /interview jump", () => {
+  const dashboard = read("src/pages/student/StudentDashboardPage.tsx");
+  assert.match(dashboard, /resume: true/);
+  assert.match(dashboard, /resumeEntryDestination\(/);
+  assert.match(dashboard, /destinationToPath\(/);
+  // The old hard-coded jump is gone.
+  assert.doesNotMatch(dashboard, /navigate\(`\/interview\/\$\{session\.caseId\}`\)/);
 });
 
 test("SurveyLikert: disabled state uses native fieldset semantics", () => {
