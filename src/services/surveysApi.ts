@@ -39,6 +39,12 @@ async function surveyRequest<T>(path: string, init?: RequestInit): Promise<T> {
 export interface SurveyStatus {
   sessionId: string;
   caseName: string;
+  /** REDCap case number (1-4) for this case, or null if unmapped. Read-only,
+   * server-derived; shown on the Pre-Survey identity block. */
+  caseNumber: number | null;
+  /** The authenticated student's NUID, server-resolved for READ-ONLY display.
+   * Never sent back from the client (the backend is authoritative). */
+  nuid: string;
   nuidOnFile: boolean;
   /** Case-level lifecycle: "not_started" | "in_progress" | "completed". This is
    * the field the survey flow gates on (one package per student+case). */

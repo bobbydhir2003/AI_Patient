@@ -14,7 +14,7 @@ import { useAuth } from "../state/AuthContext";
 import { caseHubPath } from "../services/authRouting";
 import styles from "./SurveyPage.module.css";
 
-const PROGRESS_STEPS = ["Case Introduction", "Pre-Survey", "Interview", "Assessment", "Complete"];
+const PROGRESS_STEPS = ["Case Introduction", "Pre Survey", "Interview", "Post Survey", "Assessment Results"];
 
 export function PreSurveyPage() {
   const { caseId } = useParams<{ caseId: string }>();
@@ -25,6 +25,13 @@ export function PreSurveyPage() {
   const studentHome = caseHubPath(user?.role);
 
   const [answers, setAnswers] = useState<Record<string, number>>({});
+  // Read-only identity (NUID + case) resolved server-side from the session for
+  // display/confirmation only. Never editable and never sent back on submit.
+  const [identity, setIdentity] = useState<{
+    nuid: string;
+    caseNumber: number | null;
+    caseName: string;
+  } | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [checkingStatus, setCheckingStatus] = useState(true);
   const [nuidMissing, setNuidMissing] = useState(false);
@@ -84,6 +91,11 @@ export function PreSurveyPage() {
         try {
           const status = await getSurveyStatus(sid);
           if (cancelled) return;
+          setIdentity({
+            nuid: status.nuid,
+            caseNumber: status.caseNumber,
+            caseName: status.caseName,
+          });
           if (!status.nuidOnFile) setNuidMissing(true);
           const gate = preSurveyGate(status.overallStatus, status.preSubmitted);
           if (gate === "completed") {
@@ -189,6 +201,22 @@ export function PreSurveyPage() {
 
       <div className={styles.layout}>
         <div className={styles.main}>
+          {identity && (
+            <div className={styles.identityCard} aria-label="Your survey identity">
+              <div className={styles.identityItem}>
+                <span className={styles.identityLabel}>Student NUID</span>
+                <span className={styles.identityValue}>{identity.nuid || "—"}</span>
+              </div>
+              <div className={styles.identityItem}>
+                <span className={styles.identityLabel}>Patient Case</span>
+                <span className={styles.identityValue}>
+                  {identity.caseNumber != null ? `${identity.caseNumber} - ` : ""}
+                  {identity.caseName}
+                </span>
+              </div>
+            </div>
+          )}
+
           {!alreadyCompleted && nuidMissing && (
             <div className={styles.banner} role="alert">
               Your student number (NUID) is missing from your profile. Add it to your profile before
@@ -260,7 +288,7 @@ export function PreSurveyPage() {
             </div>
             {patientCase.referralReason && (
               <div className={styles.sidebarBlock}>
-                <span className={styles.sidebarLabel}>Referral Reason</span>
+                <span className={styles.sidebarLabel}>Context</span>
                 <p className={styles.sidebarBody}>{patientCase.referralReason}</p>
               </div>
             )}

@@ -8,15 +8,30 @@ value and open-ended response lives exclusively in REDCap.
 
 - One `survey_receipts` row per **`UNIQUE(student_id, case_id)`** — one survey
   *package* per student per case. Pre and Post are the two stages of it.
-- `record_id` sent to REDCap = the student's **NUID** (`Student.student_number`),
-  resolved server-side. Never a name/email, never client-supplied.
+- `record_id` sent to REDCap = a **generated random UUID** (`uuid4().hex`),
+  created **once** when the receipt is first inserted and stored in
+  `survey_receipts.redcap_record_id`. It is reused for Pre, Post, retries and any
+  later session for the same `(student, case)`. It is **not** the NUID/email/session id.
+- The student's **NUID** (`Student.student_number`) is sent in the separate
+  **`nuid`** field, and the case number in the **`case_id`** field
+  (`camden=1, carly=2, sofia=3, jayden=4`, see `constants.REDCAP_CASE_ID`). All
+  three identity values are resolved server-side and never client-supplied.
 
 ## The multi-case overwrite problem
 
 All four cases (`carly`, `camden`, `sofia`, `jayden`) reuse the **same** REDCap
-variable names (`pre_conf_begin`, `post_use_again`, …). If every case wrote to
-the same `record_id` (=NUID) on a **flat** project, Camden's `pre_conf_begin`
-would **overwrite** Carly's. That is real data loss.
+variable names (`pre_conf_begin`, `post_use_again`, …).
+
+> **Note (identity redesign):** `record_id` is now a UUID generated **per
+> `(student, case)`**, so different cases already land in different records and
+> can no longer overwrite one another. The longitudinal per-case-event design
+> below is **retained unchanged** for this release (Pre and Post of a case still
+> share one `record_id` + event, writing disjoint fields), but is no longer the
+> mechanism that prevents cross-case overwrite.
+
+Historically, when every case wrote to the same `record_id` (=NUID) on a
+**flat** project, Camden's `pre_conf_begin` would **overwrite** Carly's. That is
+real data loss, which the per-case events below prevented.
 
 ## Required design: longitudinal, one event per case
 
@@ -40,10 +55,13 @@ Requirements:
 2. **Designate instruments to events**: assign **both** `pre_experience_survey`
    and `post_experience_survey` to **every** case event, so a case's Pre and
    Post write into the *same* per-case event row.
-3. **Data dictionary**: the instruments must contain exactly the variables in
-   `backend/app/schemas/survey_schema.py` (5 pre Likert; 12 post Likert + 5 post
-   open-ended), plus REDCap's own `{instrument}_complete` fields. Any variable
-   not declared in the schema is rejected before REDCap is ever called.
+3. **Data dictionary**: the instruments must contain exactly the answer variables
+   in `backend/app/schemas/survey_schema.py` (5 pre Likert; 12 post Likert + 5
+   post open-ended), plus REDCap's own `{instrument}_complete` fields, **plus the
+   identity fields `nuid` and `case_id`** (text). The primary `record_id` field
+   must accept string values (a 32-char UUID hex) with auto-numbering **off**.
+   Any answer variable not declared in the schema is rejected before REDCap is
+   ever called.
 4. **App config**: set `REDCAP_API_URL`, `REDCAP_API_TOKEN`, and keep
    `REDCAP_LONGITUDINAL=true` (the default). The token stays server-side only.
 
@@ -59,15 +77,19 @@ different events, so no case overwrites another.
 
 Pre:
 ```
-record_id            = <NUID>
-redcap_event_name    = <case_id>_arm_1
+record_id            = <uuid4 hex>          # generated, per (student, case)
+nuid                 = <student NUID>
+case_id              = <1|2|3|4>            # camden=1, carly=2, sofia=3, jayden=4
+redcap_event_name    = <case_slug>_arm_1
 pre_conf_begin ...   = <Likert ints>
 pre_experience_survey_complete = 2
 ```
-Post:
+Post (SAME record_id / nuid / case_id as Pre):
 ```
-record_id            = <NUID>
-redcap_event_name    = <case_id>_arm_1
+record_id            = <same uuid4 hex>
+nuid                 = <student NUID>
+case_id              = <1|2|3|4>
+redcap_event_name    = <case_slug>_arm_1
 post_conf_begin ...  = <Likert ints>
 post_oe_* ...        = <sanitised open-ended text>
 post_experience_survey_complete = 2

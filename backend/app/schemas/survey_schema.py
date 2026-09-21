@@ -68,6 +68,13 @@ class SurveyStatusOut(CamelModel):
 
     session_id: str
     case_name: str
+    # REDCap case number (1-4) for this case slug, or None if the case has no
+    # survey mapping. Read-only, server-derived - shown on the Pre-Survey.
+    case_number: int | None = None
+    # The authenticated student's NUID, resolved server-side for READ-ONLY
+    # display/confirmation on the Pre-Survey. The client never submits this back;
+    # the Pre/Post request bodies reject any identity field (extra="forbid").
+    nuid: str = ""
     nuid_on_file: bool
     # Case-level lifecycle: "not_started" (no receipt yet) | "in_progress" |
     # "completed". This is the field the frontend keys its gating decision on.

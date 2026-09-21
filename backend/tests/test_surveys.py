@@ -7,9 +7,14 @@ double-click, or a concurrent request can never create a second package, and a
 completed package can never be reopened.
 
 Also covers (retained from the original phase-level suite): mandatory NUID at
-registration, exact REDCap field mapping, record_id == NUID (never PII), Likert
-validation + unknown-field rejection, REDCap failure/retry, ownership isolation,
-and the token never appearing in responses.
+registration, exact REDCap field mapping, Likert validation + unknown-field
+rejection, REDCap failure/retry, ownership isolation, and the token never
+appearing in responses.
+
+Identity redesign: the REDCap primary ``record_id`` is a generated UUID (NOT the
+NUID), the NUID is sent in the separate ``nuid`` field, and the case number in
+``case_id`` (camden=1, carly=2, sofia=3, jayden=4). All three are resolved
+server-side; the client can never spoof them.
 
 REDCap network I/O is intercepted at the redcap_client boundary so no real
 REDCap call is ever made.
@@ -25,6 +30,26 @@ CAMDEN = "camden"
 SOFIA = "sofia"
 JAYDEN = "jayden"
 ALL_CASES = [CARLY, CAMDEN, SOFIA, JAYDEN]
+
+# REDCap-only case numbering (independent of the internal case_number in the JSON,
+# which is 5/6/7/8). Sent to REDCap as the string `case_id` field.
+CASE_NUMBER = {CAMDEN: "1", CARLY: "2", SOFIA: "3", JAYDEN: "4"}
+
+# The seeded default student's NUID (see conftest.seed_default_student).
+DEFAULT_NUID = "D1"
+
+
+def _is_uuid_hex(value) -> bool:
+    """True if value looks like a uuid4().hex (32 lowercase hex chars)."""
+    import uuid
+
+    if not isinstance(value, str) or len(value) != 32:
+        return False
+    try:
+        uuid.UUID(hex=value)
+    except ValueError:
+        return False
+    return True
 
 PRE_ANSWERS = {
     "pre_conf_begin": 4,
@@ -143,10 +168,17 @@ def test_pre_survey_maps_all_fields_record_id_and_case_event(student_api, captur
 
     assert len(captured) == 1
     fields = captured[0]
-    assert fields["record_id"] == "D1"  # seeded default student's NUID, server-resolved
-    # Exactly: record_id + per-case event routing + the 5 pre vars + completion.
+    # record_id is a generated UUID, NOT the NUID (identity redesign).
+    assert _is_uuid_hex(fields["record_id"])
+    assert fields["record_id"] != DEFAULT_NUID
+    # NUID + case number are sent in their OWN fields, server-resolved.
+    assert fields["nuid"] == DEFAULT_NUID
+    assert fields["case_id"] == CASE_NUMBER[CAMDEN]  # camden -> "1"
+    # Exactly: record_id + nuid + case_id + per-case event routing + the 5 pre
+    # vars + completion.
     assert set(fields) == set(PRE_ANSWERS) | {
-        "record_id", "redcap_event_name", "pre_experience_survey_complete"
+        "record_id", "nuid", "case_id", "redcap_event_name",
+        "pre_experience_survey_complete",
     }
     # Per-case instance routing keeps Camden separate from the other cases.
     assert fields["redcap_event_name"] == "camden_arm_1"
@@ -171,9 +203,13 @@ def test_post_survey_maps_all_fields(student_api, captured):
     r = student_api.post(f"/api/interviews/{sid}/surveys/post", json=POST_ANSWERS)
     assert r.status_code == 200, r.text
     fields = captured[1]  # captured[0] = Pre, captured[1] = Post
-    assert fields["record_id"] == "D1"
+    assert _is_uuid_hex(fields["record_id"])
+    assert fields["record_id"] != DEFAULT_NUID
+    assert fields["nuid"] == DEFAULT_NUID
+    assert fields["case_id"] == CASE_NUMBER[CARLY]  # carly -> "2"
     assert set(fields) == set(POST_ANSWERS) | {
-        "record_id", "redcap_event_name", "post_experience_survey_complete"
+        "record_id", "nuid", "case_id", "redcap_event_name",
+        "post_experience_survey_complete",
     }
     assert fields["redcap_event_name"] == "carly_arm_1"
     assert fields["post_experience_survey_complete"] == 2
@@ -201,11 +237,20 @@ def test_missing_likert_field_rejected(student_api, captured):
 # --------------------------------------------------------------------------
 # 14. Spoofed frontend NUID or case cannot bypass the rule
 # --------------------------------------------------------------------------
-def test_spoofed_record_id_or_extra_field_rejected(student_api, captured):
-    """The client cannot supply record_id (NUID) or any non-REDCap field - the
-    NUID is resolved server-side from the session's owner."""
+@pytest.mark.parametrize(
+    "spoof",
+    [
+        {"record_id": "hacker"},        # cannot supply the primary record_id
+        {"nuid": "99999999"},           # cannot supply someone else's NUID
+        {"case_id": "4"},               # cannot override the case number
+        {"not_a_field": 1},             # cannot smuggle any unknown field
+    ],
+)
+def test_spoofed_identity_or_extra_field_rejected(student_api, captured, spoof):
+    """The client cannot supply record_id, nuid, case_id, or any non-REDCap
+    field - all identity is resolved server-side (extra='forbid')."""
     sid = _new_session(student_api)
-    payload = {**PRE_ANSWERS, "record_id": "hacker", "not_a_field": 1}
+    payload = {**PRE_ANSWERS, **spoof}
     assert student_api.post(f"/api/interviews/{sid}/surveys/pre", json=payload).status_code == 422
     assert captured == []
 
@@ -216,6 +261,84 @@ def test_case_is_resolved_from_session_not_client(student_api, captured):
     sid = _new_session(student_api, SOFIA)
     student_api.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS)
     assert captured[0]["redcap_event_name"] == "sofia_arm_1"
+
+
+# ==========================================================================
+# Identity redesign: generated UUID record_id + separate nuid + case_id
+# ==========================================================================
+@pytest.mark.parametrize("case", ALL_CASES)
+def test_case_id_mapping_camden1_carly2_sofia3_jayden4(student_api, captured, case):
+    """Each case slug maps to its REDCap case number, server-derived."""
+    sid = _new_session(student_api, case)
+    student_api.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS)
+    assert captured[-1]["case_id"] == CASE_NUMBER[case]
+
+
+def test_record_id_is_uuid_and_not_nuid_and_persisted(student_api, captured, engine):
+    """record_id is a generated UUID, differs from the NUID, and is exactly the
+    value persisted on the receipt (single source of truth, not per-request)."""
+    sid = _new_session(student_api, CARLY)
+    student_api.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS)
+    record_id = captured[0]["record_id"]
+    assert _is_uuid_hex(record_id)
+    assert record_id != DEFAULT_NUID
+    assert _receipts(engine, CARLY)[0].redcap_record_id == record_id
+
+
+def test_pre_and_post_share_the_same_record_id(student_api, captured):
+    """Pre and Post for one package write to the SAME generated record_id."""
+    sid = _new_session(student_api, CARLY)
+    student_api.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS)
+    student_api.post(f"/api/interviews/{sid}/surveys/post", json=POST_ANSWERS)
+    assert captured[0]["record_id"] == captured[1]["record_id"]
+    # ...and both carry the same nuid + case_id identity fields.
+    assert captured[0]["nuid"] == captured[1]["nuid"] == DEFAULT_NUID
+    assert captured[0]["case_id"] == captured[1]["case_id"] == CASE_NUMBER[CARLY]
+
+
+def test_retry_after_failure_reuses_same_record_id(engine, fake_client, monkeypatch):
+    """A REDCap failure then retry reuses the SAME persisted record_id - a new
+    UUID is never minted after a failure."""
+    from app.services.redcap_client import RedcapError
+
+    state = {"fail": True}
+    seen: list[str] = []
+
+    def _import(fields):
+        seen.append(fields["record_id"])
+        if state["fail"]:
+            raise RedcapError("boom")
+
+    monkeypatch.setattr("app.services.redcap_client.is_configured", lambda: True)
+    monkeypatch.setattr("app.services.redcap_client.import_record", _import)
+
+    with make_client(engine, fake_client, authenticate=True) as c:
+        sid = _new_session(c, CARLY)
+        assert c.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS).status_code == 502
+        state["fail"] = False
+        assert c.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS).status_code == 200
+    assert len(seen) == 2 and seen[0] == seen[1]  # same record_id on the retry
+    assert _receipts(engine, CARLY)[0].redcap_record_id == seen[0]
+
+
+def test_different_cases_get_different_record_ids(student_api, captured):
+    """Same student, different case -> a distinct package with its own UUID."""
+    sid_carly = _new_session(student_api, CARLY)
+    student_api.post(f"/api/interviews/{sid_carly}/surveys/pre", json=PRE_ANSWERS)
+    sid_camden = _new_session(student_api, CAMDEN)
+    student_api.post(f"/api/interviews/{sid_camden}/surveys/pre", json=PRE_ANSWERS)
+    assert captured[0]["record_id"] != captured[1]["record_id"]
+
+
+def test_status_returns_readonly_nuid_and_case_display(student_api, captured):
+    """Survey status exposes server-resolved NUID + case number/name for the
+    read-only Pre-Survey identity block."""
+    sid = _new_session(student_api, SOFIA)
+    status = student_api.get(f"/api/interviews/{sid}/surveys/status").json()
+    assert status["nuid"] == DEFAULT_NUID
+    assert status["caseNumber"] == int(CASE_NUMBER[SOFIA])  # sofia -> 3
+    assert status["caseName"] == "Sofia"
+    assert status["nuidOnFile"] is True
 
 
 # ==========================================================================

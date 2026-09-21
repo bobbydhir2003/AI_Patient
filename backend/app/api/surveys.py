@@ -5,9 +5,10 @@ All routes are session-scoped and go through ``require_session_access`` so:
 - a student may only reach a session owned by their own linked profile (an
   unowned/nonexistent session id gets the same 404 - no existence leak).
 
-The REDCap ``record_id`` (the student's NUID) is resolved server-side from the
-session's owner inside survey_service; the client never supplies it and it never
-appears in the URL. The REDCap token is never returned.
+The REDCap ``record_id`` (a generated UUID), the ``nuid`` and the ``case_id``
+are all resolved server-side inside survey_service from the session's owner and
+case; the client only ever supplies survey answers. The REDCap token is never
+returned.
 """
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session

@@ -178,9 +178,10 @@ class AssessmentNotPossibleError(AppError):
 
 
 class NuidMissingError(AppError):
-    """The session's student has no NUID (student_number) on file, so there is no
-    REDCap record_id to submit the survey under. We never substitute a session
-    UUID or send an empty record_id - the student must add their NUID first."""
+    """The session's student has no NUID (student_number) on file. NUID is
+    required research identity and is sent to REDCap in the separate `nuid`
+    field (the primary record_id is a generated UUID, not the NUID). We never
+    send a blank nuid - the student must add their NUID first."""
 
     status_code = 409
     code = "nuid_missing"
@@ -190,6 +191,20 @@ class NuidMissingError(AppError):
             "Your student number (NUID) is missing from your profile. Add it to your "
             "profile before submitting the survey."
         )
+
+
+class RedcapCaseUnsupportedError(AppError):
+    """The session's case has no REDCap case_id mapping (see
+    constants.REDCAP_CASE_ID), so a survey for it cannot be filed under a known
+    case number. We fail loudly rather than silently send a wrong/blank case_id.
+    Server-side integrity condition (the case is derived from the session, never
+    the client), so this should only occur for a case with no survey mapping."""
+
+    status_code = 409
+    code = "survey_case_unsupported"
+
+    def __init__(self, case_id: str) -> None:
+        super().__init__(f"No survey is configured for this case ({case_id}).")
 
 
 class SurveyPreRequiredError(AppError):

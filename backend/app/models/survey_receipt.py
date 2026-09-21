@@ -50,8 +50,10 @@ class SurveyReceipt(Base):
     This table exists for LINKAGE, LIFECYCLE and RELIABILITY only. It stores NO
     survey answers (no Likert values, no open-ended text, no response JSON) -
     every actual response lives in REDCap. It records only: which REDCap
-    ``record_id`` (the student's NUID) the package is filed under, whether each
-    stage has reached REDCap, and whether the whole package is completed.
+    ``record_id`` (a generated UUID, created once at row creation) the package is
+    filed under, whether each stage has reached REDCap, and whether the whole
+    package is completed. The student's NUID is NOT the record_id - it is sent to
+    REDCap separately in the ``nuid`` field.
 
     Lifecycle (overall_status):
         NEW (no row) -> create row, overall_status = IN_PROGRESS
@@ -79,8 +81,10 @@ class SurveyReceipt(Base):
     latest_session_id: Mapped[str | None] = mapped_column(
         String(32), ForeignKey("interview_sessions.id"), nullable=True
     )
-    # REDCap record_id used for this package = the student's NUID
-    # (Student.student_number), resolved server-side. Never PII (no name/email).
+    # REDCap primary record_id for this package: a generated random UUID
+    # (uuid4().hex), created ONCE when this row is first inserted and reused for
+    # Pre, Post, retries and any later session for this (student, case). NOT the
+    # NUID/email/session id (the NUID is a separate REDCap field). Never PII.
     redcap_record_id: Mapped[str] = mapped_column(String(100), nullable=False)
 
     pre_sync_status: Mapped[str] = mapped_column(

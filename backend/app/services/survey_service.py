@@ -10,8 +10,13 @@ Responsibilities:
 - Resolve BOTH the student and the case SERVER-SIDE from the authenticated,
   ownership-checked session (require_session_access). The frontend never
   supplies the NUID, student identity, or case identity - it only sends answers.
-- Resolve the REDCap ``record_id`` = the student's NUID (Student.student_number).
-  Refuse (NuidMissingError) rather than send an empty/substitute record_id.
+- The REDCap primary ``record_id`` is a generated random UUID (uuid4().hex),
+  created ONCE per (student, case) package and reused for Pre, Post, retries and
+  any later session for the same case. It is NOT the NUID/email/session id.
+- The student's NUID (Student.student_number) is sent SEPARATELY in the ``nuid``
+  field, and the case number in the ``case_id`` field (see constants.REDCAP_CASE_ID),
+  both resolved server-side. NUID stays required research identity: refuse
+  (NuidMissingError) rather than send a blank nuid.
 - Enforce the case-level lifecycle: create the ONE receipt on first Pre (or
   Post), advance it Pre -> IN_PROGRESS, Post -> COMPLETED, and reject any further
   submission once COMPLETED (SurveyAlreadyCompletedError -> 409).
@@ -23,6 +28,7 @@ Responsibilities:
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -30,8 +36,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.constants import REDCAP_CASE_ID
 from app.core.exceptions import (
     NuidMissingError,
+    RedcapCaseUnsupportedError,
     SurveyAlreadyCompletedError,
     SurveyPreRequiredError,
     SurveySyncError,
@@ -72,12 +80,36 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _resolve_record_id(session: InterviewSession) -> str:
-    """NUID for this encounter's student, resolved server-side. Raises if blank."""
+def _new_record_id() -> str:
+    """A fresh, collision-resistant REDCap primary record_id. Generated ONCE per
+    (student, case) package (in _get_or_create_receipt) and then reused; matches
+    the codebase UUID convention (uuid4().hex, 32 chars)."""
+    return uuid.uuid4().hex
+
+
+def _resolve_nuid(session: InterviewSession) -> str:
+    """NUID for this encounter's student, resolved server-side. Sent to REDCap in
+    the separate ``nuid`` field (never the primary record_id). Raises if blank."""
     nuid = (getattr(session.student, "student_number", "") or "").strip()
     if not nuid:
         raise NuidMissingError()
     return nuid
+
+
+def _redcap_case_number(case_id: str) -> int | None:
+    """The REDCap ``case_id`` number for this case slug, or None if the case has
+    no survey mapping. Soft lookup for status/display (never raises)."""
+    return REDCAP_CASE_ID.get(case_id)
+
+
+def _resolve_case_id(case_id: str) -> int:
+    """The REDCap ``case_id`` number for a submission, resolved server-side from
+    the session's case. Fails loudly for an unmapped case rather than sending a
+    wrong/blank value."""
+    number = _redcap_case_number(case_id)
+    if number is None:
+        raise RedcapCaseUnsupportedError(case_id)
+    return number
 
 
 def _case_name(case_id: str) -> str:
@@ -99,16 +131,22 @@ def _get_receipt(db: Session, student_id: str, case_id: str) -> SurveyReceipt | 
 
 
 def _get_or_create_receipt(
-    db: Session, session: InterviewSession, record_id: str
+    db: Session, session: InterviewSession
 ) -> SurveyReceipt:
     """Return the ONE (student, case) receipt, creating it if absent.
+
+    On creation, a fresh random REDCap ``record_id`` (uuid4().hex) is generated
+    exactly ONCE and persisted; every later Pre/Post/retry/session for this
+    (student, case) reuses that stored id (this method returns the existing row
+    unchanged when it is already present, so the id is never regenerated).
 
     Concurrency-safe: the create is attempted inside a SAVEPOINT so that if a
     concurrent request (or a double-click) already inserted the row, the
     UNIQUE(student_id, case_id) violation rolls back only the savepoint (never
     the outer transaction) and we re-read the winner. This is what makes a
     second interview session, a double-click, and two concurrent requests all
-    converge on the SAME receipt instead of creating duplicates.
+    converge on the SAME receipt (and the SAME record_id) instead of creating
+    duplicates.
     """
     receipt = _get_receipt(db, session.student_id, session.case_id)
     if receipt is not None:
@@ -120,7 +158,7 @@ def _get_or_create_receipt(
         student_id=session.student_id,
         case_id=session.case_id,
         latest_session_id=session.id,
-        redcap_record_id=record_id,
+        redcap_record_id=_new_record_id(),
         pre_sync_status=SURVEY_SYNC_PENDING,
         post_sync_status=SURVEY_SYNC_PENDING,
         overall_status=SURVEY_OVERALL_IN_PROGRESS,
@@ -140,11 +178,14 @@ def _get_or_create_receipt(
 
 def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut:
     nuid = (getattr(session.student, "student_number", "") or "").strip()
+    case_number = _redcap_case_number(session.case_id)
     receipt = _get_receipt(db, session.student_id, session.case_id)
     if receipt is None:
         return SurveyStatusOut(
             session_id=session.id,
             case_name=_case_name(session.case_id),
+            case_number=case_number,
+            nuid=nuid,
             nuid_on_file=bool(nuid),
             overall_status=SURVEY_OVERALL_NOT_STARTED,
             pre_submitted=False,
@@ -153,6 +194,8 @@ def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut
     return SurveyStatusOut(
         session_id=session.id,
         case_name=_case_name(session.case_id),
+        case_number=case_number,
+        nuid=nuid,
         nuid_on_file=bool(nuid),
         overall_status=receipt.overall_status,
         pre_submitted=receipt.pre_sync_status in SURVEY_SYNC_DONE,
@@ -163,9 +206,9 @@ def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut
 
 
 def _case_instance_fields(case_id: str) -> dict[str, object]:
-    """REDCap routing fields that keep each case in its OWN instance so the 4
-    cases (which reuse the same variable names on the same record_id=NUID) never
-    overwrite one another - see docs/REDCAP.md.
+    """REDCap routing fields that keep each case in its OWN per-case event -
+    see docs/REDCAP.md. This longitudinal behavior is preserved as-is; Pre and
+    Post for a case still share the same record_id + event (disjoint fields).
 
     Longitudinal design (required for multi-case): one event per case; Pre and
     Post both write into that SAME per-case event, so they share one case-level
@@ -181,13 +224,25 @@ def _case_instance_fields(case_id: str) -> dict[str, object]:
 
 
 def _build_fields(
-    record_id: str, case_id: str, phase: str, answers: dict[str, object]
+    record_id: str,
+    nuid: str,
+    case_number: int,
+    case_slug: str,
+    phase: str,
+    answers: dict[str, object],
 ) -> dict[str, object]:
-    """Assemble the exact REDCap field payload: record_id + per-case instance
-    routing + answers + the instrument completion flag (2 = Complete)."""
+    """Assemble the exact REDCap field payload: the generated ``record_id`` +
+    separate ``nuid`` and ``case_id`` identity fields + per-case instance routing
+    + answers + the instrument completion flag (2 = Complete). ``record_id``,
+    ``nuid`` and ``case_id`` are all resolved server-side; the client only
+    supplies ``answers``."""
     instrument = _INSTRUMENT_BY_PHASE[phase]
-    fields: dict[str, object] = {"record_id": record_id}
-    fields.update(_case_instance_fields(case_id))
+    fields: dict[str, object] = {
+        "record_id": record_id,
+        "nuid": nuid,
+        "case_id": str(case_number),
+    }
+    fields.update(_case_instance_fields(case_slug))
     for key, value in answers.items():
         # Sanitise open-ended text; leave Likert integers as-is.
         fields[key] = value.strip() if isinstance(value, str) else value
@@ -238,7 +293,12 @@ def _submit(
     if existing is not None and existing.overall_status == SURVEY_OVERALL_COMPLETED:
         raise SurveyAlreadyCompletedError(_case_name(session.case_id))
 
-    record_id = _resolve_record_id(session)
+    # Identity fields, resolved server-side (never from the client). NUID stays
+    # required research identity; an unmapped case fails loudly. Both are checked
+    # before any receipt is created so a blank NUID / bad case has zero side
+    # effect (no phantom receipt, no REDCap call).
+    nuid = _resolve_nuid(session)
+    case_number = _resolve_case_id(session.case_id)
 
     # Resolve the ONE (student, case) receipt.
     #
@@ -254,7 +314,12 @@ def _submit(
             raise SurveyPreRequiredError()
         receipt.latest_session_id = session.id
     else:
-        receipt = _get_or_create_receipt(db, session, record_id)
+        receipt = _get_or_create_receipt(db, session)
+
+    # The generated REDCap primary record_id for this package, persisted on the
+    # receipt at creation. Reused verbatim for Pre, Post, retries and every later
+    # session for this (student, case) - never regenerated per submission.
+    record_id = receipt.redcap_record_id
 
     # Hard case-level gate: once the package is COMPLETED, NOTHING (not a new
     # session id, not a resubmit, not the other phase) may reopen it.
@@ -274,7 +339,7 @@ def _submit(
             already_submitted=True,
         )
 
-    fields = _build_fields(record_id, session.case_id, phase, answers)
+    fields = _build_fields(record_id, nuid, case_number, session.case_id, phase, answers)
 
     if not redcap_client.is_configured():
         _mark_stage(receipt, phase, SURVEY_SYNC_SKIPPED)
