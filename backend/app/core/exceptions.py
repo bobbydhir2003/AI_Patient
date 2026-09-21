@@ -235,6 +235,21 @@ class SurveyAlreadyCompletedError(AppError):
         super().__init__(f"You have already completed the survey for {case_name}.")
 
 
+class SurveyOwnedByOtherCaseError(AppError):
+    """The student's ONE global survey package is already owned by a DIFFERENT
+    case, so this case must never collect its own Pre/Post. The survey is global
+    per student (not per case): the first case whose Pre successfully reaches
+    REDCap becomes the permanent survey owner, and every other case is gated to
+    the "already submitted / skip" state. This is the backend backstop for the
+    frontend gate (a race between two cases), so two owners can never exist."""
+
+    status_code = 409
+    code = "survey_owned_by_other_case"
+
+    def __init__(self) -> None:
+        super().__init__("You have already submitted the survey. Thank you for your feedback.")
+
+
 class SurveySyncError(AppError):
     """REDCap was configured but the survey import failed (network/timeout/HTTP).
     The student's answers are preserved client-side so they can retry; the local

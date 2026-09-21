@@ -31,6 +31,21 @@ class Student(Base):
     # student who is later promoted to admin keeps is_practice=False (their prior
     # sessions remain real); only their newly created admin sessions are flagged.
     is_practice: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    # Global survey ownership (one survey PACKAGE per student, not per case).
+    # The single case that successfully established this student's survey package
+    # (its Pre stage reached REDCap or was skipped). NULL until a first Pre
+    # succeeds; every other case is then gated to "already submitted / skip".
+    # This is a denormalized pointer over survey_receipts (the authoritative
+    # lifecycle record): it gives O(1) gating and a stable row to lock
+    # (SELECT ... FOR UPDATE) when serialising the ownership claim. Kept as a case
+    # slug (e.g. "carly"), matching InterviewSession.case_id.
+    survey_owner_case_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Set once when the owning case's Post stage completes the package. When
+    # non-NULL the global survey state is COMPLETED; when NULL but an owner exists
+    # it is IN_PROGRESS.
+    survey_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
 
     sessions = relationship("InterviewSession", back_populates="student")

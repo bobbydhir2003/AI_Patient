@@ -86,6 +86,18 @@ class SurveyStatusOut(CamelModel):
     post_submitted: bool
     pre_sync_status: str | None = None
     post_sync_status: str | None = None
+    # ---- Global (one survey PACKAGE per student) fields ----
+    # The student's global survey lifecycle, independent of this case's own
+    # receipt: "not_started" | "in_progress" | "completed". The frontend gates
+    # EVERY survey screen on this so a non-owning case shows the skip state.
+    global_survey_status: str = "not_started"
+    # The single case that owns the student's survey package (slug), or None.
+    survey_owner_case_id: str | None = None
+    # True when this session's case IS the owning case (collect its Pre/Post per
+    # the receipt's own stage state); False -> this case must skip.
+    is_survey_owner_case: bool = False
+    # Convenience flag: the whole global package is completed.
+    global_survey_completed: bool = False
 
 
 class SurveySubmitResult(CamelModel):

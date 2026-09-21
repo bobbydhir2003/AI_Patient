@@ -53,7 +53,94 @@ def test_survey_revision_is_an_independent_branch_from_0018():
 
     assert survey.down_revision == "0018"
     assert set(merge.down_revision) == {"0019", "0020"}
-    assert scripts.get_heads() == ["0021"]
+
+
+def test_ownership_branch_0022_from_0020_and_single_head():
+    scripts = ScriptDirectory.from_config(_alembic_config("sqlite://"))
+    ownership = scripts.get_revision("0022")
+    merge = scripts.get_revision("0023")
+    assert ownership.down_revision == "0020"
+    assert set(merge.down_revision) == {"0021", "0022"}
+    # Head is single again after the merge so `alembic upgrade head` is unambiguous.
+    assert scripts.get_heads() == ["0023"]
+
+
+def _insert_receipt(connection, **kw):
+    connection.execute(
+        text(
+            "INSERT INTO survey_receipts (id, student_id, case_id, redcap_record_id, "
+            "pre_sync_status, pre_synced_at, post_sync_status, post_synced_at, "
+            "overall_status, created_at, updated_at) VALUES (:id, :student_id, :case_id, "
+            ":rec, :pre, :pre_at, :post, :post_at, :overall, :created, :updated)"
+        ),
+        kw,
+    )
+
+
+def test_0022_backfill_chooses_deterministic_owner_without_deleting(tmp_path, monkeypatch):
+    """Historical multi-receipt students get ONE deterministic owner and keep
+    every receipt: completed beats in-progress (N); a successful Pre beats a
+    failed-only attempt (O); failed-only stays NOT_STARTED."""
+    database_url = f"sqlite:///{tmp_path / 'ownership-backfill.db'}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    get_settings.cache_clear()
+    config = _alembic_config(database_url)
+    _prepare_verified_0018_database(database_url)
+
+    command.stamp(config, "0018")
+    command.upgrade(config, "0020")  # creates survey_receipts
+
+    engine = create_engine(database_url)
+    try:
+        with engine.begin() as c:
+            for sid in ("stu_completed", "stu_pre", "stu_failed"):
+                c.execute(text("INSERT INTO students (id) VALUES (:id)"), {"id": sid})
+
+            # N: two COMPLETED receipts -> earliest by post_synced_at wins (carly).
+            _insert_receipt(c, id="r1", student_id="stu_completed", case_id="sofia",
+                            rec="rec-sofia", pre="synced", pre_at="2026-01-02T00:00:00",
+                            post="synced", post_at="2026-01-05T00:00:00", overall="completed",
+                            created="2026-01-02T00:00:00", updated="2026-01-05T00:00:00")
+            _insert_receipt(c, id="r2", student_id="stu_completed", case_id="carly",
+                            rec="rec-carly", pre="synced", pre_at="2026-01-01T00:00:00",
+                            post="synced", post_at="2026-01-03T00:00:00", overall="completed",
+                            created="2026-01-01T00:00:00", updated="2026-01-03T00:00:00")
+
+            # O: a failed-only Pre (camden) + a successful Pre (jayden) -> jayden owns.
+            _insert_receipt(c, id="r3", student_id="stu_pre", case_id="camden",
+                            rec="rec-camden", pre="failed", pre_at=None,
+                            post="pending", post_at=None, overall="in_progress",
+                            created="2026-02-01T00:00:00", updated="2026-02-01T00:00:00")
+            _insert_receipt(c, id="r4", student_id="stu_pre", case_id="jayden",
+                            rec="rec-jayden", pre="synced", pre_at="2026-02-02T00:00:00",
+                            post="pending", post_at=None, overall="in_progress",
+                            created="2026-02-02T00:00:00", updated="2026-02-02T00:00:00")
+
+            # failed-only -> no owner.
+            _insert_receipt(c, id="r5", student_id="stu_failed", case_id="carly",
+                            rec="rec-fail", pre="failed", pre_at=None,
+                            post="pending", post_at=None, overall="in_progress",
+                            created="2026-03-01T00:00:00", updated="2026-03-01T00:00:00")
+
+        command.upgrade(config, "0022")
+
+        with engine.connect() as c:
+            owners = dict(
+                c.execute(text("SELECT id, survey_owner_case_id FROM students")).fetchall()
+            )
+            completed = dict(
+                c.execute(text("SELECT id, survey_completed_at FROM students")).fetchall()
+            )
+            assert owners["stu_completed"] == "carly"   # N: earliest completed
+            assert completed["stu_completed"] is not None
+            assert owners["stu_pre"] == "jayden"         # O: successful Pre, not failed camden
+            assert completed["stu_pre"] is None
+            assert owners["stu_failed"] is None          # failed-only -> not started
+            # Non-destructive: every historical receipt is preserved.
+            assert c.execute(text("SELECT COUNT(*) FROM survey_receipts")).scalar_one() == 5
+    finally:
+        engine.dispose()
+        get_settings.cache_clear()
 
 
 def test_targeted_0020_upgrade_and_downgrade_touch_only_survey_schema(

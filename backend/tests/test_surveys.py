@@ -321,13 +321,18 @@ def test_retry_after_failure_reuses_same_record_id(engine, fake_client, monkeypa
     assert _receipts(engine, CARLY)[0].redcap_record_id == seen[0]
 
 
-def test_different_cases_get_different_record_ids(student_api, captured):
-    """Same student, different case -> a distinct package with its own UUID."""
+def test_global_second_case_pre_is_rejected(student_api, captured, engine):
+    """GLOBAL rule: one survey PACKAGE per student. Once Carly's Pre establishes
+    the package, a DIFFERENT case's Pre is rejected (owned elsewhere) and never
+    reaches REDCap - there is only ever one package/record."""
     sid_carly = _new_session(student_api, CARLY)
-    student_api.post(f"/api/interviews/{sid_carly}/surveys/pre", json=PRE_ANSWERS)
+    assert student_api.post(f"/api/interviews/{sid_carly}/surveys/pre", json=PRE_ANSWERS).status_code == 200
     sid_camden = _new_session(student_api, CAMDEN)
-    student_api.post(f"/api/interviews/{sid_camden}/surveys/pre", json=PRE_ANSWERS)
-    assert captured[0]["record_id"] != captured[1]["record_id"]
+    r = student_api.post(f"/api/interviews/{sid_camden}/surveys/pre", json=PRE_ANSWERS)
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "survey_owned_by_other_case"
+    assert len(captured) == 1  # only Carly reached REDCap
+    assert {rec.case_id for rec in _receipts(engine)} == {CARLY}
 
 
 def test_status_returns_readonly_nuid_and_case_display(student_api, captured):
@@ -573,33 +578,46 @@ def test_completed_repeat_access_is_immutable_and_never_calls_redcap(
     assert unchanged.updated_at == original["updated_at"]
 
 
-# 8. Camden is still allowed after Carly is completed.
-def test_other_case_allowed_after_one_completed(student_api, captured, engine):
+# 8. GLOBAL rule: after Carly is completed, no OTHER case may collect a survey.
+def test_other_case_skipped_after_global_completed(student_api, captured, engine):
     sid = _new_session(student_api, CARLY)
     student_api.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS)
     student_api.post(f"/api/interviews/{sid}/surveys/post", json=POST_ANSWERS)
 
     camden = _new_session(student_api, CAMDEN)
+    # Status tells the frontend to SKIP (non-owner + global completed).
+    status = student_api.get(f"/api/interviews/{camden}/surveys/status").json()
+    assert status["globalSurveyStatus"] == "completed"
+    assert status["isSurveyOwnerCase"] is False
+    assert status["surveyOwnerCaseId"] == CARLY
+    # Backstop: a Pre submission for the non-owner case is rejected, no REDCap.
     r = student_api.post(f"/api/interviews/{camden}/surveys/pre", json=PRE_ANSWERS)
-    assert r.status_code == 200, r.text
-    assert r.json()["overallStatus"] == "in_progress"
-    assert {rec.case_id for rec in _receipts(engine)} == {CARLY, CAMDEN}
+    assert r.status_code == 409
+    assert r.json()["error"]["code"] == "survey_owned_by_other_case"
+    assert {rec.case_id for rec in _receipts(engine)} == {CARLY}
+    assert len(captured) == 2  # only Carly's Pre + Post
 
 
-# 9. All 4 cases can each have one independent survey package.
-def test_all_four_cases_independent(student_api, captured, engine):
-    for case in ALL_CASES:
+# 9. GLOBAL rule: only the FIRST case establishes a package; the rest skip.
+def test_only_first_case_establishes_global_package(student_api, captured, engine):
+    first = ALL_CASES[0]
+    sid = _new_session(student_api, first)
+    assert student_api.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS).status_code == 200
+    assert student_api.post(f"/api/interviews/{sid}/surveys/post", json=POST_ANSWERS).status_code == 200
+
+    for case in ALL_CASES[1:]:
         sid = _new_session(student_api, case)
-        student_api.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS)
-        student_api.post(f"/api/interviews/{sid}/surveys/post", json=POST_ANSWERS)
+        assert student_api.post(
+            f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS
+        ).status_code == 409
 
     receipts = _receipts(engine)
-    assert len(receipts) == 4
-    assert {r.case_id for r in receipts} == set(ALL_CASES)
-    assert all(r.overall_status == "completed" for r in receipts)
-    # Each case wrote to its OWN event: no shared event name across cases.
+    assert len(receipts) == 1  # only the owning case has a package
+    assert receipts[0].case_id == first
+    assert receipts[0].overall_status == "completed"
+    # Only the owning case ever wrote to REDCap (Pre + Post).
     events = {c["redcap_event_name"] for c in captured}
-    assert events == {f"{case}_arm_1" for case in ALL_CASES}
+    assert events == {f"{first}_arm_1"}
 
 
 # 10. Pre REDCap failure does not mark Pre synced (502, retryable).

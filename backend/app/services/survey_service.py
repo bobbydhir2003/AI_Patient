@@ -1,10 +1,24 @@
-"""Case-level Pre/Post experience survey service.
+"""Global Pre/Post experience survey service.
 
-Business rule (see the surveys feature spec): a student may complete ONE survey
-package per patient case. Pre and Post are the two STAGES of that single
-package, keyed by ``UNIQUE(student_id, case_id)`` - NOT per-session, NOT
-per-phase. A brand-new interview session for the same case resolves to the SAME
-receipt and can never open a second one.
+Business rule (updated): a student completes ONE survey package GLOBALLY, not one
+per case. The FIRST case whose Pre stage successfully reaches REDCap (or is
+skipped when REDCap is unconfigured) becomes that student's permanent SURVEY
+OWNER CASE (``Student.survey_owner_case_id``). Pre and Post are the two STAGES of
+that single owning package. Every OTHER case is gated to "already submitted /
+skip" and can never establish a second package.
+
+Global survey state per student:
+  - NOT_STARTED : ``survey_owner_case_id`` is NULL (no Pre has succeeded yet).
+  - IN_PROGRESS : an owner exists but ``survey_completed_at`` is NULL (Pre done,
+                  Post pending for the owning case).
+  - COMPLETED   : the owning case's Post completed (``survey_completed_at`` set).
+
+The per-(student, case) ``survey_receipts`` row (UNIQUE(student_id, case_id))
+remains the authoritative lifecycle/linkage record; the ``Student`` columns are a
+denormalized owner pointer used for O(1) gating and as the row locked
+(SELECT ... FOR UPDATE) to serialise the ownership claim so two cases can never
+both win. Ownership is claimed BEFORE the REDCap call and RELEASED again if that
+first Pre fails, so a failed attempt never permanently locks the student.
 
 Responsibilities:
 - Resolve BOTH the student and the case SERVER-SIDE from the authenticated,
@@ -41,11 +55,12 @@ from app.core.exceptions import (
     NuidMissingError,
     RedcapCaseUnsupportedError,
     SurveyAlreadyCompletedError,
+    SurveyOwnedByOtherCaseError,
     SurveyPreRequiredError,
     SurveySyncError,
 )
 from app.core.logging import get_logger
-from app.models import InterviewSession, SurveyReceipt
+from app.models import InterviewSession, Student, SurveyReceipt
 from app.models.survey_receipt import (
     SURVEY_OVERALL_COMPLETED,
     SURVEY_OVERALL_IN_PROGRESS,
@@ -176,9 +191,95 @@ def _get_or_create_receipt(
     return receipt
 
 
+# ---------------------------------------------------------------------------
+# Global (one-package-per-student) ownership.
+# ---------------------------------------------------------------------------
+def _global_survey_status(student: Student) -> str:
+    """The student's global survey lifecycle, derived from the denormalized owner
+    pointer: NOT_STARTED (no owner) / COMPLETED (owner + completed_at) /
+    IN_PROGRESS (owner, not yet completed)."""
+    if student.survey_owner_case_id is None:
+        return SURVEY_OVERALL_NOT_STARTED
+    if student.survey_completed_at is not None:
+        return SURVEY_OVERALL_COMPLETED
+    return SURVEY_OVERALL_IN_PROGRESS
+
+
+def _claim_ownership(db: Session, session: InterviewSession) -> str:
+    """Atomically claim the student's single global survey-owner slot for this
+    session's case, BEFORE any REDCap call.
+
+    Serialised by a row lock on the Student row (SELECT ... FOR UPDATE): two
+    concurrent first-Pre submissions for different cases can never both win - one
+    sets the owner, the other observes it and is rejected. Returns:
+      - "owner"           : this case owns the package now (receipt ensured).
+      - "owned_elsewhere" : a different case already owns it -> caller rejects.
+
+    Commits so the lock is released (and the claim persisted) BEFORE the network
+    REDCap import - we never hold a DB transaction open across external I/O.
+    """
+    student = db.execute(
+        select(Student).where(Student.id == session.student_id).with_for_update()
+    ).scalar_one()
+    owner = student.survey_owner_case_id
+    if owner is not None and owner != session.case_id:
+        db.commit()  # release the lock; nothing changed
+        return "owned_elsewhere"
+    if owner is None:
+        student.survey_owner_case_id = session.case_id
+    # Ensure the (student, case) receipt exists within the same critical section.
+    _get_or_create_receipt(db, session)
+    db.commit()
+    return "owner"
+
+
+def _release_ownership_if_unestablished(db: Session, session: InterviewSession) -> None:
+    """Undo an ownership claim when this case's Pre FAILED to establish the
+    package, so a failed FIRST attempt never permanently locks the student to a
+    case (retry can then re-claim, same or different case).
+
+    Safe/conservative: releases ONLY if this case still holds the slot, the
+    package is not completed, and Pre never actually reached REDCap. If Pre did
+    succeed (established), ownership is kept."""
+    student = db.execute(
+        select(Student).where(Student.id == session.student_id).with_for_update()
+    ).scalar_one()
+    if (
+        student.survey_owner_case_id != session.case_id
+        or student.survey_completed_at is not None
+    ):
+        db.commit()
+        return
+    receipt = _get_receipt(db, session.student_id, session.case_id)
+    if receipt is not None and receipt.pre_sync_status in SURVEY_SYNC_DONE:
+        db.commit()  # Pre actually established the package; keep ownership
+        return
+    student.survey_owner_case_id = None
+    db.commit()
+
+
+def _finalize_completion(student: Student, receipt: SurveyReceipt) -> None:
+    """Mirror the owning package's completion onto the student-level pointer.
+    Only ever SETS the timestamp once (COMPLETED is terminal), so the global
+    state can never downgrade."""
+    if (
+        receipt.overall_status == SURVEY_OVERALL_COMPLETED
+        and student.survey_completed_at is None
+    ):
+        student.survey_completed_at = _now()
+
+
 def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut:
     nuid = (getattr(session.student, "student_number", "") or "").strip()
     case_number = _redcap_case_number(session.case_id)
+    # Global (one-package-per-student) fields, resolved server-side from the
+    # authenticated session's owner. The frontend gates every survey screen on
+    # these: a non-owning case shows the "already submitted / skip" state.
+    student = session.student
+    owner_case_id = student.survey_owner_case_id
+    global_status = _global_survey_status(student)
+    is_owner_case = owner_case_id is not None and owner_case_id == session.case_id
+    global_completed = global_status == SURVEY_OVERALL_COMPLETED
     receipt = _get_receipt(db, session.student_id, session.case_id)
     if receipt is None:
         return SurveyStatusOut(
@@ -190,6 +291,10 @@ def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut
             overall_status=SURVEY_OVERALL_NOT_STARTED,
             pre_submitted=False,
             post_submitted=False,
+            global_survey_status=global_status,
+            survey_owner_case_id=owner_case_id,
+            is_survey_owner_case=is_owner_case,
+            global_survey_completed=global_completed,
         )
     return SurveyStatusOut(
         session_id=session.id,
@@ -202,6 +307,10 @@ def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut
         post_submitted=receipt.post_sync_status in SURVEY_SYNC_DONE,
         pre_sync_status=receipt.pre_sync_status,
         post_sync_status=receipt.post_sync_status,
+        global_survey_status=global_status,
+        survey_owner_case_id=owner_case_id,
+        is_survey_owner_case=is_owner_case,
+        global_survey_completed=global_completed,
     )
 
 
@@ -286,45 +395,63 @@ def _submit(
     phase: str,
     answers: dict[str, object],
 ) -> SurveySubmitResult:
-    # A completed package is immutable. Check it before resolving the NUID or
-    # touching latest_session_id so even a stale/racing client cannot alter the
-    # authoritative receipt (and can never reach REDCap).
-    existing = _get_receipt(db, session.student_id, session.case_id)
+    student = session.student
+    case_id = session.case_id
+
+    # (0) GLOBAL non-owner gate: the student's single survey package already
+    # belongs to a DIFFERENT case, so this case never collects Pre or Post. This
+    # is the backend backstop for the frontend "already submitted / skip" gate;
+    # checked first so a non-owner submission has zero side effect (no receipt,
+    # no REDCap call). A completed owner also lands here for other cases.
+    if student.survey_owner_case_id is not None and student.survey_owner_case_id != case_id:
+        raise SurveyOwnedByOtherCaseError()
+
+    # (1) A completed package (for THIS owning case) is immutable. Checked before
+    # resolving the NUID / touching latest_session_id so even a stale/racing
+    # client cannot alter the authoritative receipt (and can never reach REDCap).
+    existing = _get_receipt(db, session.student_id, case_id)
     if existing is not None and existing.overall_status == SURVEY_OVERALL_COMPLETED:
-        raise SurveyAlreadyCompletedError(_case_name(session.case_id))
+        raise SurveyAlreadyCompletedError(_case_name(case_id))
 
     # Identity fields, resolved server-side (never from the client). NUID stays
     # required research identity; an unmapped case fails loudly. Both are checked
-    # before any receipt is created so a blank NUID / bad case has zero side
-    # effect (no phantom receipt, no REDCap call).
+    # before any receipt is created / ownership claimed so a blank NUID / bad case
+    # has zero side effect (no phantom receipt, no owner change, no REDCap call).
     nuid = _resolve_nuid(session)
-    case_number = _resolve_case_id(session.case_id)
+    case_number = _resolve_case_id(case_id)
 
-    # Resolve the ONE (student, case) receipt.
+    # Resolve the receipt + ownership.
     #
     # Ordering gate (Pre + Interview + Post = one package): Post can never reach
-    # REDCap, and can never complete the package, until Pre has SUCCESSFULLY
-    # completed (synced/skipped). For Post this is a PURE READ that must NOT
-    # create a receipt - so a Post-without-Pre is rejected with zero side effect
-    # (no phantom receipt, no REDCap call, no status change). Pre uses the
-    # create-or-get path (it legitimately starts the package).
+    # REDCap, nor complete the package, until Pre has SUCCESSFULLY established it
+    # for the OWNING case. For Post this is a PURE READ that must NOT create a
+    # receipt or change ownership. Pre atomically claims the single global owner
+    # slot BEFORE any REDCap call (serialised by a Student row lock), so two cases
+    # can never both establish a package.
     if phase == SURVEY_PHASE_POST:
-        receipt = _get_receipt(db, session.student_id, session.case_id)
-        if receipt is None or receipt.pre_sync_status not in SURVEY_SYNC_DONE:
+        receipt = _get_receipt(db, session.student_id, case_id)
+        if (
+            student.survey_owner_case_id != case_id
+            or receipt is None
+            or receipt.pre_sync_status not in SURVEY_SYNC_DONE
+        ):
             raise SurveyPreRequiredError()
         receipt.latest_session_id = session.id
     else:
-        receipt = _get_or_create_receipt(db, session)
+        claim = _claim_ownership(db, session)
+        if claim == "owned_elsewhere":
+            raise SurveyOwnedByOtherCaseError()
+        receipt = _get_receipt(db, session.student_id, case_id)
+        receipt.latest_session_id = session.id
 
     # The generated REDCap primary record_id for this package, persisted on the
     # receipt at creation. Reused verbatim for Pre, Post, retries and every later
-    # session for this (student, case) - never regenerated per submission.
+    # session for this owning case - never regenerated per submission.
     record_id = receipt.redcap_record_id
 
-    # Hard case-level gate: once the package is COMPLETED, NOTHING (not a new
-    # session id, not a resubmit, not the other phase) may reopen it.
+    # Hard gate: once the package is COMPLETED, NOTHING may reopen it.
     if receipt.overall_status == SURVEY_OVERALL_COMPLETED:
-        raise SurveyAlreadyCompletedError(_case_name(session.case_id))
+        raise SurveyAlreadyCompletedError(_case_name(case_id))
 
     # This stage already reached REDCap (or was skipped): do NOT re-import.
     # Makes double-clicks / refreshes / resumes safe and never duplicates a
@@ -339,14 +466,15 @@ def _submit(
             already_submitted=True,
         )
 
-    fields = _build_fields(record_id, nuid, case_number, session.case_id, phase, answers)
+    fields = _build_fields(record_id, nuid, case_number, case_id, phase, answers)
 
     if not redcap_client.is_configured():
         _mark_stage(receipt, phase, SURVEY_SYNC_SKIPPED)
+        _finalize_completion(student, receipt)
         db.commit()
         logger.info(
             "survey_submit_skipped_unconfigured session_id=%s case_id=%s phase=%s",
-            session.id, session.case_id, phase,
+            session.id, case_id, phase,
         )
         return SurveySubmitResult(
             phase=phase, sync_status=SURVEY_SYNC_SKIPPED, overall_status=receipt.overall_status
@@ -356,6 +484,7 @@ def _submit(
         redcap_client.import_record(fields)
     except RedcapNotConfiguredError:
         _mark_stage(receipt, phase, SURVEY_SYNC_SKIPPED)
+        _finalize_completion(student, receipt)
         db.commit()
         return SurveySubmitResult(
             phase=phase, sync_status=SURVEY_SYNC_SKIPPED, overall_status=receipt.overall_status
@@ -366,17 +495,22 @@ def _submit(
         # stay in the frontend for resubmission; assessment is unaffected.
         _mark_stage(receipt, phase, SURVEY_SYNC_FAILED)
         db.commit()
+        # A FAILED FIRST Pre must not permanently lock the student to this case:
+        # release the ownership claim so retry (same or another case) is possible.
+        if phase == SURVEY_PHASE_PRE:
+            _release_ownership_if_unestablished(db, session)
         logger.warning(
             "survey_submit_failed session_id=%s case_id=%s phase=%s",
-            session.id, session.case_id, phase,
+            session.id, case_id, phase,
         )
         raise SurveySyncError()
 
     _mark_stage(receipt, phase, SURVEY_SYNC_SYNCED)
+    _finalize_completion(student, receipt)
     db.commit()
     logger.info(
-        "survey_submit_ok session_id=%s case_id=%s phase=%s overall=%s",
-        session.id, session.case_id, phase, receipt.overall_status,
+        "survey_submit_ok session_id=%s case_id=%s phase=%s overall=%s global=%s",
+        session.id, case_id, phase, receipt.overall_status, _global_survey_status(student),
     )
     return SurveySubmitResult(
         phase=phase, sync_status=SURVEY_SYNC_SYNCED, overall_status=receipt.overall_status
