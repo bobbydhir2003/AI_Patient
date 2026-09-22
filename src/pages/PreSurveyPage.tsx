@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ProgressSteps } from "../components/layout/ProgressSteps";
 import { AppImage } from "../components/common/AppImage";
 import { SurveyLikert } from "../components/survey/SurveyLikert";
-import { PRE_LIKERT } from "../services/surveyQuestions";
+import { PRE_LIKERT, PRE_OPEN_ENDED, OPEN_ENDED_MAX_LEN } from "../services/surveyQuestions";
 import { getSurveyStatus, submitPreSurvey } from "../services/surveysApi";
 import {
   globalPreGate,
@@ -40,6 +40,9 @@ export function PreSurveyPage() {
     !!activeInterview && activeInterview.resume === true && activeInterview.caseId === caseId;
 
   const [answers, setAnswers] = useState<Record<string, number>>({});
+  // Open-ended (textarea) responses, keyed by exact REDCap variable name.
+  // Optional, mirroring the Post-Survey; only Likert items are required.
+  const [openText, setOpenText] = useState<Record<string, string>>({});
   // Read-only identity (NUID + case) resolved server-side from the session for
   // display/confirmation only. Never editable and never sent back on submit.
   const [identity, setIdentity] = useState<{
@@ -205,7 +208,9 @@ export function PreSurveyPage() {
     setError(null);
     setSubmitting(true);
     try {
-      await submitPreSurvey(sessionId, answers);
+      const payload: Record<string, number | string> = { ...answers };
+      for (const q of PRE_OPEN_ENDED) payload[q.name] = openText[q.name] ?? "";
+      await submitPreSurvey(sessionId, payload);
       await proceedToInterview(caseId);
     } catch (err) {
       if (err instanceof ApiError && err.code === "nuid_missing") {
@@ -355,6 +360,32 @@ export function PreSurveyPage() {
                     value={answers[q.name]}
                     onChange={(value) => setAnswers((a) => ({ ...a, [q.name]: value }))}
                   />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Open-ended feedback. Numbering continues from the Likert items, so
+              this displays as the next visible question (no gap). Optional. */}
+          {!readOnly && (
+            <div className={`card ${styles.card}`}>
+              <div className={styles.questionList}>
+                {PRE_OPEN_ENDED.map((q, i) => (
+                  <div key={q.name} className={styles.openItem}>
+                    <label className={styles.openPrompt} htmlFor={q.name}>
+                      <span style={{ color: "var(--color-text-muted)", fontWeight: 700 }}>
+                        {PRE_LIKERT.length + i + 1}.
+                      </span>{" "}
+                      {q.prompt}
+                    </label>
+                    <textarea
+                      id={q.name}
+                      className={styles.textarea}
+                      maxLength={OPEN_ENDED_MAX_LEN}
+                      value={openText[q.name] ?? ""}
+                      onChange={(e) => setOpenText((t) => ({ ...t, [q.name]: e.target.value }))}
+                    />
+                  </div>
                 ))}
               </div>
             </div>

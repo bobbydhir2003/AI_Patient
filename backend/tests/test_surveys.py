@@ -56,7 +56,7 @@ PRE_ANSWERS = {
     "pre_conf_questions": 5,
     "pre_conf_unexpected": 3,
     "pre_conf_interview": 4,
-    "pre_helpful_draft": 5,
+    "pre_feedback": "More worked examples would help.",
 }
 
 POST_ANSWERS = {
@@ -64,7 +64,6 @@ POST_ANSWERS = {
     "post_conf_questions": 5,
     "post_conf_unexpected": 3,
     "post_conf_interview": 4,
-    "post_helpful_draft": 5,
     "post_realistic": 4,
     "post_consistent": 4,
     "post_strengths_weaknesses": 5,
@@ -232,6 +231,27 @@ def test_missing_likert_field_rejected(student_api, captured):
     del payload["pre_conf_interview"]
     assert student_api.post(f"/api/interviews/{sid}/surveys/pre", json=payload).status_code == 422
     assert captured == []
+
+
+def test_pre_without_helpful_draft_ok_and_not_sent(student_api, captured):
+    """The retired pre_helpful_draft is OPTIONAL: a submission omitting it (the
+    current client shape) validates and the field is NOT sent to REDCap, while
+    the open-ended pre_feedback IS forwarded."""
+    sid = _new_session(student_api, CAMDEN)
+    r = student_api.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS)
+    assert r.status_code == 200, r.text
+    assert "pre_helpful_draft" not in captured[0]
+    assert captured[0]["pre_feedback"] == PRE_ANSWERS["pre_feedback"]
+
+
+def test_pre_helpful_draft_still_accepted_if_supplied(student_api, captured):
+    """Backward compatibility: an older client that still sends pre_helpful_draft
+    validates (no 422) and the supplied value is forwarded to REDCap."""
+    sid = _new_session(student_api, CAMDEN)
+    payload = {**PRE_ANSWERS, "pre_helpful_draft": 5}
+    r = student_api.post(f"/api/interviews/{sid}/surveys/pre", json=payload)
+    assert r.status_code == 200, r.text
+    assert captured[0]["pre_helpful_draft"] == 5
 
 
 # --------------------------------------------------------------------------

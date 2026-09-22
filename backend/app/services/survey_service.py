@@ -521,7 +521,10 @@ def _submit(
 
 
 def submit_pre(db: Session, session: InterviewSession, payload: PreSurveyIn) -> SurveySubmitResult:
-    return _submit(db, session, SURVEY_PHASE_PRE, payload.model_dump())
+    # exclude_none drops the retired, now-optional pre_helpful_draft when a client
+    # omits it, so it is never sent to REDCap as a null (a supplied value is still
+    # forwarded). All other pre fields are always present.
+    return _submit(db, session, SURVEY_PHASE_PRE, payload.model_dump(exclude_none=True))
 
 
 def submit_post(db: Session, session: InterviewSession, payload: PostSurveyIn) -> SurveySubmitResult:

@@ -38,7 +38,7 @@ export const PRE_LIKERT: LikertQuestion[] = [
   {
     name: "pre_conf_questions",
     prompt:
-      "I feel confident asking questions that help me understand a patient’s symptoms, concerns, and goals.",
+      "I feel confident asking questions that help me understand a patient’s symptoms, concerns, or goals.",
   },
   {
     name: "pre_conf_unexpected",
@@ -49,9 +49,13 @@ export const PRE_LIKERT: LikertQuestion[] = [
     name: "pre_conf_interview",
     prompt: "I feel confident in my preparedness to conduct a patient-centered interview.",
   },
+];
+
+export const PRE_OPEN_ENDED: OpenEndedQuestion[] = [
   {
-    name: "pre_helpful_draft",
-    prompt: "[DRAFT] I think interacting with this tool will be helpful for my communication skills.",
+    name: "pre_feedback",
+    prompt:
+      "What type of feedback from a virtual patient would be most helpful for your communication skills?",
   },
 ];
 
@@ -60,7 +64,7 @@ export const POST_LIKERT: LikertQuestion[] = [
   {
     name: "post_conf_questions",
     prompt:
-      "I feel confident asking questions that help me understand a patient’s symptoms, concerns, and goals.",
+      "I feel confident asking questions that help me understand a patient’s symptoms, concerns, or goals.",
   },
   {
     name: "post_conf_unexpected",
@@ -70,10 +74,6 @@ export const POST_LIKERT: LikertQuestion[] = [
   {
     name: "post_conf_interview",
     prompt: "I feel confident in my preparedness to conduct a patient-centered interview.",
-  },
-  {
-    name: "post_helpful_draft",
-    prompt: "[DRAFT] I think interacting with this tool will be helpful for my communication skills.",
   },
   {
     name: "post_realistic",
@@ -131,7 +131,7 @@ export const POST_OPEN_ENDED: OpenEndedQuestion[] = [
   {
     name: "post_oe_feedback_missing",
     prompt:
-      "What information or suggestions were missing from the AI feedback that would have helped you improve?",
+      "What differences, if any, did you notice between practicing with the AI standardized patient and practicing simulated patient interactions with classmates or instructors?",
   },
 ];
 

@@ -30,20 +30,27 @@ class _StrictSurveyModel(BaseModel):
 
 
 class PreSurveyIn(_StrictSurveyModel):
+    # 4 required Likert items.
     pre_conf_begin: Likert
     pre_conf_questions: Likert
     pre_conf_unexpected: Likert
     pre_conf_interview: Likert
-    pre_helpful_draft: Likert
+    # Retired from the UI but kept as a RECOGNISED, OPTIONAL REDCap field so the
+    # existing variable/historical data stay valid and an older client that still
+    # sends it validates. Omitted -> excluded from the REDCap payload
+    # (submit_pre uses model_dump(exclude_none=True)); never re-required.
+    pre_helpful_draft: Likert | None = None
+    # Open-ended feedback (optional, length-limited), shown as the last visible
+    # pre-survey question.
+    pre_feedback: OpenEnded
 
 
 class PostSurveyIn(_StrictSurveyModel):
-    # 12 Likert items
+    # 11 Likert items
     post_conf_begin: Likert
     post_conf_questions: Likert
     post_conf_unexpected: Likert
     post_conf_interview: Likert
-    post_helpful_draft: Likert
     post_realistic: Likert
     post_consistent: Likert
     post_strengths_weaknesses: Likert

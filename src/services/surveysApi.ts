@@ -80,10 +80,10 @@ export function getSurveyStatus(sessionId: string): Promise<SurveyStatus> {
   );
 }
 
-/** answers keyed by exact REDCap variable names (e.g. pre_conf_begin: 4). */
+/** answers keyed by exact REDCap variable names (4 Likert ints + 1 OE string). */
 export function submitPreSurvey(
   sessionId: string,
-  answers: Record<string, number>,
+  answers: Record<string, number | string>,
 ): Promise<SurveySubmitResult> {
   return surveyRequest<SurveySubmitResult>(
     `/interviews/${encodeURIComponent(sessionId)}/surveys/pre`,

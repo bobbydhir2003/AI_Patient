@@ -206,7 +206,7 @@ export function PostSurveyPage() {
 
               {/* Open-ended section */}
               <div className={`card ${styles.card}`}>
-                <h2 className={styles.groupTitle}>Open-Ended Feedback (optional)</h2>
+                <h2 className={styles.groupTitle}>Open-Ended Feedback</h2>
                 <div className={styles.questionList}>
                   {POST_OPEN_ENDED.map((q, i) => (
                     <div key={q.name} className={styles.openItem}>
