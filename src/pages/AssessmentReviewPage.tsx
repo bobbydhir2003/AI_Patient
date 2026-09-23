@@ -20,6 +20,7 @@ import { LevelBadge } from "../components/assessment/LevelBadge";
 import type { Assessment, AssessmentTurn, Rubric } from "../types/assessment";
 import { ReferralAssessmentView } from "../components/referralAssessment/ReferralAssessmentView";
 import { useAuth } from "../state/AuthContext";
+import { useAssessmentViewTracker } from "../hooks/useAssessmentViewTracker";
 import { caseHubPath } from "../services/authRouting";
 import shared from "../components/assessment/assessment.module.css";
 import styles from "./AssessmentReviewPage.module.css";
@@ -100,6 +101,10 @@ export function AssessmentReviewPage() {
     () => new Map(rubrics.map((r) => [r.domain, r])),
     [rubrics],
   );
+
+  // Silent, admin-only active-viewing-time tracking. No UI; inert until the
+  // assessment is ready (assessmentId is null while processing/failed).
+  useAssessmentViewTracker(assessment?.assessmentId ?? null);
 
   function handleViewTranscript(turnId: string, evidenceId: string) {
     setTab("transcript");

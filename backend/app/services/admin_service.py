@@ -106,8 +106,22 @@ def _session_has_assessment(db: Session, session_id: str) -> bool:
     )
 
 
-def _session_summary(db: Session, session: InterviewSession) -> SessionSummaryOut:
+def _session_summary(
+    db: Session, session: InterviewSession, *, with_view_time: bool = False
+) -> SessionSummaryOut:
     total, student_turns = _session_counts(db, session.id)
+    # Admin-only active assessment viewing time; never attached to student paths.
+    view_seconds: int | None = None
+    view_count: int | None = None
+    first_viewed_at = None
+    if with_view_time:
+        from app.services import assessment_view_service
+
+        view = assessment_view_service.get_for_session(db, session.id)
+        if view is not None:
+            view_seconds = view.active_seconds
+            view_count = view.view_count
+            first_viewed_at = view.first_viewed_at
     return SessionSummaryOut(
         session_id=session.id,
         student_id=session.student_id,
@@ -123,6 +137,9 @@ def _session_summary(db: Session, session: InterviewSession) -> SessionSummaryOu
         overall_level=_latest_level_for_session(db, session.id),
         started_at=session.started_at,
         completed_at=session.completed_at,
+        active_viewing_seconds=view_seconds,
+        view_count=view_count,
+        first_viewed_at=first_viewed_at,
     )
 
 
@@ -598,8 +615,12 @@ def _get_session_or_404(db: Session, session_id: str) -> InterviewSession:
     return session
 
 
-def get_session_summary(db: Session, session_id: str) -> SessionSummaryOut:
-    return _session_summary(db, _get_session_or_404(db, session_id))
+def get_session_summary(
+    db: Session, session_id: str, *, with_view_time: bool = False
+) -> SessionSummaryOut:
+    return _session_summary(
+        db, _get_session_or_404(db, session_id), with_view_time=with_view_time
+    )
 
 
 def get_session_transcript(db: Session, session_id: str) -> list[TranscriptMessageOut]:
@@ -678,6 +699,11 @@ def delete_session(db: Session, admin: User, session_id: str, *, archived_note: 
     # Remove assessments (and their evidence, which references turns) BEFORE the
     # turns so no foreign key is ever left dangling.
     _delete_assessment_runs_for_session(db, session_id)
+    # Remove the admin-only viewing-time row for this session (explicit, alongside
+    # the FK's ON DELETE CASCADE) so nothing is orphaned and deletion never blocks.
+    from app.services import assessment_view_service
+
+    assessment_view_service.delete_for_sessions(db, [session_id])
     db.delete(session)  # cascades to conversation_turns via ORM relationship
     _audit(
         db, admin,
@@ -766,6 +792,11 @@ def purge_student_tree(db: Session, admin: User, student: Student) -> dict:
     for receipt in receipts:
         db.delete(receipt)
     db.flush()
+    # Admin-only viewing-time rows for these sessions (explicit delete alongside
+    # the FK ON DELETE CASCADE) so a purge never orphans them or gets blocked.
+    from app.services import assessment_view_service
+
+    assessment_view_service.delete_for_sessions(db, session_ids)
     for sid in session_ids:
         s = db.get(InterviewSession, sid)
         if s is not None:

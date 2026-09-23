@@ -109,6 +109,11 @@ export interface SessionSummary {
   overallLevel: string | null;
   startedAt: string;
   completedAt: string | null;
+  // Admin-only "active assessment viewing time" (present only on the admin
+  // session-detail response; undefined/null on student-facing session payloads).
+  activeViewingSeconds?: number | null;
+  viewCount?: number | null;
+  firstViewedAt?: string | null;
 }
 
 export interface TranscriptMessage {

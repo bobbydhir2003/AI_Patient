@@ -1,6 +1,7 @@
 from app.models.access_request import AccessRequest
 from app.models.ai_usage_event import AiUsageEvent
 from app.models.assessment import AssessmentDomainResult, AssessmentEvidence, AssessmentRun
+from app.models.assessment_view import AssessmentViewSession
 from app.models.audit_log import AuditLog
 from app.models.conversation_turn import ConversationTurn
 from app.models.interview_session import InterviewSession
@@ -27,6 +28,7 @@ __all__ = [
     "AssessmentRun",
     "AssessmentDomainResult",
     "AssessmentEvidence",
+    "AssessmentViewSession",
     "ApiCredential",
     "SystemSetting",
     "ConfigurationHistory",

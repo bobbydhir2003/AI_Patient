@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.orm import Session
 
 from app.assessment import assessment_service
+from app.core.config import get_settings
 from app.database.connection import get_db
 from app.core.rate_limit import rate_limit
 from app.dependencies.auth import (
@@ -11,7 +12,8 @@ from app.dependencies.auth import (
     require_assessment_access,
     require_session_access,
 )
-from app.models import AssessmentRun, InterviewSession
+from app.models import AssessmentRun, InterviewSession, User
+from app.services import assessment_view_service
 from app.patient_engine.openai_client import OpenAIPatientClient, get_openai_client
 from app.schemas.assessment_schema import (
     AssessmentOut,
@@ -109,3 +111,21 @@ def assessment_transcript(
 @router.get("/rubrics", response_model=list[RubricOut], dependencies=[Depends(get_current_user)])
 def rubrics() -> list[RubricOut]:
     return assessment_service.list_rubrics()
+
+
+@router.post("/assessments/{assessment_id}/view/ping", status_code=status.HTTP_204_NO_CONTENT)
+def ping_assessment_view(
+    run: AssessmentRun = Depends(require_assessment_access),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Silent heartbeat for "active assessment viewing time" (admin-only telemetry).
+
+    No request body — the server credits time from its own timestamps. Ownership
+    is enforced by require_assessment_access (a wrong student gets 404); the
+    service additionally credits ONLY the owning student, so an admin viewing the
+    assessment never adds time. Best-effort: failures never surface to the student.
+    """
+    if get_settings().assessment_view_tracking_enabled:
+        assessment_view_service.record_ping(db, run=run, user=current_user)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

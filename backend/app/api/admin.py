@@ -84,7 +84,8 @@ def list_sessions(
 
 @router.get("/sessions/{session_id}", response_model=SessionSummaryOut)
 def get_session(session_id: str, db: Session = Depends(get_db)) -> SessionSummaryOut:
-    return admin_service.get_session_summary(db, session_id)
+    # Admin session detail is the one place that surfaces active viewing time.
+    return admin_service.get_session_summary(db, session_id, with_view_time=True)
 
 
 @router.get("/sessions/{session_id}/transcript", response_model=list[TranscriptMessageOut])

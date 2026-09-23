@@ -94,6 +94,15 @@ export function AdminSessionPage() {
             {fmtDateTime(session.startedAt)} · {fmtDuration(session.durationSeconds)} ·{" "}
             {session.studentTurnCount} questions
           </p>
+          {session.activeViewingSeconds != null && (
+            <p className="pt-muted" style={{ margin: 0 }}>
+              Active assessment viewing time: {fmtDuration(session.activeViewingSeconds)}
+              {session.viewCount != null && session.viewCount > 1
+                ? ` · ${session.viewCount} views`
+                : ""}
+              {session.firstViewedAt ? ` · first viewed ${fmtDateTime(session.firstViewedAt)}` : ""}
+            </p>
+          )}
         </div>
         <StatusBadge status={session.status} />
       </div>

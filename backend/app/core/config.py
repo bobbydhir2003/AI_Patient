@@ -335,6 +335,9 @@ class Settings(BaseSettings):
     # in Redis: with 3 uvicorn workers each running this many local threads, at
     # most this many assessments EXECUTE across the whole deployment at once.
     assessment_queue_enabled: bool = True
+    # Silent, admin-only "active assessment viewing time" heartbeat tracking.
+    # Set ASSESSMENT_VIEW_TRACKING_ENABLED=false to disable without removing code.
+    assessment_view_tracking_enabled: bool = True
     assessment_worker_concurrency: int = 20
     # Adaptive throttling: effective workers by OpenAI capacity state (live
     # interviews always keep priority, so assessments back off first). Kept
