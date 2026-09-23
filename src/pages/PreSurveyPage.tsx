@@ -9,6 +9,7 @@ import {
   globalPreGate,
   resolveInterviewDestination,
   destinationToPath,
+  isSessionNotFound,
 } from "../services/surveyFlow";
 import { ApiError, createSession, fetchSession } from "../services/api";
 import { joinQueue } from "../services/queueApi";
@@ -65,6 +66,8 @@ export function PreSurveyPage() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const initRef = useRef(false);
+  // Guard: recover from a dead persisted session id at most once per mount.
+  const recoveredRef = useRef(false);
 
   // Advance from the pre-survey into the interview.
   //   NEW flow    → capacity/queue check (joinQueue), then interview or queue.
@@ -109,7 +112,7 @@ export function PreSurveyPage() {
     if (!caseId) return;
     let cancelled = false;
 
-    async function loadGate(sid: string) {
+    async function loadGate(sid: string, cid: string) {
       setSessionId(sid);
       try {
         const status = await getSurveyStatus(sid);
@@ -121,10 +124,42 @@ export function PreSurveyPage() {
         setGateMode(
           globalPreGate(status.globalSurveyStatus, status.isSurveyOwnerCase, status.preSubmitted),
         );
-      } catch {
-        // Status is best-effort; submission is still guarded server-side. Default
-        // to collecting so the student is never wrongly blocked.
-        if (!cancelled) setGateMode("collect");
+      } catch (err) {
+        if (cancelled) return;
+        // The reused/persisted session id is dead or not ours (404
+        // session_not_found). NEVER render the Pre-Survey against it: discard the
+        // stale pointer, create ONE fresh session for this case, and re-read
+        // status with the valid id. Guarded by recoveredRef so we recover at most
+        // once (a fresh session cannot itself be missing).
+        if (isSessionNotFound(err) && !recoveredRef.current) {
+          recoveredRef.current = true;
+          setActiveInterview(null);
+          try {
+            const session = await createSession(
+              studentName.trim() || "Student",
+              studentId.trim(),
+              cid,
+            );
+            if (cancelled) return;
+            setActiveInterview({
+              caseId: cid,
+              sessionId: session.sessionId,
+              startedAt: Date.now(),
+              resume: false,
+            });
+            await loadGate(session.sessionId, cid);
+            return;
+          } catch {
+            if (!cancelled) {
+              setError("We couldn't start your session. Please go back to the case and try again.");
+              setCheckingStatus(false);
+            }
+            return;
+          }
+        }
+        // Any other (transient/network/server) error: unchanged best-effort
+        // behavior — default to collecting so the student is never wrongly blocked.
+        setGateMode("collect");
       } finally {
         if (!cancelled) setCheckingStatus(false);
       }
@@ -158,7 +193,7 @@ export function PreSurveyPage() {
                session; proceedToInterview has its own fallback. */
           }
           if (cancelled) return;
-          await loadGate(sid);
+          await loadGate(sid, id);
           return;
         }
 
@@ -182,7 +217,7 @@ export function PreSurveyPage() {
           sid = session.sessionId;
         }
         if (cancelled) return;
-        await loadGate(sid);
+        await loadGate(sid, id);
       } catch {
         if (!cancelled) {
           setCheckingStatus(false);
@@ -200,8 +235,10 @@ export function PreSurveyPage() {
 
   async function handleSubmit() {
     if (gateMode !== "collect" || submitting || nuidMissing || !sessionId || !caseId) return;
-    const unanswered = PRE_LIKERT.some((q) => !answers[q.name]);
-    if (unanswered) {
+    const likertMissing = PRE_LIKERT.some((q) => !answers[q.name]);
+    // The visible open-ended question is required; whitespace-only counts empty.
+    const openMissing = PRE_OPEN_ENDED.some((q) => !(openText[q.name] ?? "").trim());
+    if (likertMissing || openMissing) {
       setError("Please answer all questions before continuing.");
       return;
     }

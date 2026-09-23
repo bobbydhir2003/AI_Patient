@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from app.schemas.base import CamelModel
 
@@ -18,9 +18,16 @@ from app.schemas.base import CamelModel
 # REDCap radio coding for every Likert item in both instruments.
 Likert = Annotated[int, Field(ge=1, le=5)]
 
-# Open-ended answers are optional and length-limited to keep payloads bounded.
+# Open-ended answers are length-limited to keep payloads bounded.
 MAX_OPEN_ENDED_LEN = 5000
+# Optional variant (retained for any non-required open-ended field).
 OpenEnded = Annotated[str, Field(default="", max_length=MAX_OPEN_ENDED_LEN)]
+# Required variant for VISIBLE open-ended questions: whitespace is stripped first,
+# then min_length=1 rejects an empty or whitespace-only answer (422). The stored/
+# forwarded value is the trimmed text.
+RequiredOpenEnded = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_OPEN_ENDED_LEN)
+]
 
 
 class _StrictSurveyModel(BaseModel):
@@ -40,9 +47,9 @@ class PreSurveyIn(_StrictSurveyModel):
     # sends it validates. Omitted -> excluded from the REDCap payload
     # (submit_pre uses model_dump(exclude_none=True)); never re-required.
     pre_helpful_draft: Likert | None = None
-    # Open-ended feedback (optional, length-limited), shown as the last visible
-    # pre-survey question.
-    pre_feedback: OpenEnded
+    # Open-ended feedback, shown as the last visible pre-survey question. Required
+    # (non-blank), like every other visible question.
+    pre_feedback: RequiredOpenEnded
 
 
 class PostSurveyIn(_StrictSurveyModel):
@@ -58,12 +65,12 @@ class PostSurveyIn(_StrictSurveyModel):
     post_feedback_accurate: Likert
     post_feedback_actionable: Likert
     post_use_again: Likert
-    # 5 open-ended items
-    post_oe_most_helpful: OpenEnded
-    post_oe_unrealistic: OpenEnded
-    post_oe_one_change: OpenEnded
-    post_oe_feedback_type: OpenEnded
-    post_oe_feedback_missing: OpenEnded
+    # 5 open-ended items (all visible -> all required, non-blank)
+    post_oe_most_helpful: RequiredOpenEnded
+    post_oe_unrealistic: RequiredOpenEnded
+    post_oe_one_change: RequiredOpenEnded
+    post_oe_feedback_type: RequiredOpenEnded
+    post_oe_feedback_missing: RequiredOpenEnded
 
 
 class SurveyStatusOut(CamelModel):

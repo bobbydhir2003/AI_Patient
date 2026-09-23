@@ -3,6 +3,22 @@
  * be unit-tested directly (see scripts/test-survey-flow.mjs).
  */
 
+/**
+ * True when an error is the backend's specific "session_not_found" 404 (a
+ * stale/dead/foreign interview session id). Callers use this to distinguish a
+ * dead session (discard + recover) from a generic transient/network error
+ * (preserve existing best-effort behavior). Shape-based so this module stays
+ * dependency-free (works for the ApiError instances thrown by the API layer).
+ */
+export function isSessionNotFound(err: unknown): boolean {
+  return (
+    !!err &&
+    typeof err === "object" &&
+    "code" in err &&
+    (err as { code?: unknown }).code === "session_not_found"
+  );
+}
+
 export type AssessmentStatusValue =
   | "not_started"
   | "pending"

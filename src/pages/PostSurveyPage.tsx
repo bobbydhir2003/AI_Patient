@@ -5,7 +5,10 @@ import { SurveyLikert } from "../components/survey/SurveyLikert";
 import { POST_LIKERT, POST_OPEN_ENDED, OPEN_ENDED_MAX_LEN } from "../services/surveyQuestions";
 import { getSurveyStatus, submitPostSurvey } from "../services/surveysApi";
 import { ApiError, getAssessmentStatus } from "../services/api";
-import { postSurveyDestination, globalPostGate } from "../services/surveyFlow";
+import { postSurveyDestination, globalPostGate, isSessionNotFound } from "../services/surveyFlow";
+import { useAppContext } from "../state/AppContext";
+import { useAuth } from "../state/AuthContext";
+import { caseHubPath } from "../services/authRouting";
 import styles from "./SurveyPage.module.css";
 
 const PROGRESS_STEPS = ["Case Introduction", "Pre Survey", "Interview", "Post Survey", "Assessment Results"];
@@ -13,12 +16,17 @@ const PROGRESS_STEPS = ["Case Introduction", "Pre Survey", "Interview", "Post Su
 export function PostSurveyPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
+  const { setActiveInterview } = useAppContext();
+  const { user } = useAuth();
 
   const [likert, setLikert] = useState<Record<string, number>>({});
   const [openText, setOpenText] = useState<Record<string, string>>({});
   const [nuidMissing, setNuidMissing] = useState(false);
   const [checkingStatus, setCheckingStatus] = useState(true);
   const [alreadyCompleted, setAlreadyCompleted] = useState(false);
+  // The URL session id is dead or not ours (404 session_not_found): never render
+  // or submit the post-survey against it; show a safe recovery panel instead.
+  const [sessionMissing, setSessionMissing] = useState(false);
   // Owner-aware context for the skip messaging.
   const [ownerName, setOwnerName] = useState<string | null>(null);
   const [globalStatus, setGlobalStatus] = useState<string>("not_started");
@@ -63,9 +71,19 @@ export function PostSurveyPage() {
           setAlreadyCompleted(true);
         }
         setCheckingStatus(false);
-      } catch {
-        /* best-effort; submission is still guarded server-side */
-        if (!cancelled) setCheckingStatus(false);
+      } catch (err) {
+        if (cancelled) return;
+        if (isSessionNotFound(err)) {
+          // Dead/stale session id: discard any stale pointer and switch to the
+          // recovery panel. Do NOT fall through to rendering a submittable survey
+          // bound to the dead id.
+          setActiveInterview(null);
+          setSessionMissing(true);
+          setCheckingStatus(false);
+          return;
+        }
+        /* other errors: best-effort; submission is still guarded server-side */
+        setCheckingStatus(false);
       }
     })();
     return () => {
@@ -76,9 +94,11 @@ export function PostSurveyPage() {
 
   async function handleSubmit() {
     if (alreadyCompleted || submitting || nuidMissing || !sessionId) return;
-    const unanswered = POST_LIKERT.some((q) => !likert[q.name]);
-    if (unanswered) {
-      setError("Please answer all rating questions before continuing.");
+    const likertMissing = POST_LIKERT.some((q) => !likert[q.name]);
+    // Every visible open-ended question is required; whitespace-only counts empty.
+    const openMissing = POST_OPEN_ENDED.some((q) => !(openText[q.name] ?? "").trim());
+    if (likertMissing || openMissing) {
+      setError("Please answer all questions before continuing.");
       return;
     }
     setError(null);
@@ -117,6 +137,32 @@ export function PostSurveyPage() {
         <div className={`${styles.single}`}>
           <div className={`card ${styles.card}`} role="status">
             <p>Checking survey status…</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Dead/stale session: render a safe recovery panel (never the survey) and send
+  // the student back to their dashboard/case hub instead of submitting to a 404.
+  if (sessionMissing) {
+    return (
+      <div className="page">
+        <ProgressSteps steps={PROGRESS_STEPS} currentStepIndex={3} />
+        <div className={`${styles.single}`}>
+          <div className={styles.completedBanner} role="alert">
+            <h2 className={styles.completedTitle}>This interview session is no longer available</h2>
+            <p className={styles.completedMessage}>
+              Your previous session has expired or was removed, so this survey can’t be submitted.
+              Please return to your dashboard and start the case again if needed.
+            </p>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => navigate(caseHubPath(user?.role), { replace: true })}
+            >
+              Back to Dashboard
+            </button>
           </div>
         </div>
       </div>

@@ -75,7 +75,7 @@ POST_ANSWERS = {
     "post_oe_unrealistic": "Nothing major.",
     "post_oe_one_change": "More cases.",
     "post_oe_feedback_type": "Specific examples.",
-    "post_oe_feedback_missing": "",
+    "post_oe_feedback_missing": "Nothing was missing.",
 }
 
 
@@ -214,7 +214,7 @@ def test_post_survey_maps_all_fields(student_api, captured):
     assert fields["post_experience_survey_complete"] == 2
     assert fields["post_use_again"] == 5
     assert fields["post_oe_most_helpful"] == "Practicing open-ended questions."  # sanitised
-    assert fields["post_oe_feedback_missing"] == ""
+    assert fields["post_oe_feedback_missing"] == "Nothing was missing."
 
 
 @pytest.mark.parametrize("bad", [0, 6, -1, 99])
@@ -252,6 +252,53 @@ def test_pre_helpful_draft_still_accepted_if_supplied(student_api, captured):
     r = student_api.post(f"/api/interviews/{sid}/surveys/pre", json=payload)
     assert r.status_code == 200, r.text
     assert captured[0]["pre_helpful_draft"] == 5
+
+
+# --- Every VISIBLE survey question is required (Likert + open-ended) ----------
+def test_pre_feedback_required_when_missing(student_api, captured):
+    """The visible open-ended pre_feedback is required: omitting it -> 422."""
+    sid = _new_session(student_api)
+    payload = dict(PRE_ANSWERS)
+    del payload["pre_feedback"]
+    assert student_api.post(f"/api/interviews/{sid}/surveys/pre", json=payload).status_code == 422
+    assert captured == []
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\n\t "])
+def test_pre_feedback_blank_rejected(student_api, captured, blank):
+    """Empty or whitespace-only pre_feedback is rejected (counts as unanswered)."""
+    sid = _new_session(student_api)
+    payload = {**PRE_ANSWERS, "pre_feedback": blank}
+    assert student_api.post(f"/api/interviews/{sid}/surveys/pre", json=payload).status_code == 422
+    assert captured == []
+
+
+def test_post_missing_likert_rejected(student_api, captured):
+    """Every visible post Likert item is required: omitting one -> 422."""
+    sid = _new_session(student_api)
+    payload = dict(POST_ANSWERS)
+    del payload["post_use_again"]
+    assert student_api.post(f"/api/interviews/{sid}/surveys/post", json=payload).status_code == 422
+    assert captured == []
+
+
+def test_post_open_ended_required_when_missing(student_api, captured):
+    """Every visible post open-ended item is required: omitting one -> 422."""
+    sid = _new_session(student_api)
+    payload = dict(POST_ANSWERS)
+    del payload["post_oe_feedback_missing"]
+    assert student_api.post(f"/api/interviews/{sid}/surveys/post", json=payload).status_code == 422
+    assert captured == []
+
+
+@pytest.mark.parametrize("field", ["post_oe_most_helpful", "post_oe_feedback_missing"])
+@pytest.mark.parametrize("blank", ["", "   ", "\n\t "])
+def test_post_open_ended_blank_rejected(student_api, captured, field, blank):
+    """Empty or whitespace-only post open-ended answers are rejected."""
+    sid = _new_session(student_api)
+    payload = {**POST_ANSWERS, field: blank}
+    assert student_api.post(f"/api/interviews/{sid}/surveys/post", json=payload).status_code == 422
+    assert captured == []
 
 
 # --------------------------------------------------------------------------
@@ -794,6 +841,50 @@ def test_student_cannot_submit_for_another_students_session(engine, fake_client)
         r = c.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS, headers=hb)
         assert r.status_code == 404  # same 404 as nonexistent - no existence leak
         assert c.get(f"/api/interviews/{sid}/surveys/status", headers=hb).status_code == 404
+
+
+def test_nonexistent_session_returns_session_not_found(student_api, captured):
+    """A stale/dead session id returns 404 with code 'session_not_found' on BOTH
+    the status read and pre/post submit (the frontend keys its stale-session
+    recovery on this exact code)."""
+    dead = "deadsessionid0000000000000000dead"
+    st = student_api.get(f"/api/interviews/{dead}/surveys/status")
+    assert st.status_code == 404
+    assert st.json()["error"]["code"] == "session_not_found"
+    pre = student_api.post(f"/api/interviews/{dead}/surveys/pre", json=PRE_ANSWERS)
+    assert pre.status_code == 404
+    assert pre.json()["error"]["code"] == "session_not_found"
+    post = student_api.post(f"/api/interviews/{dead}/surveys/post", json=POST_ANSWERS)
+    assert post.status_code == 404
+    assert post.json()["error"]["code"] == "session_not_found"
+    assert captured == []  # nothing ever reached REDCap
+
+
+def test_foreign_session_returns_same_session_not_found_code(engine, fake_client):
+    """Another student's session id is indistinguishable from a nonexistent one:
+    same 404 + 'session_not_found' code (no existence leak), on status and submit."""
+    with make_client(engine, fake_client, authenticate=False) as c:
+        ha = auth_headers(c, email="owner2@school.edu", number="A9")
+        hb = auth_headers(c, email="other2@school.edu", number="B9")
+        sid = _new_session(c, CARLY, headers=ha)
+        st = c.get(f"/api/interviews/{sid}/surveys/status", headers=hb)
+        assert st.status_code == 404
+        assert st.json()["error"]["code"] == "session_not_found"
+        pre = c.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS, headers=hb)
+        assert pre.status_code == 404
+        assert pre.json()["error"]["code"] == "session_not_found"
+
+
+def test_completed_valid_session_still_reports_completed_status(student_api, captured):
+    """Regression: with a VALID session id, an already-completed student still
+    reads overallStatus='completed' (skip/continue preserved) — the fix must not
+    change completed-user behavior."""
+    sid = _new_session(student_api, CARLY)
+    assert student_api.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS).status_code == 200
+    assert student_api.post(f"/api/interviews/{sid}/surveys/post", json=POST_ANSWERS).status_code == 200
+    status = student_api.get(f"/api/interviews/{sid}/surveys/status").json()
+    assert status["overallStatus"] == "completed"
+    assert status["globalSurveyStatus"] == "completed"
 
 
 def test_survey_endpoints_require_auth(engine, fake_client):

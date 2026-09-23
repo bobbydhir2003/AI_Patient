@@ -19,6 +19,20 @@ import {
 } from "../services/authApi";
 
 const TOKEN_KEY = "ptai-auth-token";
+// Persisted interview/flow state (active session pointer + resume mode) owned by
+// AppContext. Cleared here whenever the authenticated identity changes (login,
+// logout, expired/invalid token) so a new session never inherits a previous
+// account's stale activeInterview — this is what causes reused, dead session ids
+// (and "session_not_found" on submit) on shared browsers or after token expiry.
+const APP_STATE_KEY = "ptai-app-state";
+
+function clearPersistedAppState(): void {
+  try {
+    localStorage.removeItem(APP_STATE_KEY);
+  } catch {
+    /* localStorage unavailable; ignore */
+  }
+}
 
 interface AuthContextValue {
   token: string | null;
@@ -70,11 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Clear the persisted interview/flow context (active session + resume mode)
     // so the next account that logs in on this browser never inherits stale
     // resume state that could misroute them into another student's session.
-    try {
-      localStorage.removeItem("ptai-app-state");
-    } catch {
-      /* localStorage unavailable; ignore */
-    }
+    clearPersistedAppState();
     if (current) apiLogout(current).catch(() => undefined);
     // Single, consistent logout destination for EVERY user type (student, admin,
     // promoted professor, system admin): the main PT AI Patient Simulator
@@ -98,6 +108,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!cancelled) {
           persistToken(null);
           setUser(null);
+          // Expired/invalid persisted token: drop stale interview state too so a
+          // dead activeInterview is never left behind for the next login.
+          clearPersistedAppState();
         }
       })
       .finally(() => {
@@ -113,6 +126,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(
     async (email: string, password: string) => {
       const res = await apiLogin(email, password);
+      // Clear any stale interview/flow state from a previous account BEFORE this
+      // login takes effect, so a new session never reuses an old activeInterview.
+      clearPersistedAppState();
       persistToken(res.accessToken);
       setUser(res.user);
       return res.user;

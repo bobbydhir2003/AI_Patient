@@ -24,6 +24,7 @@ import {
   resumeEntryDestination,
   resolveInterviewDestination,
   destinationToPath,
+  isSessionNotFound,
 } from "../.test-build/services/surveyFlow.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -273,4 +274,61 @@ test("InterviewPage: assessment still kicks off at End Interview (backgrounded) 
 
 test("PostSurveyPage: keeps the 'assessment is being prepared in the background' note", () => {
   assert.match(postSurveyPage, /being prepared in the background/i);
+});
+
+// ---------------------------------------------------------------------------
+// Stale/dead interview session handling ("session_not_found") + login cleanup.
+// ---------------------------------------------------------------------------
+test("isSessionNotFound: only the backend 'session_not_found' code is treated as dead", () => {
+  assert.equal(isSessionNotFound({ code: "session_not_found" }), true);
+  // A real ApiError-shaped object (has status + code) is matched by code only.
+  assert.equal(isSessionNotFound({ status: 404, code: "session_not_found" }), true);
+  // Generic / transient / other errors are NOT treated as a dead session.
+  assert.equal(isSessionNotFound({ code: "network_error" }), false);
+  assert.equal(isSessionNotFound({ code: "unknown_error" }), false);
+  assert.equal(isSessionNotFound(new Error("boom")), false);
+  assert.equal(isSessionNotFound(null), false);
+  assert.equal(isSessionNotFound(undefined), false);
+  assert.equal(isSessionNotFound("session_not_found"), false); // a bare string is not an error object
+});
+
+test("AuthContext: stale app-state is cleared on login, logout AND token expiry", () => {
+  const auth = read("src/state/AuthContext.tsx");
+  // A single shared helper removes the persisted interview/app state...
+  assert.match(auth, /function clearPersistedAppState\(\)/);
+  assert.match(auth, /removeItem\(APP_STATE_KEY\)/);
+  assert.match(auth, /APP_STATE_KEY = "ptai-app-state"/);
+  // ...and is invoked on login (before the token/user take effect)...
+  assert.match(auth, /const res = await apiLogin\(email, password\);[\s\S]*?clearPersistedAppState\(\);/);
+  // ...on the expired/invalid persisted-token path...
+  assert.match(auth, /persistToken\(null\);[\s\S]*?setUser\(null\);[\s\S]*?clearPersistedAppState\(\);/);
+  // ...and on explicit logout.
+  assert.match(auth, /const logout = useCallback\([\s\S]*?clearPersistedAppState\(\);/);
+  // Token persistence itself is untouched (still keyed separately).
+  assert.match(auth, /TOKEN_KEY = "ptai-auth-token"/);
+});
+
+test("PreSurveyPage: a dead persisted session id is discarded + recovered, never surveyed", () => {
+  // Distinguishes the specific 404 from generic errors.
+  assert.match(preSurveyPage, /isSessionNotFound\(err\)/);
+  // On session_not_found: discard the stale pointer and create ONE fresh session.
+  assert.match(preSurveyPage, /recoveredRef\.current/);
+  assert.match(preSurveyPage, /setActiveInterview\(null\)/);
+  assert.match(preSurveyPage, /isSessionNotFound\(err\) && !recoveredRef\.current[\s\S]*?createSession\(/);
+  // Re-reads status with the fresh, valid id (validation-before-trust).
+  assert.match(preSurveyPage, /await loadGate\(session\.sessionId, cid\)/);
+  // Non-404 keeps the previous best-effort collect behavior.
+  assert.match(preSurveyPage, /setGateMode\("collect"\)/);
+});
+
+test("PostSurveyPage: session_not_found shows recovery panel, never a submittable survey", () => {
+  // The dead-session state is explicit and separate from alreadyCompleted.
+  assert.match(postSurveyPage, /sessionMissing/);
+  assert.match(postSurveyPage, /isSessionNotFound\(err\)/);
+  // On the dead session: clear stale pointer + flip to the recovery panel + early return.
+  assert.match(postSurveyPage, /isSessionNotFound\(err\)\)\s*\{[\s\S]*?setActiveInterview\(null\)[\s\S]*?setSessionMissing\(true\)[\s\S]*?return;/);
+  // The recovery panel routes back to the dashboard/case hub (no survey, no submit).
+  assert.match(postSurveyPage, /if \(sessionMissing\) \{/);
+  assert.match(postSurveyPage, /no longer available/i);
+  assert.match(postSurveyPage, /caseHubPath\(user\?\.role\)/);
 });
