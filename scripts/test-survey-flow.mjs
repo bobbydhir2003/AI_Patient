@@ -332,3 +332,50 @@ test("PostSurveyPage: session_not_found shows recovery panel, never a submittabl
   assert.match(postSurveyPage, /no longer available/i);
   assert.match(postSurveyPage, /caseHubPath\(user\?\.role\)/);
 });
+
+// ---------------------------------------------------------------------------
+// Follow-up: submit-time stale session + friendly required-question messaging.
+// ---------------------------------------------------------------------------
+const FRIENDLY = /Please answer all required questions before continuing\./;
+
+test("PreSurveyPage: submit-time session_not_found recovers (fresh session, re-check, retry once)", () => {
+  // The submit handler now handles the specific 404 (not just initial load) and
+  // NEVER shows the raw backend message for it.
+  assert.match(preSurveyPage, /err\.code === "session_not_found" &&\s*!submitRecoveredRef\.current/);
+  assert.match(preSurveyPage, /submitRecoveredRef\.current = true;/);
+  // Discard the dead id, create ONE fresh session, re-check status, and only then
+  // (if still collecting) submit once against the fresh id.
+  assert.match(preSurveyPage, /setActiveInterview\(null\);[\s\S]*?createSession\(/);
+  assert.match(preSurveyPage, /await getSurveyStatus\(session\.sessionId\)/);
+  assert.match(preSurveyPage, /gate === "collect"[\s\S]*?submitPreSurvey\(session\.sessionId, payload\)/);
+  // payload is built BEFORE the try so it is reusable by the recovery retry.
+  assert.match(preSurveyPage, /const payload: Record<string, number \| string> = \{ \.\.\.answers \};[\s\S]*?try \{/);
+});
+
+test("PreSurveyPage: required validation is friendly, blocks the API, and maps 422", () => {
+  // Exact friendly copy; old generic copy is gone.
+  assert.match(preSurveyPage, FRIENDLY);
+  assert.doesNotMatch(preSurveyPage, /Please answer all questions before continuing\./);
+  // Missing answers short-circuit BEFORE any API call (focus + return, no submit).
+  assert.match(preSurveyPage, /if \(likertMissing \|\| openMissing\) \{[\s\S]*?focusFirstMissing\(\);\s*return;/);
+  // A backend 422 backstop is mapped to the SAME friendly message (never raw text).
+  assert.match(preSurveyPage, /err\.status === 422[\s\S]*?Please answer all required questions/);
+  assert.match(preSurveyPage, /function focusFirstMissing\(\)/);
+});
+
+test("PostSurveyPage: submit-time session_not_found → recovery panel + friendly validation/422", () => {
+  // Submit-time dead session flips to the recovery panel (no raw error, no 404 submit).
+  assert.match(postSurveyPage, /err\.code === "session_not_found"\)\s*\{[\s\S]*?setSessionMissing\(true\)/);
+  // Exact friendly copy; old generic copy is gone; API blocked before call.
+  assert.match(postSurveyPage, FRIENDLY);
+  assert.doesNotMatch(postSurveyPage, /Please answer all questions before continuing\./);
+  assert.match(postSurveyPage, /if \(likertMissing \|\| openMissing\) \{[\s\S]*?focusFirstMissing\(\);\s*return;/);
+  assert.match(postSurveyPage, /err\.status === 422[\s\S]*?Please answer all required questions/);
+  assert.match(postSurveyPage, /function focusFirstMissing\(\)/);
+});
+
+test("Both survey pages surface the error near the TOP of the survey (role=alert)", () => {
+  // A top-of-survey error region exists directly inside the main survey column.
+  assert.match(preSurveyPage, /<div className=\{styles\.main\}>\s*\{\/\*[\s\S]*?\*\/\}\s*\{error && \(/);
+  assert.match(postSurveyPage, /<div className=\{styles\.main\}>\s*\{\/\*[\s\S]*?\*\/\}\s*\{error && \(/);
+});

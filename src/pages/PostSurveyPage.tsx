@@ -92,13 +92,28 @@ export function PostSurveyPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  // Scroll/focus the FIRST unanswered required question (Likert first, then the
+  // open-ended). Best-effort and safe: no-op if the element isn't found.
+  function focusFirstMissing() {
+    const missLikert = POST_LIKERT.find((q) => !likert[q.name]);
+    const missOpen = POST_OPEN_ENDED.find((q) => !(openText[q.name] ?? "").trim());
+    const targetId = missLikert ? `${missLikert.name}-1` : missOpen ? missOpen.name : null;
+    if (!targetId) return;
+    const el = document.getElementById(targetId);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    el?.focus?.({ preventScroll: true });
+  }
+
   async function handleSubmit() {
     if (alreadyCompleted || submitting || nuidMissing || !sessionId) return;
     const likertMissing = POST_LIKERT.some((q) => !likert[q.name]);
     // Every visible open-ended question is required; whitespace-only counts empty.
     const openMissing = POST_OPEN_ENDED.some((q) => !(openText[q.name] ?? "").trim());
     if (likertMissing || openMissing) {
-      setError("Please answer all questions before continuing.");
+      // Client-side gate: never call the API for a missing answer, and never show
+      // a raw 4xx. Keep the student's entered answers and point them at the gap.
+      setError("Please answer all required questions before continuing.");
+      focusFirstMissing();
       return;
     }
     setError(null);
@@ -112,6 +127,7 @@ export function PostSurveyPage() {
       if (err instanceof ApiError && err.code === "nuid_missing") {
         setNuidMissing(true);
         setError(err.message);
+        setSubmitting(false);
       } else if (
         err instanceof ApiError &&
         (err.code === "survey_already_completed" || err.code === "survey_owned_by_other_case")
@@ -121,12 +137,25 @@ export function PostSurveyPage() {
         setLikert({});
         setOpenText({});
         setAlreadyCompleted(true);
+        setSubmitting(false);
+      } else if (err instanceof ApiError && err.code === "session_not_found") {
+        // The bound (completed-interview) session is gone. A Post-Survey cannot be
+        // re-bound to a fresh session, so switch to the safe recovery panel rather
+        // than showing the raw "session not found" text or submitting to a 404.
+        setActiveInterview(null);
+        setSessionMissing(true);
+        setSubmitting(false);
+      } else if (err instanceof ApiError && err.status === 422) {
+        // Backend validation backstop: map to the SAME friendly message instead
+        // of the raw "Request failed with status 422".
+        setError("Please answer all required questions before continuing.");
+        setSubmitting(false);
       } else {
         setError(
           err instanceof ApiError ? err.message : "Could not submit the survey. Please try again.",
         );
+        setSubmitting(false);
       }
-      setSubmitting(false);
     }
   }
 
@@ -199,6 +228,13 @@ export function PostSurveyPage() {
         </div>
 
         <div className={styles.main}>
+          {/* Validation/submit errors surface near the TOP of the survey so a
+              student never misses why submission was blocked. */}
+          {error && (
+            <div className={styles.errorText} role="alert">
+              {error}
+            </div>
+          )}
           {alreadyCompleted && (
             <div className={styles.completedBanner} role="alert">
               <h2 className={styles.completedTitle}>{skipBanner.title}</h2>

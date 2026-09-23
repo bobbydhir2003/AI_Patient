@@ -68,6 +68,20 @@ export function PreSurveyPage() {
   const initRef = useRef(false);
   // Guard: recover from a dead persisted session id at most once per mount.
   const recoveredRef = useRef(false);
+  // Guard: recover from a submit-time dead session at most once per mount.
+  const submitRecoveredRef = useRef(false);
+
+  // Scroll/focus the FIRST unanswered required question (Likert first, then the
+  // open-ended). Best-effort and safe: no-op if the element isn't found.
+  function focusFirstMissing() {
+    const missLikert = PRE_LIKERT.find((q) => !answers[q.name]);
+    const missOpen = PRE_OPEN_ENDED.find((q) => !(openText[q.name] ?? "").trim());
+    const targetId = missLikert ? `${missLikert.name}-1` : missOpen ? missOpen.name : null;
+    if (!targetId) return;
+    const el = document.getElementById(targetId);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    el?.focus?.({ preventScroll: true });
+  }
 
   // Advance from the pre-survey into the interview.
   //   NEW flow    → capacity/queue check (joinQueue), then interview or queue.
@@ -239,20 +253,24 @@ export function PreSurveyPage() {
     // The visible open-ended question is required; whitespace-only counts empty.
     const openMissing = PRE_OPEN_ENDED.some((q) => !(openText[q.name] ?? "").trim());
     if (likertMissing || openMissing) {
-      setError("Please answer all questions before continuing.");
+      // Client-side gate: never call the API for a missing answer, and never show
+      // a raw 4xx. Keep the student's entered answers and point them at the gap.
+      setError("Please answer all required questions before continuing.");
+      focusFirstMissing();
       return;
     }
     setError(null);
     setSubmitting(true);
+    const payload: Record<string, number | string> = { ...answers };
+    for (const q of PRE_OPEN_ENDED) payload[q.name] = openText[q.name] ?? "";
     try {
-      const payload: Record<string, number | string> = { ...answers };
-      for (const q of PRE_OPEN_ENDED) payload[q.name] = openText[q.name] ?? "";
       await submitPreSurvey(sessionId, payload);
       await proceedToInterview(caseId);
     } catch (err) {
       if (err instanceof ApiError && err.code === "nuid_missing") {
         setNuidMissing(true);
         setError(err.message);
+        setSubmitting(false);
       } else if (
         err instanceof ApiError &&
         (err.code === "survey_already_completed" || err.code === "survey_owned_by_other_case")
@@ -262,6 +280,62 @@ export function PreSurveyPage() {
         // never retry the survey submission.
         setAnswers({});
         setGateMode("skip");
+        setSubmitting(false);
+      } else if (
+        err instanceof ApiError &&
+        err.code === "session_not_found" &&
+        !submitRecoveredRef.current
+      ) {
+        // The bound session died between load and submit. NEVER show the raw
+        // backend "session not found" text: discard the dead id, create ONE fresh
+        // session for this case, re-check status, and (only if still collecting)
+        // submit once against the valid session. Guarded to run at most once.
+        submitRecoveredRef.current = true;
+        try {
+          setActiveInterview(null);
+          const session = await createSession(
+            studentName.trim() || "Student",
+            studentId.trim(),
+            caseId,
+          );
+          setActiveInterview({
+            caseId,
+            sessionId: session.sessionId,
+            startedAt: Date.now(),
+            resume: false,
+          });
+          setSessionId(session.sessionId);
+          const status = await getSurveyStatus(session.sessionId);
+          setGlobalStatus(status.globalSurveyStatus);
+          setOwnerName(status.surveyOwnerCaseName);
+          const gate = globalPreGate(
+            status.globalSurveyStatus,
+            status.isSurveyOwnerCase,
+            status.preSubmitted,
+          );
+          setGateMode(gate);
+          setError(null);
+          if (!status.nuidOnFile) {
+            setNuidMissing(true);
+            setSubmitting(false);
+            return;
+          }
+          if (gate === "collect") {
+            await submitPreSurvey(session.sessionId, payload);
+            await proceedToInterview(caseId);
+            return;
+          }
+          // Package became completed / owned elsewhere in the meantime: the gate
+          // now shows the skip/continue affordance; stop safely (no raw error).
+          setSubmitting(false);
+        } catch {
+          setError("We couldn't start your session. Please go back to the case and try again.");
+          setSubmitting(false);
+        }
+      } else if (err instanceof ApiError && err.status === 422) {
+        // Backend validation backstop: map to the SAME friendly message instead
+        // of the raw "Request failed with status 422".
+        setError("Please answer all required questions before continuing.");
         setSubmitting(false);
       } else {
         setError(
@@ -356,6 +430,13 @@ export function PreSurveyPage() {
 
       <div className={styles.layout}>
         <div className={styles.main}>
+          {/* Validation/submit errors surface near the TOP of the survey so a
+              student never misses why submission was blocked. */}
+          {error && (
+            <div className={styles.errorText} role="alert">
+              {error}
+            </div>
+          )}
           {identity && (
             <div className={styles.identityCard} aria-label="Your survey identity">
               <div className={styles.identityItem}>
