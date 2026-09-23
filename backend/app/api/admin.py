@@ -75,10 +75,14 @@ def list_sessions(
     sort: str = Query("newest", pattern="^(newest|oldest)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    with_view_time: bool = Query(False),
     db: Session = Depends(get_db),
 ) -> PaginatedSessions:
+    # with_view_time attaches active assessment viewing time (Admin Assessments
+    # page only). Off by default so Sessions/Transcripts pages are unchanged.
     return admin_service.list_sessions(
-        db, case_id=case_id, status=status, sort=sort, page=page, page_size=page_size
+        db, case_id=case_id, status=status, sort=sort, page=page,
+        page_size=page_size, with_view_time=with_view_time,
     )
 
 

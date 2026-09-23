@@ -110,6 +110,19 @@ def get_for_session(db: Session, session_id: str) -> AssessmentViewSession | Non
     ).scalar_one_or_none()
 
 
+def map_for_sessions(db: Session, session_ids: list[str]) -> dict[str, AssessmentViewSession]:
+    """Batched {interview_session_id: row} for a page of sessions (one query, no
+    N+1). Sessions never viewed are simply absent from the map."""
+    if not session_ids:
+        return {}
+    rows = db.execute(
+        select(AssessmentViewSession).where(
+            AssessmentViewSession.interview_session_id.in_(session_ids)
+        )
+    ).scalars().all()
+    return {r.interview_session_id: r for r in rows}
+
+
 def delete_for_sessions(db: Session, session_ids: list[str]) -> int:
     """Explicitly remove timing rows for the given sessions BEFORE the sessions
     themselves are deleted (belt-and-suspenders alongside ON DELETE CASCADE, so a

@@ -61,3 +61,25 @@ test("AssessmentReviewPage mounts the tracker with the assessment id, no UI", ()
   // No visible timer text is introduced.
   assert.doesNotMatch(page, /viewing time/i);
 });
+
+test("StudentSessionPage (dashboard reopen) also mounts the tracker, silently", () => {
+  const sessionPage = read("src/pages/student/StudentSessionPage.tsx");
+  assert.match(sessionPage, /import \{ useAssessmentViewTracker \} from/);
+  assert.match(sessionPage, /useAssessmentViewTracker\(assessment\?\.assessmentId \?\? null\)/);
+  // Silent: no student-facing timer/tracking text on this page either.
+  assert.doesNotMatch(sessionPage, /viewing time/i);
+});
+
+test("Admin Assessments table shows viewing time / views / first viewed and opts in", () => {
+  const admin = read("src/pages/admin/AdminAssessmentsPage.tsx");
+  // Requests the admin-only timing columns via the batched backend flag.
+  assert.match(admin, /withViewTime: true/);
+  // New compact columns.
+  assert.match(admin, /Active viewing time/);
+  assert.match(admin, /<th scope="col">Views<\/th>/);
+  assert.match(admin, /First viewed/);
+  // Formats duration and handles never-viewed with a consistent dash.
+  assert.match(admin, /s\.activeViewingSeconds != null \? fmtDuration\(s\.activeViewingSeconds\) : "—"/);
+  assert.match(admin, /s\.viewCount \?\? "—"/);
+  assert.match(admin, /s\.firstViewedAt \? fmtDateTime\(s\.firstViewedAt\) : "—"/);
+});

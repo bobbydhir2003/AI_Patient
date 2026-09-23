@@ -171,6 +171,37 @@ def test_delete_for_sessions_removes_row(db_session):
     assert avs.get_for_session(db_session, session.id) is None
 
 
+def test_list_sessions_with_view_time_attaches_fields_batched(db_session):
+    # Two completed sessions; only one is viewed. Batched map must fill the viewed
+    # one and leave the unviewed one at None (never 0-as-viewed).
+    user_a, _sa, session_a, run_a = _seed(db_session, email="la@s.edu", number="LA1")
+    user_b, _sb, session_b, _run_b = _seed(db_session, email="lb@s.edu", number="LB1")
+    avs.record_ping(db_session, run=run_a, user=user_a, now=T0)
+    avs.record_ping(db_session, run=run_a, user=user_a, now=T0 + timedelta(seconds=20))
+
+    page = admin_service.list_sessions(db_session, with_view_time=True, page_size=100)
+    by_id = {i.session_id: i for i in page.items}
+
+    assert by_id[session_a.id].active_viewing_seconds == 20
+    assert by_id[session_a.id].view_count == 1
+    assert by_id[session_a.id].first_viewed_at is not None
+    # Unviewed session: fields stay None (rendered as "—" in the admin table).
+    assert by_id[session_b.id].active_viewing_seconds is None
+    assert by_id[session_b.id].view_count is None
+    assert by_id[session_b.id].first_viewed_at is None
+
+
+def test_list_sessions_without_flag_leaves_view_fields_none(db_session):
+    user, _s, session, run = _seed(db_session, email="lc@s.edu", number="LC1")
+    avs.record_ping(db_session, run=run, user=user, now=T0)
+
+    page = admin_service.list_sessions(db_session, page_size=100)  # default False
+    item = next(i for i in page.items if i.session_id == session.id)
+    assert item.active_viewing_seconds is None
+    assert item.view_count is None
+    assert item.first_viewed_at is None
+
+
 def test_delete_session_path_removes_view_row(db_session):
     admin = User(
         email="admin@s.edu", password_hash="x", full_name="Admin", student_number="",

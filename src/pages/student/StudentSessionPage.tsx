@@ -10,6 +10,7 @@ import {
 } from "../../services/authApi";
 import type { Assessment } from "../../types/assessment";
 import { ApiError } from "../../services/api";
+import { useAssessmentViewTracker } from "../../hooks/useAssessmentViewTracker";
 import { ErrorState, Spinner, StatusBadge } from "../../portal/ui";
 import { TranscriptView } from "../../portal/TranscriptView";
 import { AssessmentPanel } from "../../portal/AssessmentPanel";
@@ -40,6 +41,11 @@ export function StudentSessionPage({ initialTab = "transcript" }: { initialTab?:
       })
       .catch((e) => setError(e instanceof ApiError ? e.message : "Could not load this session."));
   }, [token, sessionId]);
+
+  // Silent, admin-only active-viewing-time tracking on the dashboard-reopen path
+  // (same hook as AssessmentReviewPage; inert until an assessment is loaded).
+  // No UI, no timer, no student-facing message; heartbeat failures stay silent.
+  useAssessmentViewTracker(assessment?.assessmentId ?? null);
 
   if (error) return <div className="pt-portal"><ErrorState message={error} /></div>;
   if (!session || transcript === null) return <div className="pt-portal"><Spinner /></div>;

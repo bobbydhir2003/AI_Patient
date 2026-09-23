@@ -309,7 +309,14 @@ export function fetchStudentSessions(token: string, studentId: string): Promise<
 
 export function fetchAdminSessions(
   token: string,
-  params: { caseId?: string; status?: string; sort?: string; page?: number; pageSize?: number },
+  params: {
+    caseId?: string;
+    status?: string;
+    sort?: string;
+    page?: number;
+    pageSize?: number;
+    withViewTime?: boolean;
+  },
 ): Promise<Paginated<SessionSummary>> {
   const q = new URLSearchParams();
   if (params.caseId) q.set("case_id", params.caseId);
@@ -317,6 +324,8 @@ export function fetchAdminSessions(
   if (params.sort) q.set("sort", params.sort);
   q.set("page", String(params.page ?? 1));
   q.set("page_size", String(params.pageSize ?? 20));
+  // Admin Assessments page opts in to active-viewing-time columns.
+  if (params.withViewTime) q.set("with_view_time", "true");
   return authRequest<Paginated<SessionSummary>>(`/admin/sessions?${q.toString()}`, token);
 }
 

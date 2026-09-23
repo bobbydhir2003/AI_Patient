@@ -4,7 +4,7 @@ import { useAuth } from "../../state/AuthContext";
 import { fetchAdminSessions, type Paginated, type SessionSummary } from "../../services/authApi";
 import { ApiError } from "../../services/api";
 import { AssessmentLevelBadge, EmptyState, ErrorState, LoadingState } from "../../portal/ui";
-import { caseLabel, fmtDateTime } from "../../portal/format";
+import { caseLabel, fmtDateTime, fmtDuration } from "../../portal/format";
 import { IconAssessments, IconClipboard, IconProfile } from "../../components/admin/icons";
 
 const CASES = ["camden", "carly", "sofia", "jayden"];
@@ -32,7 +32,7 @@ export function AdminAssessmentsPage() {
     if (!token) return;
     setError(null);
     setData(null);
-    fetchAdminSessions(token, { caseId, status: "all", sort: "newest", page, pageSize: 40 })
+    fetchAdminSessions(token, { caseId, status: "all", sort: "newest", page, pageSize: 40, withViewTime: true })
       .then(setData)
       .catch((e) => setError(e instanceof ApiError ? e.message : "Could not load assessments."));
   }, [token, caseId, page]);
@@ -114,7 +114,9 @@ export function AdminAssessmentsPage() {
                   <th scope="col">ID</th>
                   <th scope="col">Case</th>
                   <th scope="col">Overall level</th>
-                  <th scope="col">Assessment date</th>
+                  <th scope="col">Active viewing time</th>
+                  <th scope="col">Views</th>
+                  <th scope="col">First viewed</th>
                   <th scope="col">Actions</th>
                 </tr>
               </thead>
@@ -127,7 +129,9 @@ export function AdminAssessmentsPage() {
                     <td>
                       <AssessmentLevelBadge level={s.overallLevel} />
                     </td>
-                    <td>{fmtDateTime(s.completedAt ?? s.startedAt)}</td>
+                    <td>{s.activeViewingSeconds != null ? fmtDuration(s.activeViewingSeconds) : "—"}</td>
+                    <td className="pt-muted">{s.viewCount ?? "—"}</td>
+                    <td>{s.firstViewedAt ? fmtDateTime(s.firstViewedAt) : "—"}</td>
                     <td>
                       <div className="pt-actions-cell">
                         <button

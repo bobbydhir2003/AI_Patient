@@ -107,7 +107,11 @@ def _session_has_assessment(db: Session, session_id: str) -> bool:
 
 
 def _session_summary(
-    db: Session, session: InterviewSession, *, with_view_time: bool = False
+    db: Session,
+    session: InterviewSession,
+    *,
+    with_view_time: bool = False,
+    view_map: dict | None = None,
 ) -> SessionSummaryOut:
     total, student_turns = _session_counts(db, session.id)
     # Admin-only active assessment viewing time; never attached to student paths.
@@ -115,9 +119,14 @@ def _session_summary(
     view_count: int | None = None
     first_viewed_at = None
     if with_view_time:
-        from app.services import assessment_view_service
+        if view_map is not None:
+            # Batched path (list): O(1) lookup; a missing key = never viewed.
+            view = view_map.get(session.id)
+        else:
+            # Single-session path (session detail): one row is fine.
+            from app.services import assessment_view_service
 
-        view = assessment_view_service.get_for_session(db, session.id)
+            view = assessment_view_service.get_for_session(db, session.id)
         if view is not None:
             view_seconds = view.active_seconds
             view_count = view.view_count
@@ -582,6 +591,7 @@ def list_sessions(
     sort: str = "newest",
     page: int = 1,
     page_size: int = 20,
+    with_view_time: bool = False,
 ) -> PaginatedSessions:
     stmt = select(InterviewSession).where(_REAL_SESSION)
     if case_id.strip():
@@ -600,8 +610,18 @@ def list_sessions(
     page_size = min(max(1, page_size), 100)
     stmt = stmt.limit(page_size).offset((page - 1) * page_size)
     rows = list(db.execute(stmt).scalars().all())
+    # One batched query for the whole page's viewing-time rows (no N+1); only
+    # when requested (Admin Assessments), so Sessions/Transcripts are unchanged.
+    view_map: dict | None = None
+    if with_view_time:
+        from app.services import assessment_view_service
+
+        view_map = assessment_view_service.map_for_sessions(db, [s.id for s in rows])
     return PaginatedSessions(
-        items=[_session_summary(db, s) for s in rows],
+        items=[
+            _session_summary(db, s, with_view_time=with_view_time, view_map=view_map)
+            for s in rows
+        ],
         total=total,
         page=page,
         page_size=page_size,
