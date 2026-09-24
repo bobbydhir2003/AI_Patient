@@ -20,7 +20,10 @@ from app.models import (
     SurveyReceiptReset,
     User,
 )
+from app.core.constants import USER_ROLE_ADMIN
+from app.schemas.session_schema import SessionCreateRequest
 from app.services import assessment_view_service as avs
+from app.services import session_service, student_data_service
 from tests.conftest import make_client
 from tests.test_admin import admin_token
 from tests.test_auth import auth_header
@@ -220,8 +223,8 @@ def test_detail_returns_only_this_students_sessions_with_metrics(api, admin, eng
     kinds = [e["kind"] for e in body["timeline"]]
     assert kinds.count("assessment_viewed") == 2
     assert "interview_completed" in kinds and "assessment_generated" in kinds
-    assert any("Initial after interview" in e["detail"] for e in body["timeline"])
-    assert any("Student dashboard" in e["detail"] for e in body["timeline"])
+    assert any("After Interview Report" in e["detail"] for e in body["timeline"])
+    assert any("Student Dashboard" in e["detail"] for e in body["timeline"])
     ats = [e["at"] for e in body["timeline"]]
     assert ats == sorted(ats, reverse=True)
 
@@ -491,3 +494,49 @@ def _resets_for(engine, student_id):
         )
     finally:
         db.close()
+
+
+# ---------------------------------------------------- practice-session ownership
+# Session.is_practice must follow the OWNING PROFILE, not the account's current
+# role, so a real roster student promoted to admin never loses their sessions.
+def test_promoted_student_admin_keeps_real_session(db_session):
+    student = Student(name="Ella Hagen", student_number="E1", email="ella@x.edu", is_practice=False)
+    db_session.add(student)
+    db_session.flush()
+    user = User(
+        email="ella@x.edu", password_hash="x", full_name="Ella Hagen",
+        student_number="E1", role=USER_ROLE_ADMIN, student_id=student.id, is_active=True,
+    )
+    db_session.add(user)
+    db_session.commit()
+
+    payload = SessionCreateRequest(student_name="Ella Hagen", student_id="E1", case_id="camden")
+    resp = session_service.create_session(db_session, payload, user)
+
+    sess = db_session.get(InterviewSession, resp.session_id)
+    assert sess.is_practice is False  # real student's session stays real
+    assert sess.student_id == student.id
+
+    # ...and it is therefore visible in that real student's Student Data.
+    detail = student_data_service.get_student_data(db_session, student.id)
+    assert detail.summary.total_sessions == 1
+    assert any(r.session_id == resp.session_id for r in detail.sessions)
+
+
+def test_pure_admin_gets_practice_session_excluded_from_student_data(db_session):
+    admin = User(
+        email="admin@x.edu", password_hash="x", full_name="Administrator",
+        student_number="", role=USER_ROLE_ADMIN, student_id=None, is_active=True,
+    )
+    db_session.add(admin)
+    db_session.commit()
+
+    payload = SessionCreateRequest(student_name="Administrator", student_id="", case_id="camden")
+    resp = session_service.create_session(db_session, payload, admin)
+
+    sess = db_session.get(InterviewSession, resp.session_id)
+    assert sess.is_practice is True  # admin-only practice profile => practice session
+    prof = db_session.get(Student, sess.student_id)
+    assert prof.is_practice is True  # provisioned as a practice profile
+    # The practice profile is excluded from the real Student Data roster.
+    assert prof.id not in [i.id for i in student_data_service.list_students(db_session).items]

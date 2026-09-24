@@ -64,12 +64,14 @@ test("ping API sends ONLY the opaque visitId + source enum, best-effort and sile
   assert.match(api, /catch \{[\s\S]*?\}/);
 });
 
-test("AssessmentReviewPage: one visitId per mount (useRef), passed to the hook", () => {
+test("AssessmentReviewPage: one visitId per mount (useRef) AND tracking paused on the Transcript tab", () => {
   assert.match(page, /useRef<string>\(crypto\.randomUUID\(\)\)/);
-  // The post-interview review page always records source=initial_assessment.
+  // The post-interview review page records source=initial_assessment, and — like
+  // StudentSessionPage — gates tracking so the Transcript tab passes null (inert),
+  // so reading the transcript never counts as assessment-view time.
   assert.match(
     page,
-    /useAssessmentViewTracker\(\s*assessment\?\.assessmentId \?\? null,\s*visitIdRef\.current,\s*"initial_assessment",\s*\)/,
+    /useAssessmentViewTracker\(\s*tab === "transcript" \? null : \(assessment\?\.assessmentId \?\? null\),\s*visitIdRef\.current,\s*"initial_assessment",\s*\)/,
   );
   assert.doesNotMatch(page, /viewing time/i);
 });

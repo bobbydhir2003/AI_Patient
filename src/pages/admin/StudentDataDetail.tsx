@@ -41,9 +41,9 @@ type Icon = ComponentType<SVGProps<SVGSVGElement>>;
 
 /** Admin-facing labels for where an assessment visit was opened from. */
 const VISIT_SOURCE_LABELS: Record<string, string> = {
-  initial_assessment: "Initial after interview",
-  student_dashboard: "Student dashboard",
-  legacy: "Historical (before visit tracking)",
+  initial_assessment: "After Interview Report",
+  student_dashboard: "Student Dashboard",
+  legacy: "Historical (Before Visit Tracking)",
   unknown: "Unknown",
 };
 
@@ -155,6 +155,8 @@ export function StudentDataDetail({ studentId }: { studentId: string }) {
       </div>
 
       <SessionHistory sessions={data.sessions} survey={survey} />
+
+      <AiAssessmentActivity sessions={data.sessions} />
 
       <div className={styles.bottomGrid}>
         <ActivitySummary data={data} />
@@ -420,6 +422,114 @@ function VisitHistory({ session }: { session: StudentDataSession }) {
         </p>
       )}
     </div>
+  );
+}
+
+// ------------------------------------------------------------------ AI assessment activity
+/** Generation time used for ordering/numbering: prefer the run's completion,
+ * else first view, else the interview start (always something truthful). */
+function genTime(s: StudentDataSession): number {
+  const iso = s.assessmentCompletedAt ?? s.firstViewedAt ?? s.startedAt;
+  const t = new Date(iso).getTime();
+  return isNaN(t) ? 0 : t;
+}
+
+/**
+ * Dedicated audit view of every AI assessment the student generated. Each
+ * generated assessment is shown independently and numbered per-case in
+ * generation order (oldest = #1), so completing the same case twice yields two
+ * separate entries and never collapses into one generic row. All values come
+ * straight from the existing Student Data session rows / per-visit records — no
+ * new API and no fabricated visits. Expanding a row reuses VisitHistory.
+ */
+function AiAssessmentActivity({ sessions }: { sessions: StudentDataSession[] }) {
+  const [openId, setOpenId] = useState<string | null>(null);
+
+  const assessed = sessions.filter((s) => s.hasAssessment).slice().sort((a, b) => genTime(a) - genTime(b));
+  const perCase: Record<string, number> = {};
+  const numbered = assessed.map((s) => {
+    perCase[s.caseId] = (perCase[s.caseId] ?? 0) + 1;
+    return { s, num: perCase[s.caseId] };
+  });
+
+  return (
+    <section className={styles.panel} aria-labelledby="sd-ai-activity">
+      <div className={styles.panelHead}>
+        <h3 id="sd-ai-activity" className={styles.panelTitle}>AI Assessment Activity</h3>
+      </div>
+      {numbered.length === 0 ? (
+        <EmptyState
+          title="No AI assessments yet"
+          hint="Each generated assessment and every view will appear here once the student completes an interview."
+        />
+      ) : (
+        <div className={styles.tableScroll}>
+          <table className={`pt-table ${styles.historyTable}`}>
+            <thead>
+              <tr>
+                <th scope="col">Assessment</th>
+                <th scope="col">Generated</th>
+                <th scope="col">Result</th>
+                <th scope="col">Views</th>
+                <th scope="col">Active time</th>
+                <th scope="col">Last viewed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {numbered.map(({ s, num }) => {
+                const open = openId === s.sessionId;
+                const hasVisits = s.visits.length > 0;
+                const views = s.viewCount ?? s.visits.length;
+                const title = `${caseLabel(s.caseId)} — Assessment #${num}`;
+                return (
+                  <Fragment key={s.sessionId}>
+                    <tr className={open ? styles.expandedRow : undefined}>
+                      <td className={styles.nowrap}>
+                        {hasVisits ? (
+                          <button
+                            type="button"
+                            className={styles.linkButton}
+                            onClick={() => setOpenId(open ? null : s.sessionId)}
+                            aria-expanded={open}
+                            aria-controls={`ai-visits-${s.sessionId}`}
+                          >
+                            {title} {open ? "▴" : "▾"}
+                          </button>
+                        ) : (
+                          title
+                        )}
+                      </td>
+                      <td className={styles.nowrap}>{fmtDateTimeShort(s.assessmentCompletedAt)}</td>
+                      <td>
+                        {s.overallLevel ? (
+                          <AssessmentLevelBadge level={s.overallLevel} />
+                        ) : (
+                          <span className="pt-badge pt-badge-gray">{(s.assessmentStatus ?? "pending").toLowerCase()}</span>
+                        )}
+                      </td>
+                      <td>{hasVisits ? views : <span className="pt-muted">0</span>}</td>
+                      <td className={styles.nowrap}>
+                        {hasVisits ? fmtViewTime(s.activeViewingSeconds) : <span className="pt-muted">—</span>}
+                      </td>
+                      <td className={styles.nowrap}>
+                        {hasVisits ? fmtDateTimeShort(s.lastViewedAt) : <span className="pt-muted">Never viewed</span>}
+                      </td>
+                    </tr>
+                    {open && (
+                      <tr className={styles.visitRow}>
+                        <td colSpan={6} id={`ai-visits-${s.sessionId}`}>
+                          <VisitHistory session={s} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 

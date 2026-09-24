@@ -104,9 +104,14 @@ export function AssessmentReviewPage() {
 
   // One visit id per page mount (stable across rerenders and internal tab
   // changes; a later reopen is a new mount => new visit). Silent, admin-only.
+  // Tracking is GATED to the non-transcript tabs (overview/rubrics/method are
+  // assessment content) so reading the Transcript tab never counts as assessment
+  // active time. Switching back resumes on the SAME visitId; the server credits
+  // 0 for the >45s gap, so the transcript interval is cleanly excluded — matching
+  // StudentSessionPage's behaviour on the dashboard-reopen path.
   const visitIdRef = useRef<string>(crypto.randomUUID());
   useAssessmentViewTracker(
-    assessment?.assessmentId ?? null,
+    tab === "transcript" ? null : (assessment?.assessmentId ?? null),
     visitIdRef.current,
     "initial_assessment",
   );

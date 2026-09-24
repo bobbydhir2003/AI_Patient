@@ -95,9 +95,13 @@ def create_session(
         case_category=case.case_category,
         assessment_capabilities=_json.dumps(capabilities),
         protected_reference_version="1.0",
-        # Admin/professor sessions are practice ("admin_test") and never counted
-        # in student completion stats or academic analytics.
-        is_practice=is_admin,
+        # A session is practice iff its OWNING PROFILE is a practice profile — not
+        # merely because the account currently holds an admin role. A provisioned
+        # admin-only profile is is_practice=True (above), so its sessions stay
+        # excluded from student analytics. But a real roster student who is later
+        # promoted to admin keeps is_practice=False, so their legitimate sessions
+        # remain real and never silently vanish from their Student Data.
+        is_practice=student.is_practice,
     )
     # Freeze the active (non-secret) config this interview should keep using, so
     # an admin editing the model/voice mid-way cannot alter an in-progress

@@ -86,9 +86,9 @@ _REAL_STUDENT = Student.is_practice.is_(False)
 TIMELINE_LIMIT = 60
 
 _SOURCE_LABELS = {
-    VISIT_SOURCE_INITIAL: "Initial after interview",
-    VISIT_SOURCE_DASHBOARD: "Student dashboard",
-    VISIT_SOURCE_LEGACY: "Historical (before visit tracking)",
+    VISIT_SOURCE_INITIAL: "After Interview Report",
+    VISIT_SOURCE_DASHBOARD: "Student Dashboard",
+    VISIT_SOURCE_LEGACY: "Historical (Before Visit Tracking)",
 }
 
 

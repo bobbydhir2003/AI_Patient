@@ -72,13 +72,30 @@ test("session actions reuse the existing admin session/transcript/assessment rou
 });
 
 test("visit history: compact Visit/Source/Started/Active time table with source labels", () => {
-  assert.match(detail, /initial_assessment: "Initial after interview"/);
-  assert.match(detail, /student_dashboard: "Student dashboard"/);
-  assert.match(detail, /legacy: "Historical \(before visit tracking\)"/);
+  assert.match(detail, /initial_assessment: "After Interview Report"/);
+  assert.match(detail, /student_dashboard: "Student Dashboard"/);
+  assert.match(detail, /legacy: "Historical \(Before Visit Tracking\)"/);
   for (const col of ["Visit", "Source", "Started", "Active time"]) {
     assert.ok(detail.includes(`<th scope="col">${col}</th>`), col);
   }
   assert.match(detail, /aria-expanded=\{open\}/);
+});
+
+test("AI Assessment Activity: dedicated section, per-case numbering, reuses VisitHistory", () => {
+  // A dedicated section rendered from the SAME session data (no new API).
+  assert.match(detail, /function AiAssessmentActivity\(\{ sessions \}/);
+  assert.match(detail, /<AiAssessmentActivity sessions=\{data\.sessions\} \/>/);
+  assert.match(detail, /AI Assessment Activity<\/h3>/);
+  // Only sessions that generated an assessment, numbered per case in gen order.
+  assert.match(detail, /sessions\.filter\(\(s\) => s\.hasAssessment\)/);
+  assert.match(detail, /Assessment #\$\{num\}/);
+  // Columns for the summary row and expansion into the existing per-visit table.
+  for (const col of ["Assessment", "Generated", "Result", "Views", "Active time", "Last viewed"]) {
+    assert.ok(detail.includes(`<th scope="col">${col}</th>`), col);
+  }
+  assert.match(detail, /<VisitHistory session=\{s\} \/>/);
+  // Never-viewed assessments still appear, truthfully.
+  assert.match(detail, /Never viewed/);
 });
 
 test("survey reset: every scope goes through a confirmation dialog before the API call", () => {
