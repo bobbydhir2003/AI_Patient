@@ -1,7 +1,6 @@
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AppHeader } from "./components/layout/AppHeader";
 import { AppFooter } from "./components/layout/AppFooter";
-import { StudentShell } from "./components/layout/StudentShell";
 import { WelcomePage } from "./pages/WelcomePage";
 import { CaseCatalogPage } from "./pages/CaseCatalogPage";
 import { CaseIntroductionPage } from "./pages/CaseIntroductionPage";
@@ -47,29 +46,22 @@ function App() {
   const location = useLocation();
   const isHomePage = location.pathname === "/";
   const isAdminArea = location.pathname.startsWith("/admin");
-  // The top brand header is only for the public landing/auth pages. Every
-  // student-facing page (dashboard + the interview flow) uses the persistent
-  // sidebar shell instead. This changes presentation only, not routing.
-  const showTopHeader =
-    isHomePage ||
-    location.pathname === "/register" ||
-    location.pathname === "/login";
 
   return (
     <>
-      {showTopHeader && <AppHeader />}
+      {!isAdminArea && <AppHeader />}
       <Routes>
         {/* Existing patient interview workflow (unchanged) */}
         <Route path="/" element={<WelcomePage />} />
-        <Route path="/cases" element={<StudentShell><CaseCatalogPage /></StudentShell>} />
-        <Route path="/cases/:caseId" element={<StudentShell><CaseIntroductionPage /></StudentShell>} />
-        <Route path="/survey/:caseId/pre" element={<StudentShell><PreSurveyPage /></StudentShell>} />
-        <Route path="/survey/:sessionId/post" element={<StudentShell><PostSurveyPage /></StudentShell>} />
-        <Route path="/interview/complete" element={<StudentShell><InterviewCompletePage /></StudentShell>} />
-        <Route path="/interview/:caseId" element={<StudentShell><InterviewPage /></StudentShell>} />
-        <Route path="/queue/:caseId" element={<StudentShell><InterviewQueuePage /></StudentShell>} />
-        <Route path="/assessment/:sessionId/loading" element={<StudentShell><AssessmentLoadingPage /></StudentShell>} />
-        <Route path="/assessment/:sessionId" element={<StudentShell><AssessmentReviewPage /></StudentShell>} />
+        <Route path="/cases" element={<CaseCatalogPage />} />
+        <Route path="/cases/:caseId" element={<CaseIntroductionPage />} />
+        <Route path="/survey/:caseId/pre" element={<PreSurveyPage />} />
+        <Route path="/survey/:sessionId/post" element={<PostSurveyPage />} />
+        <Route path="/interview/complete" element={<InterviewCompletePage />} />
+        <Route path="/interview/:caseId" element={<InterviewPage />} />
+        <Route path="/queue/:caseId" element={<InterviewQueuePage />} />
+        <Route path="/assessment/:sessionId/loading" element={<AssessmentLoadingPage />} />
+        <Route path="/assessment/:sessionId" element={<AssessmentReviewPage />} />
 
         {/* Authentication */}
         {/* The separate admin sign-in page is removed. Any old link or bookmark
