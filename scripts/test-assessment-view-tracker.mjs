@@ -19,10 +19,15 @@ const hook = read("src/hooks/useAssessmentViewTracker.ts");
 const api = read("src/services/assessmentViewApi.ts");
 const page = read("src/pages/AssessmentReviewPage.tsx");
 
-test("hook pings ONLY while the page is visible", () => {
-  // ping() is guarded by a visibility check, and visibility uses the standard API.
-  assert.match(hook, /const ping = \(\) => \{\s*if \(isVisible\(\)\) void pingAssessmentView\(assessmentId\)/);
+test("hook pings ONLY while the page is visible, reusing the visitId", () => {
+  // ping() is guarded by a visibility check and forwards the stable visitId.
+  assert.match(hook, /const ping = \(\) => \{\s*if \(isVisible\(\)\) void pingAssessmentView\(assessmentId, visitId, source\)/);
   assert.match(hook, /document\.visibilityState === "visible"/);
+});
+
+test("hook accepts a stable visitId + source and re-runs when they change", () => {
+  assert.match(hook, /assessmentId: string \| null \| undefined,\s*visitId: string,\s*source: AssessmentVisitSource,\s*\): void/);
+  assert.match(hook, /\}, \[assessmentId, visitId, source\]\);/);
 });
 
 test("hidden tab pauses; visible resumes (visibilitychange wired to start/stop)", () => {
@@ -47,39 +52,49 @@ test("hook is inert with no assessmentId and renders nothing (returns void)", ()
   assert.match(hook, /export function useAssessmentViewTracker\([^)]*\): void/);
 });
 
-test("ping API is best-effort and silent (never throws to the student)", () => {
+test("ping API sends ONLY the opaque visitId + source enum, best-effort and silent", () => {
   assert.match(api, /method: "POST"/);
   assert.match(api, /\/api\/assessments\/\$\{encodeURIComponent\(assessmentId\)\}\/view\/ping/);
   assert.match(api, /keepalive: true/);
-  // Errors are swallowed; no body/duration is ever sent.
+  // Body carries ONLY visitId + source (no duration/seconds/identity keys).
+  assert.match(api, /body: JSON\.stringify\(\{ visitId, source \}\)/);
+  assert.match(api, /export type AssessmentVisitSource = "initial_assessment" \| "student_dashboard";/);
+  assert.doesNotMatch(api, /JSON\.stringify\(\{[^}]*(activeSeconds|seconds|studentId|sessionId)[^}]*\}\)/);
+  // Errors are swallowed.
   assert.match(api, /catch \{[\s\S]*?\}/);
-  assert.doesNotMatch(api, /body:/);
 });
 
-test("AssessmentReviewPage mounts the tracker with the assessment id, no UI", () => {
-  assert.match(page, /useAssessmentViewTracker\(assessment\?\.assessmentId \?\? null\)/);
-  // No visible timer text is introduced.
+test("AssessmentReviewPage: one visitId per mount (useRef), passed to the hook", () => {
+  assert.match(page, /useRef<string>\(crypto\.randomUUID\(\)\)/);
+  // The post-interview review page always records source=initial_assessment.
+  assert.match(
+    page,
+    /useAssessmentViewTracker\(\s*assessment\?\.assessmentId \?\? null,\s*visitIdRef\.current,\s*"initial_assessment",\s*\)/,
+  );
   assert.doesNotMatch(page, /viewing time/i);
 });
 
-test("StudentSessionPage (dashboard reopen) also mounts the tracker, silently", () => {
+test("StudentSessionPage: visitId per mount AND tracking gated to the Assessment tab", () => {
   const sessionPage = read("src/pages/student/StudentSessionPage.tsx");
   assert.match(sessionPage, /import \{ useAssessmentViewTracker \} from/);
-  assert.match(sessionPage, /useAssessmentViewTracker\(assessment\?\.assessmentId \?\? null\)/);
-  // Silent: no student-facing timer/tracking text on this page either.
+  assert.match(sessionPage, /useRef<string>\(crypto\.randomUUID\(\)\)/);
+  // Gated: only the Assessment tab tracks; transcript tab passes null (inert).
+  assert.match(
+    sessionPage,
+    /useAssessmentViewTracker\(\s*tab === "assessment" \? \(assessment\?\.assessmentId \?\? null\) : null,\s*visitIdRef\.current,\s*"student_dashboard",\s*\)/,
+  );
   assert.doesNotMatch(sessionPage, /viewing time/i);
 });
 
-test("Admin Assessments table shows viewing time / views / first viewed and opts in", () => {
+test("Admin Assessments table shows time / views / first / last viewed and opts in", () => {
   const admin = read("src/pages/admin/AdminAssessmentsPage.tsx");
-  // Requests the admin-only timing columns via the batched backend flag.
   assert.match(admin, /withViewTime: true/);
-  // New compact columns.
   assert.match(admin, /Active viewing time/);
   assert.match(admin, /<th scope="col">Views<\/th>/);
   assert.match(admin, /First viewed/);
-  // Formats duration and handles never-viewed with a consistent dash.
+  assert.match(admin, /Last viewed/);
   assert.match(admin, /s\.activeViewingSeconds != null \? fmtDuration\(s\.activeViewingSeconds\) : "—"/);
   assert.match(admin, /s\.viewCount \?\? "—"/);
   assert.match(admin, /s\.firstViewedAt \? fmtDateTime\(s\.firstViewedAt\) : "—"/);
+  assert.match(admin, /s\.lastViewedAt \? fmtDateTime\(s\.lastViewedAt\) : "—"/);
 });

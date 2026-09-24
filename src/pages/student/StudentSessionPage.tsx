@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../../state/AuthContext";
 import {
@@ -42,10 +42,16 @@ export function StudentSessionPage({ initialTab = "transcript" }: { initialTab?:
       .catch((e) => setError(e instanceof ApiError ? e.message : "Could not load this session."));
   }, [token, sessionId]);
 
-  // Silent, admin-only active-viewing-time tracking on the dashboard-reopen path
-  // (same hook as AssessmentReviewPage; inert until an assessment is loaded).
-  // No UI, no timer, no student-facing message; heartbeat failures stay silent.
-  useAssessmentViewTracker(assessment?.assessmentId ?? null);
+  // Silent, admin-only active-viewing-time tracking on the dashboard-reopen path.
+  // One visit id per page mount (stable across tab toggles), and tracking is
+  // GATED to the Assessment tab so transcript-tab time is never counted. Leaving
+  // and reopening from the dashboard is a new mount => new visit.
+  const visitIdRef = useRef<string>(crypto.randomUUID());
+  useAssessmentViewTracker(
+    tab === "assessment" ? (assessment?.assessmentId ?? null) : null,
+    visitIdRef.current,
+    "student_dashboard",
+  );
 
   if (error) return <div className="pt-portal"><ErrorState message={error} /></div>;
   if (!session || transcript === null) return <div className="pt-portal"><Spinner /></div>;

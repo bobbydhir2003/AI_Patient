@@ -158,6 +158,7 @@ class SessionSummaryOut(CamelModel):
     active_viewing_seconds: int | None = None
     view_count: int | None = None
     first_viewed_at: datetime | None = None
+    last_viewed_at: datetime | None = None
 
 
 class PaginatedSessions(CamelModel):

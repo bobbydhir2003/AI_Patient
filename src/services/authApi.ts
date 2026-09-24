@@ -114,6 +114,7 @@ export interface SessionSummary {
   activeViewingSeconds?: number | null;
   viewCount?: number | null;
   firstViewedAt?: string | null;
+  lastViewedAt?: string | null;
 }
 
 export interface TranscriptMessage {
@@ -401,4 +402,149 @@ export function deleteAssessment(token: string, assessmentId: string) {
 
 export function deleteMessage(token: string, messageId: string) {
   return authRequest(`/admin/messages/${messageId}`, token, { method: "DELETE" });
+}
+
+// ---------------- admin Student Data ----------------
+export interface StudentDataListItem {
+  id: string;
+  name: string;
+  email: string;
+  studentNumber: string;
+  isActive: boolean;
+  hasAccount: boolean;
+  sessionCount: number;
+  completedCount: number;
+  incompleteCount: number;
+  lastActivityAt: string | null;
+}
+
+/** initial_assessment | student_dashboard | legacy | unknown */
+export type AssessmentVisitSourceValue = string;
+
+export interface AssessmentVisit {
+  visitNumber: number;
+  source: AssessmentVisitSourceValue;
+  startedAt: string;
+  lastHeartbeatAt: string;
+  activeSeconds: number;
+  assessmentDeleted: boolean;
+}
+
+export interface StudentDataSession {
+  sessionId: string;
+  caseId: string;
+  caseCategory: string;
+  status: string;
+  startedAt: string;
+  completedAt: string | null;
+  durationSeconds: number | null;
+  turnCount: number;
+  studentQuestionCount: number;
+  hasAssessment: boolean;
+  assessmentId: string | null;
+  assessmentStatus: string | null;
+  overallLevel: string | null;
+  assessmentCompletedAt: string | null;
+  activeViewingSeconds: number | null;
+  viewCount: number | null;
+  firstViewedAt: string | null;
+  lastViewedAt: string | null;
+  /** completed | pre_completed | not_completed | other_case */
+  surveyStatus: string;
+  visits: AssessmentVisit[];
+}
+
+export interface SurveyStage {
+  completed: boolean;
+  syncStatus: string | null;
+  completedAt: string | null;
+}
+
+export interface StudentSurveyState {
+  globalStatus: "not_started" | "in_progress" | "completed";
+  ownerCaseId: string | null;
+  ownerCaseName: string | null;
+  caseId: string | null;
+  caseName: string | null;
+  completedAt: string | null;
+  pre: SurveyStage;
+  post: SurveyStage;
+  lastResponseAt: string | null;
+  canResetPre: boolean;
+  canResetPost: boolean;
+  canResetBoth: boolean;
+  resetCount: number;
+  lastResetAt: string | null;
+}
+
+export interface StudentTimelineEvent {
+  kind: string;
+  at: string;
+  title: string;
+  detail: string;
+  sessionId: string | null;
+}
+
+export interface StudentDataDetail {
+  student: {
+    id: string;
+    name: string;
+    email: string;
+    studentNumber: string;
+    isActive: boolean;
+    hasAccount: boolean;
+    role: string | null;
+    createdAt: string;
+    lastLoginAt: string | null;
+    lastActivityAt: string | null;
+  };
+  summary: {
+    totalSessions: number;
+    completedSessions: number;
+    incompleteSessions: number;
+    archivedSessions: number;
+    completedWithoutAssessment: number;
+    totalInterviewSeconds: number;
+    averageInterviewSeconds: number | null;
+    totalStudentQuestions: number;
+    totalAssessments: number;
+    assessedSessions: number;
+    totalViewSeconds: number;
+    totalVisits: number;
+    viewedSessions: number;
+  };
+  survey: StudentSurveyState;
+  sessions: StudentDataSession[];
+  timeline: StudentTimelineEvent[];
+}
+
+export type SurveyResetScope = "pre" | "post" | "both";
+
+export function fetchStudentDataList(
+  token: string,
+  params: { search?: string; status?: string; sort?: string; page?: number; pageSize?: number },
+): Promise<Paginated<StudentDataListItem>> {
+  const q = new URLSearchParams();
+  if (params.search) q.set("search", params.search);
+  if (params.status) q.set("status", params.status);
+  if (params.sort) q.set("sort", params.sort);
+  q.set("page", String(params.page ?? 1));
+  q.set("page_size", String(params.pageSize ?? 15));
+  return authRequest<Paginated<StudentDataListItem>>(`/admin/student-data?${q.toString()}`, token);
+}
+
+export function fetchStudentDataDetail(token: string, studentId: string): Promise<StudentDataDetail> {
+  return authRequest<StudentDataDetail>(`/admin/student-data/${encodeURIComponent(studentId)}`, token);
+}
+
+/** Admin-only. The student is identified by the route; the body carries only the scope. */
+export function resetStudentSurvey(
+  token: string,
+  studentId: string,
+  scope: SurveyResetScope,
+): Promise<{ success: boolean; message: string; survey: StudentSurveyState }> {
+  return authRequest(`/admin/student-data/${encodeURIComponent(studentId)}/survey-reset`, token, {
+    method: "POST",
+    body: JSON.stringify({ scope }),
+  });
 }

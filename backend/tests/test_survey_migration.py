@@ -62,7 +62,8 @@ def test_ownership_branch_0022_from_0020_and_single_head():
     assert ownership.down_revision == "0020"
     assert set(merge.down_revision) == {"0021", "0022"}
     # Head is single again after the merge so `alembic upgrade head` is unambiguous.
-    assert scripts.get_heads() == ["0023"]
+    # (Later migrations extend the chain linearly; what matters is ONE head.)
+    assert len(scripts.get_heads()) == 1
 
 
 def _insert_receipt(connection, **kw):

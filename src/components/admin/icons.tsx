@@ -137,3 +137,7 @@ export const IconEdit = (p: IconProps) => (
 export const IconTrash = (p: IconProps) => (
   <svg {...base(p)}><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m-9 0v14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6" /></svg>
 );
+/** Person + data rows: the student-centred "Student Data" view. */
+export const IconStudentData = (p: IconProps) => (
+  <svg {...base(p)}><circle cx="8" cy="7" r="3.5" /><path d="M2 20v-1a5 5 0 0 1 5-5h2a5 5 0 0 1 3.4 1.3M15 11h7M15 15h7M15 19h7" /></svg>
+);

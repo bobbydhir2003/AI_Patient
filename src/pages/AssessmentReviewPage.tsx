@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   ApiError,
@@ -102,9 +102,14 @@ export function AssessmentReviewPage() {
     [rubrics],
   );
 
-  // Silent, admin-only active-viewing-time tracking. No UI; inert until the
-  // assessment is ready (assessmentId is null while processing/failed).
-  useAssessmentViewTracker(assessment?.assessmentId ?? null);
+  // One visit id per page mount (stable across rerenders and internal tab
+  // changes; a later reopen is a new mount => new visit). Silent, admin-only.
+  const visitIdRef = useRef<string>(crypto.randomUUID());
+  useAssessmentViewTracker(
+    assessment?.assessmentId ?? null,
+    visitIdRef.current,
+    "initial_assessment",
+  );
 
   function handleViewTranscript(turnId: string, evidenceId: string) {
     setTab("transcript");

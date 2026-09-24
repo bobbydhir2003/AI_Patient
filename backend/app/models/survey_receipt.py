@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
@@ -109,3 +109,49 @@ class SurveyReceipt(Base):
 
     student = relationship("Student")
     latest_session = relationship("InterviewSession")
+
+
+# Admin survey-reset scopes (see student_data_service.reset_survey).
+SURVEY_RESET_PRE = "pre"
+SURVEY_RESET_POST = "post"
+SURVEY_RESET_BOTH = "both"
+SURVEY_RESET_SCOPES = (SURVEY_RESET_PRE, SURVEY_RESET_POST, SURVEY_RESET_BOTH)
+
+
+class SurveyReceiptReset(Base):
+    """Append-only snapshot of a survey receipt taken at the moment an admin
+    reset it, so a reset never loses the linkage to the student's earlier REDCap
+    submission.
+
+    Survey ANSWERS live only in REDCap, filed under the receipt's
+    ``redcap_record_id``. A reset always rotates the receipt to a fresh record_id
+    (or removes the receipt, for "both"), so the student's resubmission lands on a
+    NEW REDCap record and never overwrites the earlier answers. This row keeps the
+    earlier record_id plus the stage statuses/timestamps as they were, which is
+    what lets research reporting find the pre-reset responses.
+    """
+
+    __tablename__ = "survey_receipt_resets"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    student_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("students.id"), nullable=False, index=True
+    )
+    case_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    scope: Mapped[str] = mapped_column(String(10), nullable=False)
+    # Snapshot of the receipt as it was immediately before the reset.
+    redcap_record_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    pre_sync_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    pre_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    post_sync_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    post_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    overall_status: Mapped[str] = mapped_column(String(20), nullable=False)
+    was_owner_case: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Plain strings (no FK): the trail must survive a later session/admin delete.
+    latest_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    receipt_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reset_by_user_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reset_by_email: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    reset_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now, index=True
+    )

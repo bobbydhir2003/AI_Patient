@@ -34,3 +34,19 @@ const CASE_NAMES: Record<string, string> = {
 export function caseLabel(caseId: string): string {
   return CASE_NAMES[caseId] ?? caseId.replace(/_/g, " ");
 }
+
+/** Compact date + time without seconds (e.g. "9/23/2026, 6:00 PM") for dense tables. */
+export function fmtDateTimeShort(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d.getTime())
+    ? "—"
+    : d.toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
+}
+
+/** Compact numeric date (e.g. "9/23/26") for narrow columns. */
+export function fmtDateShort(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "—" : d.toLocaleDateString(undefined, { dateStyle: "short" });
+}

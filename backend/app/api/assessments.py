@@ -19,6 +19,7 @@ from app.schemas.assessment_schema import (
     AssessmentOut,
     AssessmentStatusOut,
     AssessmentTurnOut,
+    AssessmentViewPingIn,
     RubricOut,
 )
 
@@ -115,17 +116,25 @@ def rubrics() -> list[RubricOut]:
 
 @router.post("/assessments/{assessment_id}/view/ping", status_code=status.HTTP_204_NO_CONTENT)
 def ping_assessment_view(
+    payload: AssessmentViewPingIn | None = None,
     run: AssessmentRun = Depends(require_assessment_access),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Response:
     """Silent heartbeat for "active assessment viewing time" (admin-only telemetry).
 
-    No request body — the server credits time from its own timestamps. Ownership
-    is enforced by require_assessment_access (a wrong student gets 404); the
-    service additionally credits ONLY the owning student, so an admin viewing the
-    assessment never adds time. Best-effort: failures never surface to the student.
+    Body carries ONLY an opaque ``visitId`` (page-mount UUID) and the visit's
+    ``source`` enum (used only when the visit is first created) — the server credits
+    time from its own timestamps and resolves all identity from
+    require_assessment_access (a wrong student gets 404). The service credits ONLY
+    the owning student, so an admin viewing never adds time. Best-effort: failures
+    never surface to the student. A missing visitId maps to one implicit legacy
+    visit (version-skew tolerance during rollout).
     """
     if get_settings().assessment_view_tracking_enabled:
-        assessment_view_service.record_ping(db, run=run, user=current_user)
+        assessment_view_service.record_ping(
+            db, run=run, user=current_user,
+            visit_id=payload.visit_id if payload else None,
+            source=payload.source if payload else None,
+        )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

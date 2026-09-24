@@ -250,6 +250,17 @@ class SurveyOwnedByOtherCaseError(AppError):
         super().__init__("You have already submitted the survey. Thank you for your feedback.")
 
 
+class SurveyResetNotApplicableError(AppError):
+    """An admin survey reset targeted a stage/package the student does not have
+    (e.g. resetting Post when Post was never completed). Nothing is changed."""
+
+    status_code = 409
+    code = "survey_reset_not_applicable"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 class SurveySyncError(AppError):
     """REDCap was configured but the survey import failed (network/timeout/HTTP).
     The student's answers are preserved client-side so they can retry; the local

@@ -147,6 +147,7 @@ AUDIT_SESSION_ARCHIVED = "session_archived"
 AUDIT_SESSION_DELETED = "session_deleted"
 AUDIT_ASSESSMENT_DELETED = "assessment_deleted"
 AUDIT_MESSAGE_DELETED = "message_deleted"
+AUDIT_SURVEY_RESET = "survey_reset"
 
 # Storage alert threshold (percent used) - configurable real threshold.
 STORAGE_WARNING_PERCENT = 80.0

@@ -1,0 +1,516 @@
+/* Admin Student Data (master-detail). Uses the shared design tokens from
+   styles/variables.css; tables/badges/buttons come from portal.css. */
+
+/* ---- layout ---- */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+.layout.hasSelection {
+  grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+}
+.listPane,
+.detailPane {
+  min-width: 0;
+}
+.mobileBack {
+  display: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Narrow screens: list -> full detail (the list hides while a student is open). */
+@media (max-width: 1200px) {
+  .layout.hasSelection {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .layout.hasSelection .listPane {
+    display: none;
+  }
+  .mobileBack {
+    display: inline-block;
+    margin-bottom: var(--space-3);
+  }
+}
+
+/* ---- panels ---- */
+.panel {
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  min-width: 0;
+}
+.panelHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.panelTitle {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+/* ---- student list ---- */
+.listToolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+.listToolbar :global(.pt-select) {
+  width: auto;
+  flex: 0 0 auto;
+}
+.searchBox {
+  position: relative;
+  flex: 1 1 200px;
+  display: flex;
+  align-items: center;
+  color: var(--color-text-muted);
+}
+.searchBox svg {
+  position: absolute;
+  left: 10px;
+  pointer-events: none;
+}
+.searchBox :global(.pt-input) {
+  padding-left: 32px;
+  width: 100%;
+}
+.tableScroll {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+.studentTable td,
+.studentTable th {
+  padding: 10px 12px;
+}
+.hasSelection .studentTable td,
+.hasSelection .studentTable th {
+  padding: 9px 8px;
+}
+.hasSelection .studentTable td:first-child,
+.hasSelection .studentTable th:first-child {
+  padding-left: 12px;
+}
+.selectedRow td {
+  background: var(--color-accent-soft) !important;
+}
+.selectedRow td:first-child {
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
+.nameButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+.nameButton:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.nameText {
+  display: flex;
+  flex-direction: column;
+}
+.subId,
+.subTime {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
+.chevronCell {
+  color: var(--color-text-muted);
+  width: 24px;
+}
+.nowrap {
+  white-space: nowrap;
+}
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  font-size: 0.85rem;
+}
+.pagerButtons {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.pageLabel {
+  color: var(--color-text-secondary);
+}
+
+/* ---- avatars ---- */
+.avatar,
+.avatarSm {
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.avatar {
+  width: 56px;
+  height: 56px;
+  font-size: 1.2rem;
+}
+.avatarSm {
+  width: 30px;
+  height: 30px;
+  font-size: 0.72rem;
+}
+
+/* ---- detail ---- */
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  /* Panels respond to the detail pane's own width (it shares the row with the
+     student list), not the viewport. */
+  container-type: inline-size;
+  container-name: studentdetail;
+}
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.headerText {
+  min-width: 0;
+}
+.headerTitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.studentName {
+  margin: 0;
+  font-size: 1.4rem;
+}
+.headerMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px var(--space-4);
+  margin-top: 4px;
+  color: var(--color-text-secondary);
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+/* summary cards */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+@container studentdetail (min-width: 1100px) {
+  .cards {
+    grid-template-columns: repeat(8, minmax(0, 1fr));
+  }
+}
+@container studentdetail (max-width: 640px) {
+  .cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+.card {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+}
+.cardIcon {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  flex-shrink: 0;
+}
+.cardBody {
+  min-width: 0;
+}
+.cardValue {
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--color-text-primary);
+}
+.cardValueSmall {
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--color-text-primary);
+}
+.cardLabel {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  margin-top: 2px;
+}
+.cardHint {
+  font-size: 0.74rem;
+  color: var(--color-warning);
+  margin-top: 2px;
+}
+.tone_red { background: var(--color-accent); }
+.tone_blue { background: #2f6fed; }
+.tone_green { background: var(--color-success); }
+.tone_orange { background: #e08a2b; }
+.tone_purple { background: #7b4fd0; }
+.tone_teal { background: var(--color-teal); }
+.tone_gray { background: #4a4a4a; }
+
+/* session history */
+.historyTable td,
+.historyTable th {
+  padding: 10px 8px;
+  vertical-align: middle;
+}
+.historyTable td:first-child,
+.historyTable th:first-child {
+  padding-left: 12px;
+}
+.historyTable th {
+  white-space: nowrap;
+  font-size: 0.7rem;
+}
+.historyTable :global(.pt-badge) {
+  white-space: nowrap;
+}
+.historyTable :global(.pt-icon-btn:disabled) {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.expandedRow td {
+  background: var(--color-bg-card-hover);
+  border-bottom-color: transparent;
+}
+.linkButton {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--color-accent-strong);
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+}
+.linkButton:hover,
+.linkButton:focus-visible {
+  text-decoration-color: currentColor;
+}
+.linkButton:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+.visitRow td {
+  background: var(--color-bg-card-hover);
+}
+.visitPanel {
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  max-width: 720px;
+}
+.visitHead {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px var(--space-3);
+  margin-bottom: var(--space-2);
+  font-size: 0.86rem;
+  color: var(--color-text-primary);
+}
+.visitTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+.visitTable th {
+  text-align: left;
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+.visitTable td {
+  padding: 6px 8px;
+  color: var(--color-text-secondary);
+  border-bottom: 1px solid var(--color-border);
+}
+.visitTable tr:last-child td {
+  border-bottom: none;
+}
+
+/* bottom panels: summary | survey, timeline full width below; three across
+   only when the detail pane is genuinely wide. */
+.bottomGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+.bottomGrid > :last-child {
+  grid-column: 1 / -1;
+}
+@container studentdetail (min-width: 1250px) {
+  .bottomGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .bottomGrid > :last-child {
+    grid-column: auto;
+  }
+}
+@container studentdetail (max-width: 700px) {
+  .bottomGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .header {
+    align-items: flex-start;
+  }
+}
+
+.kv {
+  margin: 0;
+}
+.kvRow {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 7px 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.86rem;
+}
+.kvRow:last-child {
+  border-bottom: none;
+}
+.kvRow dt {
+  color: var(--color-text-secondary);
+}
+.kvRow dd {
+  margin: 0;
+  color: var(--color-text-primary);
+  text-align: right;
+}
+
+/* survey controls */
+.surveyScope {
+  margin: 0 0 var(--space-3);
+  font-size: 0.86rem;
+  color: var(--color-text-secondary);
+}
+.stages {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+@media (max-width: 420px) {
+  .stages {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.stage {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+}
+.stageTitle {
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+.stageDate {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+.resetBoth {
+  width: 100%;
+  justify-content: center;
+  margin-top: var(--space-3);
+}
+.note {
+  margin: var(--space-3) 0 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+/* timeline */
+.timeline {
+  list-style: none;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+}
+.timelineItem {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: start;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.84rem;
+}
+.timelineItem:last-child {
+  border-bottom: none;
+}
+.timelineIcon {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+}
+.timelineText {
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+.timelineText strong {
+  font-weight: 600;
+}
+.timelineAt {
+  font-size: 0.74rem;
+  color: var(--color-text-muted);
+  text-align: right;
+  white-space: nowrap;
+}

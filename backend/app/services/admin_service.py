@@ -27,6 +27,7 @@ from app.models import (
     InterviewSession,
     Student,
     SurveyReceipt,
+    SurveyReceiptReset,
     User,
 )
 from app.repositories.audit_repository import AuditRepository
@@ -118,6 +119,7 @@ def _session_summary(
     view_seconds: int | None = None
     view_count: int | None = None
     first_viewed_at = None
+    last_viewed_at = None
     if with_view_time:
         if view_map is not None:
             # Batched path (list): O(1) lookup; a missing key = never viewed.
@@ -131,6 +133,7 @@ def _session_summary(
             view_seconds = view.active_seconds
             view_count = view.view_count
             first_viewed_at = view.first_viewed_at
+            last_viewed_at = view.last_viewed_at
     return SessionSummaryOut(
         session_id=session.id,
         student_id=session.student_id,
@@ -149,6 +152,7 @@ def _session_summary(
         active_viewing_seconds=view_seconds,
         view_count=view_count,
         first_viewed_at=first_viewed_at,
+        last_viewed_at=last_viewed_at,
     )
 
 
@@ -795,9 +799,9 @@ def purge_student_tree(db: Session, admin: User, student: Student) -> dict:
     DELETE cascades, only ORM ones):
       1. assessment runs -> domain results -> evidence (ORM cascade). Evidence
          references conversation_turns, so runs go BEFORE the turns.
-      2. survey receipts (LOCAL linkage only; REDCap answers are never touched):
-         before sessions (latest_session_id FK) and before the student
-         (student_id NOT NULL FK).
+      2. survey receipts + survey-reset snapshots (LOCAL linkage only; REDCap
+         answers are never touched): before sessions (latest_session_id FK) and
+         before the student (student_id NOT NULL FK).
       3. sessions (ORM-cascade their conversation turns).
       4. the login account, then the student profile.
     """
@@ -811,6 +815,14 @@ def purge_student_tree(db: Session, admin: User, student: Student) -> dict:
     )
     for receipt in receipts:
         db.delete(receipt)
+    # Admin survey-reset snapshots (local linkage history; student_id FK).
+    resets = list(
+        db.execute(
+            select(SurveyReceiptReset).where(SurveyReceiptReset.student_id == student.id)
+        ).scalars().all()
+    )
+    for reset in resets:
+        db.delete(reset)
     db.flush()
     # Admin-only viewing-time rows for these sessions (explicit delete alongside
     # the FK ON DELETE CASCADE) so a purge never orphans them or gets blocked.

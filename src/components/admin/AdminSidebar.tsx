@@ -6,6 +6,7 @@ import {
   IconLogout,
   IconProfile,
   IconSessions,
+  IconStudentData,
   IconStudents,
   IconTranscript,
 } from "./icons";
@@ -25,6 +26,7 @@ const SECTIONS: { title: string; items: NavItem[] }[] = [
     title: "Academic Management",
     items: [
       { to: "/admin", label: "Dashboard", icon: IconDashboard, end: true },
+      { to: "/admin/student-data", label: "Student Data", icon: IconStudentData },
       { to: "/admin/students", label: "Students", icon: IconStudents },
       { to: "/admin/sessions", label: "Sessions", icon: IconSessions },
       { to: "/admin/transcripts", label: "Transcripts", icon: IconTranscript },
