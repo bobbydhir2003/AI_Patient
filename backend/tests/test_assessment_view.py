@@ -126,6 +126,78 @@ def test_negative_delta_credits_zero(db_session):
     assert s.active_seconds == 0
 
 
+# ---- active-timer events: pause banks the tail, resume never credits the gap --
+def _ping(db, run, user, vid, secs, event=None):
+    return avs.record_ping(
+        db, run=run, user=user, visit_id=vid, event=event, now=T0 + timedelta(seconds=secs)
+    )
+
+
+def test_short_visit_pause_banks_full_tail(db_session):
+    # 5s / 10s / 35s visits must record ~5 / ~10 / ~35, not 0 / 0 / 20.
+    for tail, expected in ((5, 5), (10, 10)):
+        user, _s, _sess, run = _seed(db_session, email=f"p{tail}@s.edu", number=f"P{tail}")
+        _ping(db_session, run, user, "v1", 0, "resume")           # start (new visit, 0)
+        s = _ping(db_session, run, user, "v1", tail, "pause")     # leave -> bank tail
+        assert s.active_seconds == expected, tail
+        assert s.view_count == 1, tail
+
+    user, _s, _sess, run = _seed(db_session, email="p35@s.edu", number="P35")
+    _ping(db_session, run, user, "v1", 0, "resume")
+    _ping(db_session, run, user, "v1", 20, "heartbeat")           # +20
+    s = _ping(db_session, run, user, "v1", 35, "pause")           # +15 tail
+    assert s.active_seconds == 35
+    assert s.view_count == 1
+
+
+def test_hidden_gap_pause_resume_excludes_background_time(db_session):
+    # visible 12s -> hidden 5min -> visible 10s => ~22s, hidden counted 0.
+    user, _s, _sess, run = _seed(db_session, email="hg@s.edu", number="HG1")
+    _ping(db_session, run, user, "v1", 0, "resume")
+    _ping(db_session, run, user, "v1", 12, "pause")              # bank 12
+    _ping(db_session, run, user, "v1", 12 + 300, "resume")       # back after 5min -> 0
+    s = _ping(db_session, run, user, "v1", 12 + 300 + 10, "pause")  # bank 10
+    assert s.active_seconds == 22
+    assert s.view_count == 1  # same visit throughout; pause/resume never add views
+
+
+def test_resume_never_credits_gap(db_session):
+    user, _s, _sess, run = _seed(db_session, email="rz@s.edu", number="RZ1")
+    _ping(db_session, run, user, "v1", 0, "resume")
+    s = _ping(db_session, run, user, "v1", 5, "resume")          # a resume always credits 0
+    assert s.active_seconds == 0
+
+
+def test_duplicate_pause_does_not_double_credit(db_session):
+    # The visibilitychange + pagehide + unmount burst can send several pauses.
+    user, _s, _sess, run = _seed(db_session, email="dp@s.edu", number="DP1")
+    _ping(db_session, run, user, "v1", 0, "resume")
+    _ping(db_session, run, user, "v1", 8, "pause")              # bank 8
+    _ping(db_session, run, user, "v1", 8, "pause")              # ~0
+    s = _ping(db_session, run, user, "v1", 8, "pause")          # ~0
+    assert s.active_seconds == 8
+
+
+def test_transcript_toggle_pauses_and_resumes_same_visit(db_session):
+    # Assessment 8s -> Transcript (pause) -> 60s (0) -> Assessment (resume) -> 10s.
+    user, _s, _sess, run = _seed(db_session, email="tt@s.edu", number="TT1")
+    _ping(db_session, run, user, "v1", 0, "resume")
+    _ping(db_session, run, user, "v1", 8, "pause")             # bank 8
+    _ping(db_session, run, user, "v1", 8 + 60, "resume")       # back from transcript -> 0
+    s = _ping(db_session, run, user, "v1", 8 + 60 + 10, "pause")  # bank 10
+    assert s.active_seconds == 18
+    assert s.view_count == 1
+
+
+def test_missing_event_defaults_to_heartbeat_backward_compatible(db_session):
+    # An old client that omits event behaves exactly like the pre-event heartbeat.
+    user, _s, _sess, run = _seed(db_session, email="bc@s.edu", number="BC1")
+    _ping(db_session, run, user, "v1", 0)                      # no event -> heartbeat
+    s = _ping(db_session, run, user, "v1", 20)                 # no event -> +20
+    assert s.active_seconds == 20
+    assert s.view_count == 1
+
+
 # ---- 10/11/12. summary aggregates over visits ------------------------------
 def test_summary_active_equals_sum_of_visit_active(db_session):
     user, _s, session, run = _seed(db_session, email="h@s.edu", number="H1")

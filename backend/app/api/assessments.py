@@ -123,9 +123,10 @@ def ping_assessment_view(
 ) -> Response:
     """Silent heartbeat for "active assessment viewing time" (admin-only telemetry).
 
-    Body carries ONLY an opaque ``visitId`` (page-mount UUID) and the visit's
-    ``source`` enum (used only when the visit is first created) — the server credits
-    time from its own timestamps and resolves all identity from
+    Body carries ONLY an opaque ``visitId`` (page-mount UUID), the visit's
+    ``source`` enum (used only when the visit is first created), and an active-timer
+    ``event`` (heartbeat|pause|resume) — the server credits time from its own
+    timestamps and resolves all identity from
     require_assessment_access (a wrong student gets 404). The service credits ONLY
     the owning student, so an admin viewing never adds time. Best-effort: failures
     never surface to the student. A missing visitId maps to one implicit legacy
@@ -136,5 +137,6 @@ def ping_assessment_view(
             db, run=run, user=current_user,
             visit_id=payload.visit_id if payload else None,
             source=payload.source if payload else None,
+            event=payload.event if payload else None,
         )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

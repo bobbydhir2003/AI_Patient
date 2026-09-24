@@ -6,17 +6,27 @@ truth for view COUNT and per-visit time); ``assessment_view_sessions`` is the
 fast denormalized summary over them (total active_seconds, view_count, first/last
 viewed). The client sends only a heartbeat + its visit_id (never a duration).
 
-Crediting per heartbeat (server timestamps only):
+Active-timer model (server timestamps only). Each ping carries an ``event``:
   new visit_id            -> create the visit (recording its declared source),
-                             credit 0, summary.view_count += 1
-  same visit_id:
+                             credit 0, summary.view_count += 1  (event ignored)
+  same visit_id, event == "resume":
+                          -> credit 0 and rebaseline last_heartbeat_at = now, so
+                             the hidden/away gap this resume ends never counts.
+  same visit_id, otherwise (heartbeat | pause | missing):
     delta = now - visit.last_heartbeat_at
     delta < 0             -> credit 0 (clock skew)
     0 <= delta <= 45      -> credit delta   (one dropped 20s beat still counts)
-    delta > 45            -> credit 0        (hidden/away/idle)
-A new visit's first ping always credits 0, so away/between-visit gaps never count.
-There is NO elapsed-gap visit counting - views come only from new visit rows.
-A visit's source is fixed when the row is created; later pings never change it.
+    delta > 45            -> credit 0        (safety net for a missed pause)
+A "pause" is simply the heartbeat that fires at the moment of leaving: it banks the
+final partial interval (the last 0-20s), which is what makes a 5s/10s/35s visit
+record ~5/~10/~35 instead of 0/0/20. A new visit's first ping always credits 0, so
+away/between-visit gaps never count. There is NO elapsed-gap visit counting - views
+come only from new visit rows, so heartbeat/pause/resume never change the count.
+Because every ping advances last_heartbeat_at to now, a duplicate pause/end (the
+visibilitychange+pagehide+unmount burst) credits ~0 the second time - idempotent
+with no extra state. A visit's source is fixed when the row is created; later pings
+(including pause/resume) never change it. Backward compatible: an old client that
+sends no event is treated as "heartbeat".
 """
 from __future__ import annotations
 
@@ -44,6 +54,14 @@ MAX_CREDIT_SECONDS = 45
 # a rollout: it produces exactly ONE implicit visit per session (never repeats).
 LEGACY_CLIENT_VISIT_ID = "__legacy_client__"
 
+# Active-timer transitions. Only RESUME is special (credit 0 + rebaseline); every
+# other value — including a missing one from an old client — credits the bounded
+# elapsed interval, so "pause" is just the final banking heartbeat.
+EVENT_HEARTBEAT = "heartbeat"
+EVENT_PAUSE = "pause"
+EVENT_RESUME = "resume"
+VISIT_EVENTS = (EVENT_HEARTBEAT, EVENT_PAUSE, EVENT_RESUME)
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -63,20 +81,24 @@ def record_ping(
     user: User,
     visit_id: str | None,
     source: str | None = None,
+    event: str | None = None,
     now: datetime | None = None,
 ) -> AssessmentViewSession | None:
-    """Record one heartbeat for the owning student's visit and return the summary
-    row (or None when nothing is credited). Runs in one short transaction.
+    """Record one active-timer ping for the owning student's visit and return the
+    summary row (or None when nothing is credited). Runs in one short transaction.
 
     Only the OWNING student's active viewing counts (admins/others never credit).
     The session must be COMPLETED. ``visit_id`` is an opaque client id; a blank/
     missing one maps to a single implicit legacy visit (rollout tolerance).
     ``source`` is used only if this ping creates the visit; anything outside the
-    client enum (or missing) is stored as "unknown".
+    client enum (or missing) is stored as "unknown". ``event`` selects the timing
+    transition: "resume" credits 0 (ending a hidden/away gap), everything else —
+    including a missing value from an old client — credits the bounded interval.
     """
     now = now or _now()
     vid = (visit_id or "").strip() or LEGACY_CLIENT_VISIT_ID
     src = source if source in VISIT_CLIENT_SOURCES else VISIT_SOURCE_UNKNOWN
+    ev = event if event in VISIT_EVENTS else EVENT_HEARTBEAT
     session = db.get(InterviewSession, run.session_id)
     if session is None:
         return None
@@ -88,16 +110,16 @@ def record_ping(
 
     try:
         summary = _apply_ping(
-            db, session=session, run=run, user=user, vid=vid, src=src, now=now
+            db, session=session, run=run, user=user, vid=vid, src=src, ev=ev, now=now
         )
         db.commit()
         return summary
     except IntegrityError:
         # A concurrent duplicate first ping for the same (session, visit_id) won
-        # the unique constraint; retry as an existing-visit heartbeat.
+        # the unique constraint; retry as an existing-visit ping.
         db.rollback()
         summary = _apply_ping(
-            db, session=session, run=run, user=user, vid=vid, src=src, now=now
+            db, session=session, run=run, user=user, vid=vid, src=src, ev=ev, now=now
         )
         db.commit()
         return summary
@@ -111,6 +133,7 @@ def _apply_ping(
     user: User,
     vid: str,
     src: str,
+    ev: str,
     now: datetime,
 ) -> AssessmentViewSession:
     """Find-or-create the visit + update the summary (no commit). Raises
@@ -160,10 +183,16 @@ def _apply_ping(
             summary.assessment_run_id = run.id
         return summary
 
-    # EXISTING visit: credit bounded elapsed time to both the visit and summary.
-    # Its source is deliberately left untouched (fixed at creation).
-    delta = (now - _as_utc(visit.last_heartbeat_at)).total_seconds()
-    credit = int(delta) if 0 <= delta <= MAX_CREDIT_SECONDS else 0
+    # EXISTING visit: credit bounded elapsed active time to both the visit and
+    # summary. A "resume" ends a hidden/away gap, so it credits 0 and only
+    # rebaselines; every other event banks the elapsed interval since the last
+    # ping (so the leaving "pause" captures the final partial interval). The
+    # source is deliberately left untouched (fixed at creation).
+    if ev == EVENT_RESUME:
+        credit = 0
+    else:
+        delta = (now - _as_utc(visit.last_heartbeat_at)).total_seconds()
+        credit = int(delta) if 0 <= delta <= MAX_CREDIT_SECONDS else 0
     visit.active_seconds += credit
     visit.last_heartbeat_at = now
     if summary is None:

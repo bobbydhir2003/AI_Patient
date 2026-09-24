@@ -24,6 +24,12 @@ class AssessmentViewPingIn(CamelModel):
     # Where this visit was opened from. Validated enum (anything else -> 422);
     # honoured ONLY when the visit row is first created, never on later pings.
     source: Literal["initial_assessment", "student_dashboard"] | None = None
+    # Active-timer transition this ping represents. Optional for backward
+    # compatibility: an old client that omits it is treated as "heartbeat" (the
+    # server credits the bounded elapsed interval). Only "resume" is special — it
+    # credits 0 and rebaselines, so the away/hidden gap it ends never counts.
+    # Anything outside the enum is coerced to "heartbeat" server-side.
+    event: Literal["heartbeat", "pause", "resume"] | None = None
 
 # ---------------- internal AI-stage models (validated, never exposed raw) ---
 

@@ -19,9 +19,13 @@ const hook = read("src/hooks/useAssessmentViewTracker.ts");
 const api = read("src/services/assessmentViewApi.ts");
 const page = read("src/pages/AssessmentReviewPage.tsx");
 
-test("hook pings ONLY while the page is visible, reusing the visitId", () => {
-  // ping() is guarded by a visibility check and forwards the stable visitId.
-  assert.match(hook, /const ping = \(\) => \{\s*if \(isVisible\(\)\) void pingAssessmentView\(assessmentId, visitId, source\)/);
+test("active period: resume on enter, heartbeat while visible, pause on leave", () => {
+  // Entering an active period sends resume (server credits 0); the interval only
+  // heartbeats while visible.
+  assert.match(hook, /activeRef\.current = true;\s*send\("resume"\);/);
+  assert.match(hook, /setInterval\(\(\) => \{\s*if \(isVisible\(\)\) send\("heartbeat"\);\s*\}, HEARTBEAT_MS\)/);
+  // Leaving banks the final partial interval with pause (NOT visibility-guarded).
+  assert.match(hook, /activeRef\.current = false;[\s\S]*?send\("pause"\);/);
   assert.match(hook, /document\.visibilityState === "visible"/);
 });
 
@@ -30,20 +34,26 @@ test("hook accepts a stable visitId + source and re-runs when they change", () =
   assert.match(hook, /\}, \[assessmentId, visitId, source\]\);/);
 });
 
-test("hidden tab pauses; visible resumes (visibilitychange wired to start/stop)", () => {
+test("hidden tab pauses; visible resumes; pagehide also pauses (best-effort tail)", () => {
   assert.match(hook, /addEventListener\("visibilitychange", onVisibility\)/);
-  assert.match(hook, /const onVisibility = \(\) => \{\s*if \(isVisible\(\)\) start\(\);\s*else stop\(\);/);
+  assert.match(hook, /addEventListener\("pagehide", onPageHide\)/);
+  assert.match(hook, /const onVisibility = \(\) => \{\s*if \(isVisible\(\)\) startActive\(\);\s*else pauseActive\(\);/);
+  assert.match(hook, /const onPageHide = \(\) => pauseActive\(\);/);
 });
 
-test("heartbeat interval is 20s and only one interval runs at a time", () => {
+test("heartbeat interval is 20s and only one active period runs at a time", () => {
   assert.match(hook, /HEARTBEAT_MS = 20_000/);
-  assert.match(hook, /setInterval\(ping, HEARTBEAT_MS\)/);
-  // start() is idempotent (won't stack intervals on repeated visible events).
-  assert.match(hook, /if \(timerRef\.current !== null\) return;/);
+  // startActive is idempotent (won't stack intervals on repeated visible events).
+  assert.match(hook, /if \(activeRef\.current\) return;/);
+  // pauseActive is idempotent (won't send a second pause on the leave burst).
+  assert.match(hook, /if \(!activeRef\.current\) return;/);
 });
 
-test("cleanup removes the listener AND clears the interval", () => {
-  assert.match(hook, /return \(\) => \{\s*document\.removeEventListener\("visibilitychange", onVisibility\);\s*stop\(\);/);
+test("cleanup removes BOTH listeners AND banks the final pause", () => {
+  assert.match(
+    hook,
+    /return \(\) => \{\s*document\.removeEventListener\("visibilitychange", onVisibility\);\s*window\.removeEventListener\("pagehide", onPageHide\);\s*pauseActive\(\);/,
+  );
   assert.match(hook, /window\.clearInterval\(timerRef\.current\)/);
 });
 
@@ -52,14 +62,15 @@ test("hook is inert with no assessmentId and renders nothing (returns void)", ()
   assert.match(hook, /export function useAssessmentViewTracker\([^)]*\): void/);
 });
 
-test("ping API sends ONLY the opaque visitId + source enum, best-effort and silent", () => {
+test("ping API sends ONLY the opaque visitId + source + event, best-effort and silent", () => {
   assert.match(api, /method: "POST"/);
   assert.match(api, /\/api\/assessments\/\$\{encodeURIComponent\(assessmentId\)\}\/view\/ping/);
   assert.match(api, /keepalive: true/);
-  // Body carries ONLY visitId + source (no duration/seconds/identity keys).
-  assert.match(api, /body: JSON\.stringify\(\{ visitId, source \}\)/);
+  // Body carries ONLY visitId + source + event (no duration/seconds/identity keys).
+  assert.match(api, /body: JSON\.stringify\(\{ visitId, source, event \}\)/);
   assert.match(api, /export type AssessmentVisitSource = "initial_assessment" \| "student_dashboard";/);
-  assert.doesNotMatch(api, /JSON\.stringify\(\{[^}]*(activeSeconds|seconds|studentId|sessionId)[^}]*\}\)/);
+  assert.match(api, /export type AssessmentViewEvent = "heartbeat" \| "pause" \| "resume";/);
+  assert.doesNotMatch(api, /JSON\.stringify\(\{[^}]*(activeSeconds|duration|seconds|studentId|sessionId)[^}]*\}\)/);
   // Errors are swallowed.
   assert.match(api, /catch \{[\s\S]*?\}/);
 });
