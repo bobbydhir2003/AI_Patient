@@ -1,7 +1,9 @@
 """Authentication / authorization FastAPI dependencies.
 
 `get_current_user` validates the bearer token and loads the account.
-`require_admin` / `require_student` enforce role-based access control.
+`require_admin` / `require_super_admin` / `require_student` enforce role-based
+access control. The role is always read from the database row loaded for the
+token's subject, never from the token claims or the request.
 `require_session_access` centralizes the ownership check so a student can only
 reach their own sessions while admins can reach any.
 """
@@ -11,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.core.constants import (
     ADMIN_ROLES,
+    SUPER_ADMIN_ROLES,
     USER_ROLE_STUDENT,
     USER_ROLES,
 )
@@ -74,17 +77,18 @@ def get_current_user(
 
 
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
-    """The single administrative gate. Every admin holds ALL admin powers."""
+    """Academic administration gate: admin OR super_admin."""
     if current_user.role not in ADMIN_ROLES:
         raise ForbiddenError("Administrator access is required.")
     return current_user
 
 
-# Backward-compatibility alias. The former super/system-admin tier has been
-# consolidated into the normal admin role, so any endpoint that historically
-# required a "super admin" now simply requires a normal admin. Kept as an alias
-# so existing imports keep working without granting extra privileges.
-require_super_admin = require_admin
+def require_super_admin(current_user: User = Depends(get_current_user)) -> User:
+    """System administration gate: super_admin ONLY. A normal admin gets 403,
+    a student 403, an anonymous caller 401 (from get_current_user)."""
+    if current_user.role not in SUPER_ADMIN_ROLES:
+        raise ForbiddenError("Super Admin access required.")
+    return current_user
 
 
 def require_student(current_user: User = Depends(get_current_user)) -> User:

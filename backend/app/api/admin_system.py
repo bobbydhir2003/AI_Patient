@@ -1,6 +1,6 @@
-"""Technical System Dashboard endpoints (admin-only).
+"""Technical System Dashboard endpoints (SUPER ADMIN ONLY).
 
-Every route is protected by `require_admin`. Values come from real runtime
+Every route is protected by `require_super_admin` (normal admin -> 403). Values come from real runtime
 checks or real recorded activity; no secrets are ever returned.
 """
 import time
@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.logging import get_logger
 from app.database.connection import get_db
-from app.dependencies.auth import require_admin
+from app.dependencies.auth import require_super_admin
 from app.schemas.system_schema import (
     SystemLiveOut,
     SystemOverviewOut,
@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 router = APIRouter(
     prefix="/admin/system",
     tags=["admin-system"],
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_super_admin)],
 )
 
 

@@ -8,9 +8,10 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import { LOGIN_ROUTE } from "../services/authRouting";
+import { isAdminRole, isSuperAdminRole, LOGIN_ROUTE } from "../services/authRouting";
 import {
   apiLogin,
+  apiSuperAdminLogin,
   apiLogout,
   apiMe,
   apiRegister,
@@ -39,9 +40,15 @@ interface AuthContextValue {
   user: AuthUser | null;
   loading: boolean;
   isAuthenticated: boolean;
+  /** admin OR super_admin (academic Admin Management). */
   isAdmin: boolean;
+  /** super_admin only (system administration). Derived from the user returned by
+   * the backend (/auth/me or login), never from anything stored client-side. */
+  isSuperAdmin: boolean;
   isStudent: boolean;
   login: (email: string, password: string) => Promise<AuthUser>;
+  /** Super Admin portal sign-in: the backend refuses non-super-admins (403). */
+  loginSuperAdmin: (email: string, password: string) => Promise<AuthUser>;
   register: (input: {
     fullName: string;
     email: string;
@@ -136,6 +143,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [persistToken],
   );
 
+  const loginSuperAdmin = useCallback(
+    async (email: string, password: string) => {
+      const res = await apiSuperAdminLogin(email, password);
+      // Defense in depth only; the backend already refused anyone else (with the
+      // same generic credential error, so nothing about the account is revealed).
+      if (!isSuperAdminRole(res.user.role)) throw new Error("Incorrect email or password.");
+      clearPersistedAppState();
+      persistToken(res.accessToken);
+      setUser(res.user);
+      return res.user;
+    },
+    [persistToken],
+  );
+
   const register = useCallback(
     // D2: registration no longer auto-logs-in; it returns a pending status
     // message. The caller shows it and directs the user to sign in after approval.
@@ -151,13 +172,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       loading,
       isAuthenticated: !!user,
-      isAdmin: user?.role === "admin",
+      isAdmin: isAdminRole(user?.role),
+      isSuperAdmin: isSuperAdminRole(user?.role),
       isStudent: user?.role === "student",
       login,
+      loginSuperAdmin,
       register,
       logout,
     }),
-    [token, user, loading, login, register, logout],
+    [token, user, loading, login, loginSuperAdmin, register, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

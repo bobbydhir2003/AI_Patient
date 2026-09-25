@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
+from app.core.constants import SUPER_ADMIN_ROLES
 from app.database.connection import get_db
 from app.dependencies.auth import get_current_user
 from app.models import User
@@ -35,6 +36,24 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> Registe
 @router.post("/login", response_model=TokenResponse, dependencies=[Depends(_login_rate_limit)])
 def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
     return auth_service.login(db, payload.email, payload.password, client_ip=client_ip(request))
+
+
+@router.post(
+    "/superadmin/login", response_model=TokenResponse, dependencies=[Depends(_login_rate_limit)]
+)
+def superadmin_login(
+    payload: LoginRequest, request: Request, db: Session = Depends(get_db)
+) -> TokenResponse:
+    """Super Admin portal sign-in: the SAME credential check, throttle and token
+    as /login, but a token is issued only to an ACTIVE account whose stored role
+    is super_admin. Every other outcome (unknown email, wrong password, student,
+    normal admin, pending/disabled account) returns the SAME generic 401
+    "Incorrect email or password." so the portal never reveals whether the
+    credentials were valid for another role."""
+    return auth_service.login(
+        db, payload.email, payload.password,
+        client_ip=client_ip(request), required_roles=SUPER_ADMIN_ROLES,
+    )
 
 
 @router.get("/me", response_model=UserOut)

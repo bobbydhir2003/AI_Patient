@@ -570,11 +570,13 @@ function StageCard({
   stage,
   canReset,
   onReset,
+  showReset,
 }: {
   label: string;
   stage: SurveyStage;
   canReset: boolean;
   onReset: () => void;
+  showReset: boolean;
 }) {
   return (
     <div className={styles.stage}>
@@ -592,14 +594,16 @@ function StageCard({
           <div className="pt-muted">Recorded locally (REDCap not configured)</div>
         )}
       </div>
-      <button
-        type="button"
-        className="pt-btn pt-btn-secondary pt-btn-sm pt-btn-icon"
-        disabled={!canReset}
-        onClick={onReset}
-      >
-        <IconRefresh width={14} height={14} /> Reset {label.split(" ")[0]}
-      </button>
+      {showReset && (
+        <button
+          type="button"
+          className="pt-btn pt-btn-secondary pt-btn-sm pt-btn-icon"
+          disabled={!canReset}
+          onClick={onReset}
+        >
+          <IconRefresh width={14} height={14} /> Reset {label.split(" ")[0]}
+        </button>
+      )}
     </div>
   );
 }
@@ -613,7 +617,9 @@ function SurveyControls({
   survey: StudentSurveyState;
   onChanged: () => void;
 }) {
-  const { token } = useAuth();
+  // Resets are Super Admin only (the API enforces it too); normal admins see
+  // the survey state read-only.
+  const { token, isSuperAdmin } = useAuth();
   const toast = useToast();
   const [confirm, setConfirm] = useState<SurveyResetScope | null>(null);
   const [busy, setBusy] = useState(false);
@@ -645,30 +651,36 @@ function SurveyControls({
           : "One survey per student — not started yet."}
       </p>
       <div className={styles.stages}>
-        <StageCard label="Pre Survey" stage={survey.pre} canReset={survey.canResetPre} onReset={() => setConfirm("pre")} />
-        <StageCard label="Post Survey" stage={survey.post} canReset={survey.canResetPost} onReset={() => setConfirm("post")} />
+        <StageCard label="Pre Survey" stage={survey.pre} canReset={survey.canResetPre} onReset={() => setConfirm("pre")} showReset={isSuperAdmin} />
+        <StageCard label="Post Survey" stage={survey.post} canReset={survey.canResetPost} onReset={() => setConfirm("post")} showReset={isSuperAdmin} />
       </div>
-      <button
-        type="button"
-        className={`pt-btn pt-btn-danger pt-btn-sm pt-btn-icon ${styles.resetBoth}`}
-        disabled={!survey.canResetBoth}
-        onClick={() => setConfirm("both")}
-      >
-        <IconRefresh width={14} height={14} /> Reset both surveys
-      </button>
-      <p className={styles.note}>
-        This allows the student to complete the survey again. Earlier answers stay in REDCap under
-        their original record; the retake is saved as a new record. Sessions, transcripts and
-        assessments are not changed.
-        {survey.ownerCaseId && ` Pre/Post resets are retaken in ${caseName}; "Reset both" lets the student take the survey in any case.`}
-      </p>
+      {isSuperAdmin ? (
+        <>
+          <button
+            type="button"
+            className={`pt-btn pt-btn-danger pt-btn-sm pt-btn-icon ${styles.resetBoth}`}
+            disabled={!survey.canResetBoth}
+            onClick={() => setConfirm("both")}
+          >
+            <IconRefresh width={14} height={14} /> Reset both surveys
+          </button>
+          <p className={styles.note}>
+            This allows the student to complete the survey again. Earlier answers stay in REDCap under
+            their original record; the retake is saved as a new record. Sessions, transcripts and
+            assessments are not changed.
+            {survey.ownerCaseId && ` Pre/Post resets are retaken in ${caseName}; "Reset both" lets the student take the survey in any case.`}
+          </p>
+        </>
+      ) : (
+        <p className={styles.note}>Survey resets are managed by a Super Administrator.</p>
+      )}
       {survey.resetCount > 0 && (
         <p className={styles.note}>
           Reset {survey.resetCount} time{survey.resetCount === 1 ? "" : "s"} · last {fmtDateTime(survey.lastResetAt)}
         </p>
       )}
 
-      {confirm && (
+      {isSuperAdmin && confirm && (
         <ConfirmModal
           title={RESET_COPY[confirm].title}
           body={RESET_COPY[confirm].body}

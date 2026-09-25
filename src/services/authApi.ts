@@ -6,7 +6,7 @@
 import { API_BASE_URL, ApiError } from "./api";
 import type { Assessment } from "../types/assessment";
 
-export type UserRole = "student" | "admin";
+export type UserRole = "student" | "admin" | "super_admin";
 
 export interface AuthUser {
   id: string;
@@ -61,6 +61,15 @@ async function authRequest<T>(
 // ---------------- auth ----------------
 export function apiLogin(email: string, password: string): Promise<TokenResponse> {
   return authRequest<TokenResponse>("/auth/login", null, {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+/** Super Admin portal sign-in. The backend issues a token ONLY to an active
+ * super_admin; every other outcome is the same generic 401 as a wrong password. */
+export function apiSuperAdminLogin(email: string, password: string): Promise<TokenResponse> {
+  return authRequest<TokenResponse>("/auth/superadmin/login", null, {
     method: "POST",
     body: JSON.stringify({ email, password }),
   });

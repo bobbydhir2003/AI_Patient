@@ -127,9 +127,11 @@ def test_system_admin_flag_and_admin_access(engine):
 
 # --------------------------------------- TEST 4: LEGACY SUPER ADMIN CONSOLIDATES
 def test_legacy_super_admin_consolidates_to_admin(engine):
-    """A pre-existing 'super_admin' row is folded into the normal admin role by
-    migration 0016. After consolidation it is an ordinary admin with FULL admin
-    powers and simulator access. No administrator loses access."""
+    """A pre-existing 'super_admin' row was folded into the normal admin role by
+    (historical) migration 0016. After consolidation it is an ordinary admin:
+    academic admin access + simulator, but NOT system administration, which now
+    requires the re-introduced super_admin role (granted only by the bootstrap
+    command)."""
     from sqlalchemy import text
     from sqlalchemy.orm import sessionmaker
 
@@ -149,9 +151,10 @@ def test_legacy_super_admin_consolidates_to_admin(engine):
         me = c.get("/api/auth/me", headers=bearer(tok)).json()
         assert me["role"] == "admin"
         assert c.get("/api/admin/dashboard", headers=bearer(tok)).status_code == 200
-        # Full admin powers: system dashboard, load tests, credentials, voices.
-        assert c.get("/api/admin/system/load-tests/config", headers=bearer(tok)).status_code == 200
-        assert c.get("/api/admin/runtime/credentials", headers=bearer(tok)).status_code == 200
+        # Academic admin only: system administration is super_admin-only.
+        assert c.get("/api/admin/users", headers=bearer(tok)).status_code == 200
+        assert c.get("/api/admin/system/load-tests/config", headers=bearer(tok)).status_code == 403
+        assert c.get("/api/admin/runtime/credentials", headers=bearer(tok)).status_code == 403
         # ...and simulator access preserved.
         assert c.post("/api/sessions", json={"studentName": "Tester", "caseId": "camden"}, headers=bearer(tok)).status_code == 201
 

@@ -14,7 +14,10 @@ import {
   isAdminRole,
   caseHubPath,
   canAccessAdmin,
+  isSuperAdminRole,
   PATIENT_CASES_PATH,
+  SUPERADMIN_LOGIN_ROUTE,
+  SUPERADMIN_HOME,
 } from "../.test-build/services/authRouting.js";
 
 test("TEST 1 - student lands on Patient Cases", () => {
@@ -42,4 +45,17 @@ test("TEST 5 - case hub is the dashboard for any authenticated role", () => {
   assert.equal(caseHubPath("student"), "/student/dashboard");
   assert.equal(caseHubPath("admin"), "/student/dashboard");
   assert.equal(caseHubPath(null), "/cases");
+});
+
+test("TEST 6 - super_admin is an admin AND the only super admin", () => {
+  assert.equal(isAdminRole("super_admin"), true);
+  assert.equal(canAccessAdmin("super_admin"), true);
+  assert.equal(isSuperAdminRole("super_admin"), true);
+  assert.equal(isSuperAdminRole("admin"), false);
+  assert.equal(isSuperAdminRole("student"), false);
+  assert.equal(isSuperAdminRole(null), false);
+  assert.equal(caseHubPath("super_admin"), "/student/dashboard");
+  assert.equal(postLoginPath({ role: "super_admin" }), "/student/dashboard");
+  assert.equal(SUPERADMIN_LOGIN_ROUTE, "/superadmin/login");
+  assert.equal(SUPERADMIN_HOME, "/superadmin/dashboard");
 });

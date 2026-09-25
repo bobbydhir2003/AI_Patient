@@ -74,18 +74,23 @@ def test_history_never_stores_raw_key(engine, enc):
         db.close()
 
 
-def test_credential_replace_allowed_for_any_admin(engine, enc):
-    """Two-role model: every admin may replace credentials (no super-admin tier).
-    A student is still forbidden."""
-    from tests.test_auth import make_admin, register
+def test_credential_replace_is_super_admin_only(engine, enc):
+    """Credentials are system administration: a super admin may view and
+    replace them; a normal admin and a student are forbidden (403)."""
+    from tests.test_auth import make_admin, make_super_admin, register
 
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
+        make_super_admin(engine, email="sup_cred@school.edu")
+        sa = bearer(login_token(c, "sup_cred@school.edu", "superpass1"))
+        assert c.get("/api/admin/runtime/credentials", headers=sa).status_code == 200
+        r = c.post("/api/admin/runtime/credentials/openai", json={"key": "sk-new-123456789"}, headers=sa)
+        assert r.status_code == 200
+
         make_admin(engine, email="norm_admin@school.edu")  # role=admin
         ah = bearer(login_token(c, "norm_admin@school.edu", "adminpass1"))
-        # normal admin can view AND replace
-        assert c.get("/api/admin/runtime/credentials", headers=ah).status_code == 200
-        r = c.post("/api/admin/runtime/credentials/openai", json={"key": "sk-new-123456789"}, headers=ah)
-        assert r.status_code == 200
+        assert c.get("/api/admin/runtime/credentials", headers=ah).status_code == 403
+        assert c.post("/api/admin/runtime/credentials/openai",
+                      json={"key": "sk-new-123456789"}, headers=ah).status_code == 403
 
         # a student is forbidden
         register(c, email="stud_cred@school.edu", password="studpass1", number="SC1")
@@ -96,9 +101,9 @@ def test_credential_replace_allowed_for_any_admin(engine, enc):
 
 def test_masked_keys_viewable_without_secret(engine):
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
-        from tests.test_auth import make_admin
-        make_admin(engine, email="viewer_admin@school.edu")
-        ah = bearer(login_token(c, "viewer_admin@school.edu", "adminpass1"))
+        from tests.test_auth import make_super_admin
+        make_super_admin(engine, email="viewer_admin@school.edu")
+        ah = bearer(login_token(c, "viewer_admin@school.edu", "superpass1"))
         body = c.get("/api/admin/runtime/credentials", headers=ah).json()
         for cred in body["credentials"]:
             assert "encrypted" not in json.dumps(cred).lower()

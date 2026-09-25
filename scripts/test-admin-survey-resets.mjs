@@ -19,18 +19,22 @@ const app = read("src/App.tsx");
 const page = read("src/pages/admin/AdminSurveyResetsPage.tsx");
 const api = read("src/services/authApi.ts");
 
-test("sidebar: Survey Resets sits directly below User Accounts with the refresh icon", () => {
+test("sidebar: Survey Resets is the first Super Administration item (super admins only)", () => {
   assert.match(
     sidebar,
-    /\{ to: "\/admin\/users", label: "User Accounts", icon: IconStudents \},\n\s*\{ to: "\/admin\/survey-resets", label: "Survey Resets", icon: IconRefresh \},/,
+    /title: "Super Administration",\n\s*superOnly: true,\n\s*items: \[\n\s*\{ to: "\/superadmin\/survey-resets", label: "Survey Resets", icon: IconRefresh \},/,
   );
+  // No longer an Academic Management (normal admin) item.
+  assert.doesNotMatch(sidebar, /to: "\/admin\/survey-resets"/);
 });
 
-test("route: /admin/survey-resets lives under the admin-protected layout", () => {
-  const start = app.indexOf('path="/admin"');
-  const adminBlock = app.slice(start, app.indexOf("</Route>", start));
-  assert.match(adminBlock, /<ProtectedRoute role="admin">/);
-  assert.match(adminBlock, /<Route path="survey-resets" element=\{<AdminSurveyResetsPage \/>\} \/>/);
+test("route: /superadmin/survey-resets lives under the super_admin-protected layout", () => {
+  const start = app.indexOf('path="/superadmin"');
+  const block = app.slice(start, app.indexOf("</Route>", start));
+  assert.match(block, /<ProtectedRoute role="super_admin">/);
+  assert.match(block, /<Route path="survey-resets" element=\{<AdminSurveyResetsPage \/>\} \/>/);
+  // The old admin URL only redirects into the guarded Super Admin route.
+  assert.match(app, /<Route path="survey-resets" element=\{<Navigate to="\/superadmin\/survey-resets" replace \/>\} \/>/);
 });
 
 test("header, banner wording reflects preserved history (never claims deletion)", () => {

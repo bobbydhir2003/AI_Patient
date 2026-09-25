@@ -338,7 +338,7 @@ export function AiConfigurationSection({ config }: { config: AiConfiguration }) 
     <section className="pt-panel" aria-labelledby="sys-ai-h">
       <div className="pt-panel-head">
         <h2 id="sys-ai-h" className="pt-panel-title"><IconCpu /> AI Configuration</h2>
-        <Link to="/admin/system/config" className="pt-panel-link">Edit</Link>
+        <Link to="/superadmin/ai-config" className="pt-panel-link">Edit</Link>
       </div>
       <div className="pt-row" style={{ gap: "var(--space-6)", alignItems: "flex-start" }}>
         <KvBlock
@@ -365,7 +365,7 @@ export function ApiCredentialsSection({ credentials }: { credentials: Credential
     <section className="pt-panel" aria-labelledby="sys-cred-h">
       <div className="pt-panel-head">
         <h2 id="sys-cred-h" className="pt-panel-title"><IconKey /> API Credentials</h2>
-        <Link to="/admin/system/credentials" className="pt-panel-link">Edit</Link>
+        <Link to="/superadmin/credentials" className="pt-panel-link">Edit</Link>
       </div>
       <div className="pt-table-wrap" style={{ overflowX: "auto" }}>
         <table className="pt-table">

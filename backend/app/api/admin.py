@@ -190,9 +190,11 @@ def get_assessment(assessment_id: str, db: Session = Depends(get_db)) -> Assessm
 def audit_logs(
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
+    admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ) -> PaginatedAuditLogs:
-    return admin_service.list_audit_logs(db, page=page, page_size=page_size)
+    # Role-aware: normal admins never receive system-administration events.
+    return admin_service.list_audit_logs(db, admin, page=page, page_size=page_size)
 
 
 # ---------------- notifications ----------------

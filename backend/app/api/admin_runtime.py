@@ -1,9 +1,9 @@
 """Editable runtime configuration endpoints.
 
-Access (enforced here, not just in the UI): every route requires a normal admin
-(`require_admin`). There is no separate super/system-admin tier — all admins may
-view/edit AI settings, run connection tests, and replace/remove API keys and
-restore configuration versions.
+Access (enforced here, not just in the UI): SUPER ADMIN ONLY. The router and
+every route require `require_super_admin`; a normal admin gets 403. Only a super
+admin may view/edit AI settings, run connection tests, replace/remove API keys
+and read configuration history.
 
 Patient interview voice is provided by OpenAI Realtime (see app/livekit_agent/
 and app/livekit_agent/realtime_patient_configs.py); there is no editable
@@ -20,7 +20,7 @@ from app.core.constants import (
 )
 from app.core.logging import get_logger
 from app.database.connection import get_db
-from app.dependencies.auth import require_admin
+from app.dependencies.auth import require_super_admin
 from app.models import User
 from app.repositories.audit_repository import AuditRepository
 from app.schemas.runtime_schema import (
@@ -36,7 +36,11 @@ from app.services import runtime_config_service as rc
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/admin/runtime", tags=["admin-runtime"])
+router = APIRouter(
+    prefix="/admin/runtime",
+    tags=["admin-runtime"],
+    dependencies=[Depends(require_super_admin)],
+)
 
 
 def _audit(db, admin, action, record_type, record_id, description):
@@ -47,7 +51,7 @@ def _audit(db, admin, action, record_type, record_id, description):
 
 
 # ------------------------------ credentials (admin) ---------------------------
-@router.get("/credentials", response_model=CredentialListOut, dependencies=[Depends(require_admin)])
+@router.get("/credentials", response_model=CredentialListOut, dependencies=[Depends(require_super_admin)])
 def get_credentials(db: Session = Depends(get_db)) -> CredentialListOut:
     return CredentialListOut(
         credentials=[CredentialStatusOut.model_validate(c) for c in rc.credential_status(db)]
@@ -64,13 +68,13 @@ def _replace_credential(service, payload, admin, db) -> ApplyResult:
 
 
 @router.post("/credentials/openai", response_model=ApplyResult)
-def replace_openai_key(payload: CredentialReplaceIn, admin: User = Depends(require_admin),
+def replace_openai_key(payload: CredentialReplaceIn, admin: User = Depends(require_super_admin),
                        db: Session = Depends(get_db)) -> ApplyResult:
     return _replace_credential("openai", payload, admin, db)
 
 
 @router.delete("/credentials/{service}", response_model=ApplyResult)
-def remove_key(service: str, admin: User = Depends(require_admin),
+def remove_key(service: str, admin: User = Depends(require_super_admin),
                db: Session = Depends(get_db)) -> ApplyResult:
     rc.remove_credential(db, service=service, admin_email=admin.email)
     _audit(db, admin, AUDIT_CREDENTIAL_REMOVED, "credential", service, f"Removed {service} API key")
@@ -92,19 +96,19 @@ def _test_credential(service, admin, db) -> TestResultOut:
     return TestResultOut(service=service, status=status, message=msg)
 
 
-@router.post("/credentials/openai/test", response_model=TestResultOut, dependencies=[Depends(require_admin)])
-def test_openai(admin: User = Depends(require_admin), db: Session = Depends(get_db)) -> TestResultOut:
+@router.post("/credentials/openai/test", response_model=TestResultOut, dependencies=[Depends(require_super_admin)])
+def test_openai(admin: User = Depends(require_super_admin), db: Session = Depends(get_db)) -> TestResultOut:
     return _test_credential("openai", admin, db)
 
 
 # ------------------------------ AI configuration (admin) ----------------------
-@router.get("/ai-configuration", dependencies=[Depends(require_admin)])
+@router.get("/ai-configuration", dependencies=[Depends(require_super_admin)])
 def get_ai_config(db: Session = Depends(get_db)) -> dict:
     return rc.ai_configuration(db)
 
 
 @router.patch("/ai-configuration/openai", response_model=ApplyResult)
-def patch_openai(payload: OpenAIConfigPatchIn, admin: User = Depends(require_admin),
+def patch_openai(payload: OpenAIConfigPatchIn, admin: User = Depends(require_super_admin),
                  db: Session = Depends(get_db)) -> ApplyResult:
     patch = payload.model_dump(exclude_none=True)
     rc.set_openai_config(db, admin_email=admin.email, patch=patch)
@@ -117,7 +121,7 @@ def patch_openai(payload: OpenAIConfigPatchIn, admin: User = Depends(require_adm
 
 
 # ------------------------------ history (admin) -------------------------------
-@router.get("/history", response_model=HistoryListOut, dependencies=[Depends(require_admin)])
+@router.get("/history", response_model=HistoryListOut, dependencies=[Depends(require_super_admin)])
 def get_history(db: Session = Depends(get_db)) -> HistoryListOut:
     from app.schemas.runtime_schema import HistoryItemOut
     return HistoryListOut(history=[HistoryItemOut.model_validate(h) for h in rc.list_history(db)])

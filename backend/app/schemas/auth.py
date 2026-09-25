@@ -74,7 +74,8 @@ class RegisterResult(CamelModel):
 
 
 class RoleChangeIn(CamelModel):
-    # Only two roles exist. super_admin/system_admin are no longer assignable.
+    # Only student/admin are assignable. super_admin is granted solely by the
+    # server-side bootstrap command (scripts/create_super_admin.py).
     role: str = Field(pattern="^(student|admin)$")
 
 

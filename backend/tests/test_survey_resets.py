@@ -26,6 +26,7 @@ from tests.test_student_data import (  # noqa: F401 - fixtures
     admin,
     api,
     redcap,
+    superadmin,
 )
 from tests.test_surveys import CARLY
 
@@ -66,8 +67,8 @@ def _roster(engine):
     return both, pre_only, none_, practice
 
 
-def _list(api, admin, **params):
-    r = api.get(URL, params={"page_size": 100, **params}, headers=admin)
+def _list(api, superadmin, **params):
+    r = api.get(URL, params={"page_size": 100, **params}, headers=superadmin)
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -77,9 +78,9 @@ def _row(data, student_id):
 
 
 # ============================================================================ list
-def test_list_rows_statuses_and_summary(api, admin, engine):
+def test_list_rows_statuses_and_summary(api, superadmin, engine):
     both, pre_only, none_, practice = _roster(engine)
-    data = _list(api, admin)
+    data = _list(api, superadmin)
 
     ids = [i["studentId"] for i in data["items"]]
     assert practice not in ids  # practice profile excluded
@@ -105,48 +106,48 @@ def test_list_rows_statuses_and_summary(api, admin, engine):
     assert data["caseOptions"] == [{"id": CARLY, "name": a["surveyCaseName"]}]
 
 
-def test_list_search_filters_and_pagination(api, admin, engine):
+def test_list_search_filters_and_pagination(api, superadmin, engine):
     both, pre_only, none_, _ = _roster(engine)
     for q in ("ava", "A1", "ava@unmc"):
-        assert [i["studentId"] for i in _list(api, admin, search=q)["items"]] == [both], q
-    assert [i["studentId"] for i in _list(api, admin, status="completed")["items"]] == [both]
-    assert [i["studentId"] for i in _list(api, admin, status="in_progress")["items"]] == [pre_only]
-    not_started = [i["studentId"] for i in _list(api, admin, status="not_started")["items"]]
+        assert [i["studentId"] for i in _list(api, superadmin, search=q)["items"]] == [both], q
+    assert [i["studentId"] for i in _list(api, superadmin, status="completed")["items"]] == [both]
+    assert [i["studentId"] for i in _list(api, superadmin, status="in_progress")["items"]] == [pre_only]
+    not_started = [i["studentId"] for i in _list(api, superadmin, status="not_started")["items"]]
     assert none_ in not_started and both not in not_started
-    assert {i["studentId"] for i in _list(api, admin, case_id=CARLY)["items"]} == {both, pre_only}
-    assert none_ in [i["studentId"] for i in _list(api, admin, case_id="none")["items"]]
+    assert {i["studentId"] for i in _list(api, superadmin, case_id=CARLY)["items"]} == {both, pre_only}
+    assert none_ in [i["studentId"] for i in _list(api, superadmin, case_id="none")["items"]]
 
-    p1 = _list(api, admin, page=1, page_size=2)
-    p2 = _list(api, admin, page=2, page_size=2)
+    p1 = _list(api, superadmin, page=1, page_size=2)
+    p2 = _list(api, superadmin, page=2, page_size=2)
     assert p1["total"] == p2["total"] >= 4 and len(p1["items"]) == 2
     assert not {i["studentId"] for i in p1["items"]} & {i["studentId"] for i in p2["items"]}
     # Summary is roster-wide: independent of search/filters/page.
-    assert _list(api, admin, search="ava")["summary"] == p1["summary"]
-    assert api.get(URL, params={"status": "bogus"}, headers=admin).status_code == 422
+    assert _list(api, superadmin, search="ava")["summary"] == p1["summary"]
+    assert api.get(URL, params={"status": "bogus"}, headers=superadmin).status_code == 422
 
 
-def test_list_last_activity_uses_student_data_definition(api, admin, engine):
+def test_list_last_activity_uses_student_data_definition(api, superadmin, engine):
     sid, _ = _seed_student(engine, name="Dee Active", number="D9")
     _seed_session(engine, sid)
-    row = _row(_list(api, admin, search="D9"), sid)
-    detail = api.get(f"/api/admin/student-data/{sid}", headers=admin).json()
+    row = _row(_list(api, superadmin, search="D9"), sid)
+    detail = api.get(f"/api/admin/student-data/{sid}", headers=superadmin).json()
     assert row["lastActivityAt"] == detail["student"]["lastActivityAt"] is not None
 
 
 # ================================================== single-student resets (reused API)
-def test_single_resets_update_row_and_counts(api, admin, engine, redcap):
+def test_single_resets_update_row_and_counts(api, superadmin, engine, redcap):
     both, pre_only, _, _ = _roster(engine)
-    assert _reset(api, admin, both, "pre").status_code == 200
-    row = _row(_list(api, admin), both)
+    assert _reset(api, superadmin, both, "pre").status_code == 200
+    row = _row(_list(api, superadmin), both)
     assert (row["preStatus"], row["postStatus"]) == ("pending", "completed")
     assert row["resetCount"] == 1 and row["lastResetAt"] is not None
 
-    assert _reset(api, admin, both, "post").status_code == 200
-    row = _row(_list(api, admin), both)
+    assert _reset(api, superadmin, both, "post").status_code == 200
+    row = _row(_list(api, superadmin), both)
     assert (row["preStatus"], row["postStatus"]) == ("pending", "pending")
 
-    assert _reset(api, admin, pre_only, "both").status_code == 200
-    data = _list(api, admin)
+    assert _reset(api, superadmin, pre_only, "both").status_code == 200
+    data = _list(api, superadmin)
     row = _row(data, pre_only)
     assert (row["preStatus"], row["postStatus"]) == ("not_started", "not_started")
     assert data["summary"]["preCompleted"] == 0 and data["summary"]["postCompleted"] == 0
@@ -154,18 +155,18 @@ def test_single_resets_update_row_and_counts(api, admin, engine, redcap):
     # History preserved: one snapshot per reset, earlier record ids kept.
     assert [s.redcap_record_id for s in _resets_for(engine, pre_only)] == [f"rec-{pre_only}"]
     assert len(_resets_for(engine, both)) == 2
-    assert _list(api, admin, status="reset_before")["total"] == 2
+    assert _list(api, superadmin, status="reset_before")["total"] == 2
 
 
 # ============================================================================ bulk
-def _bulk(api, admin, scope, **extra):
-    return api.post(f"{URL}/bulk", json={"scope": scope, **extra}, headers=admin)
+def _bulk(api, superadmin, scope, **extra):
+    return api.post(f"{URL}/bulk", json={"scope": scope, **extra}, headers=superadmin)
 
 
-def test_bulk_pre(api, admin, engine, redcap):
+def test_bulk_pre(api, superadmin, engine, redcap):
     both, pre_only, none_, practice = _roster(engine)
     old = {sid: _receipts_for(engine, sid)[0].redcap_record_id for sid in (both, pre_only)}
-    r = _bulk(api, admin, "pre")
+    r = _bulk(api, superadmin, "pre")
     assert r.status_code == 200, r.text
     body = r.json()
     assert (body["reset"], body["failed"]) == (2, 0)
@@ -183,25 +184,25 @@ def test_bulk_pre(api, admin, engine, redcap):
     assert _resets_for(engine, none_) == []
 
 
-def test_bulk_post(api, admin, engine, redcap):
+def test_bulk_post(api, superadmin, engine, redcap):
     both, pre_only, _, practice = _roster(engine)
-    body = _bulk(api, admin, "post").json()
+    body = _bulk(api, superadmin, "post").json()
     assert (body["reset"], body["failed"]) == (1, 0)  # only `both` had Post done
     [rec] = _receipts_for(engine, both)
     assert (rec.pre_sync_status, rec.post_sync_status) == ("synced", "pending")
     assert _resets_for(engine, pre_only) == []
     assert _receipts_for(engine, practice)[0].post_sync_status == "synced"
-    s = _list(api, admin)["summary"]
+    s = _list(api, superadmin)["summary"]
     assert (s["preCompleted"], s["postCompleted"], s["postResettable"]) == (2, 0, 0)
 
 
-def test_bulk_both_preserves_history_and_other_data(api, admin, engine, redcap):
+def test_bulk_both_preserves_history_and_other_data(api, superadmin, engine, redcap):
     both, pre_only, _, practice = _roster(engine)
     _seed_session(engine, both)
     models = (InterviewSession, ConversationTurn, AssessmentRun)
     before = {m.__name__: _count(engine, m) for m in models}
 
-    body = _bulk(api, admin, "both").json()
+    body = _bulk(api, superadmin, "both").json()
     assert (body["reset"], body["failed"]) == (2, 0)
     assert "2 students" in body["message"]
     for sid in (both, pre_only):
@@ -218,21 +219,21 @@ def test_bulk_both_preserves_history_and_other_data(api, admin, engine, redcap):
     finally:
         db.close()
     assert before == {m.__name__: _count(engine, m) for m in models}
-    assert _list(api, admin)["summary"]["availableForReset"] == 0
+    assert _list(api, superadmin)["summary"]["availableForReset"] == 0
 
     # Nothing left: a repeat run resets no one and fails no one.
-    again = _bulk(api, admin, "both").json()
+    again = _bulk(api, superadmin, "both").json()
     assert (again["reset"], again["failed"]) == (0, 0)
 
 
-def test_bulk_ignores_body_student_ids(api, admin, engine, redcap):
+def test_bulk_ignores_body_student_ids(api, superadmin, engine, redcap):
     both, _, _, practice = _roster(engine)
-    body = _bulk(api, admin, "post", studentIds=[practice], studentId=practice).json()
+    body = _bulk(api, superadmin, "post", studentIds=[practice], studentId=practice).json()
     assert body["reset"] == 1
     assert _resets_for(engine, practice) == [] and len(_resets_for(engine, both)) == 1
 
 
-def test_bulk_one_failure_does_not_block_others(api, admin, engine, redcap, monkeypatch):
+def test_bulk_one_failure_does_not_block_others(api, superadmin, engine, redcap, monkeypatch):
     both, pre_only, _, _ = _roster(engine)
     from app.services import student_data_service as sds
 
@@ -244,7 +245,7 @@ def test_bulk_one_failure_does_not_block_others(api, admin, engine, redcap, monk
         return real(db, admin_user, student_id, scope=scope)
 
     monkeypatch.setattr(sds, "apply_survey_reset", flaky)
-    body = _bulk(api, admin, "pre").json()
+    body = _bulk(api, superadmin, "pre").json()
     assert (body["reset"], body["failed"]) == (1, 1)
     assert _receipts_for(engine, both)[0].pre_sync_status == "synced"  # unchanged
     assert _resets_for(engine, both) == []
@@ -252,11 +253,11 @@ def test_bulk_one_failure_does_not_block_others(api, admin, engine, redcap, monk
 
 
 # ======================================================================= security
-def test_invalid_scope_rejected(api, admin, engine, redcap):
+def test_invalid_scope_rejected(api, superadmin, engine, redcap):
     both, *_ = _roster(engine)
     for bad in ("everything", "", None):
-        assert _bulk(api, admin, bad).status_code == 422
-    assert api.post(f"{URL}/bulk", json={}, headers=admin).status_code == 422
+        assert _bulk(api, superadmin, bad).status_code == 422
+    assert api.post(f"{URL}/bulk", json={}, headers=superadmin).status_code == 422
     assert _resets_for(engine, both) == []
 
 
@@ -273,3 +274,16 @@ def test_student_and_anonymous_rejected(api, engine, fake_client, redcap):
         assert anon.post(f"{URL}/bulk", json={"scope": "both"}).status_code == 401
     assert _resets_for(engine, both) == []
     assert _default_student_id(engine)  # default student still exists / untouched
+
+
+def test_normal_admin_rejected_everywhere(api, admin, engine, redcap):
+    """Survey Resets is Super Admin only: a normal admin can neither read the
+    reset list nor reset any scope, single or bulk."""
+    both, pre_only, _, _ = _roster(engine)
+    assert api.get(URL, headers=admin).status_code == 403
+    for scope in ("pre", "post", "both"):
+        assert api.post(f"{URL}/bulk", json={"scope": scope}, headers=admin).status_code == 403
+        assert _reset(api, admin, both, scope).status_code == 403
+    assert _resets_for(engine, both) == [] and _resets_for(engine, pre_only) == []
+    [rec] = _receipts_for(engine, both)
+    assert (rec.pre_sync_status, rec.post_sync_status) == ("synced", "synced")

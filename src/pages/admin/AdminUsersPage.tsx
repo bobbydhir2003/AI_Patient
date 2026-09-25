@@ -31,7 +31,10 @@ const TABS: { key: string; label: string; status: string; count: keyof UserSumma
   { key: "ADMINS", label: "Admins", status: "ADMINS", count: "admins" },
 ];
 type TabKey = (typeof TABS)[number]["key"];
-const ROLES = ["ALL", "student", "admin"] as const;
+const ROLES = ["ALL", "student", "admin", "super_admin"] as const;
+const ROLE_FILTER_LABELS: Record<RoleFilter, string> = {
+  ALL: "All Roles", student: "Student", admin: "Admin", super_admin: "Super Admin",
+};
 type RoleFilter = (typeof ROLES)[number];
 type SortKey = "newest" | "oldest" | "name";
 const PAGE_SIZES = [10, 25, 50] as const;
@@ -81,6 +84,7 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 function RoleBadge({ role }: { role: string }) {
+  if (role === "super_admin") return <span className="pt-badge pt-badge-red">Super Admin</span>;
   const admin = role === "admin";
   return <span className={`pt-badge ${admin ? "pt-badge-amber" : "pt-badge-blue"}`}>{admin ? "Admin" : "Student"}</span>;
 }
@@ -179,8 +183,12 @@ type RowConfirm =
   | null;
 
 export function AdminUsersPage() {
-  const { token, user } = useAuth();
+  const { token, user, isSuperAdmin } = useAuth();
   const toast = useToast();
+  // A super_admin account can only be managed by a super admin. The backend
+  // enforces this on every account endpoint; here its row is read-only and
+  // never selectable for bulk actions.
+  const isProtected = (u: AdminUser) => u.role === "super_admin" && !isSuperAdmin;
   const [rows, setRows] = useState<AdminUser[] | null>(null);
   const [summary, setSummary] = useState<UserSummary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -247,7 +255,8 @@ export function AdminUsersPage() {
     [filteredRows, clampedPage, pageSize],
   );
 
-  const allSelected = pageRows.length > 0 && pageRows.every((u) => selected.has(u.id));
+  const selectableRows = pageRows.filter((u) => !isProtected(u));
+  const allSelected = selectableRows.length > 0 && selectableRows.every((u) => selected.has(u.id));
   const someSelected = pageRows.some((u) => selected.has(u.id));
   const headerCbRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -273,6 +282,7 @@ export function AdminUsersPage() {
   );
 
   function toggleRow(id: string) {
+    if ((rows ?? []).some((u) => u.id === id && isProtected(u))) return;
     setSelected((prev) => {
       const next = new Set(prev);
       next.has(id) ? next.delete(id) : next.add(id);
@@ -283,7 +293,7 @@ export function AdminUsersPage() {
     setSelected((prev) => {
       const next = new Set(prev);
       if (allSelected) pageRows.forEach((u) => next.delete(u.id));
-      else pageRows.forEach((u) => next.add(u.id));
+      else pageRows.forEach((u) => { if (!isProtected(u)) next.add(u.id); });
       return next;
     });
   }
@@ -366,11 +376,14 @@ export function AdminUsersPage() {
 
   /* ---- per-row action controls -------------------------------------------- */
   function quickActions(u: AdminUser) {
+    if (isProtected(u)) return <span className="pt-muted" title="Only a Super Admin can manage this account.">Protected</span>;
     const isSelf = u.id === user?.id;
     const disabled = busyId === u.id;
     const menuItems: { label: string; danger?: boolean; onSelect: () => void }[] = [];
+    // Only student/admin are assignable; the Super Admin role is never offered.
     if (u.accountStatus === "ACTIVE" && !isSelf) {
       if (u.role === "student") menuItems.push({ label: "Make Admin", onSelect: () => setConfirm({ kind: "role", user: u, role: "admin" }) });
+      if (u.role === "super_admin") menuItems.push({ label: "Remove Super Admin (make Admin)", onSelect: () => setConfirm({ kind: "role", user: u, role: "admin" }) });
       if (u.role === "admin") menuItems.push({ label: "Make Student", onSelect: () => setConfirm({ kind: "role", user: u, role: "student" }) });
       menuItems.push({ label: "Disable account", danger: true, onSelect: () => setConfirm({ kind: "disable", user: u }) });
     }
@@ -511,7 +524,7 @@ export function AdminUsersPage() {
           />
         </div>
         <select className="pt-input pt-uac-role" value={roleFilter} onChange={(e) => setRoleFilter(e.target.value as RoleFilter)} aria-label="Filter by role">
-          {ROLES.map((r) => <option key={r} value={r}>{r === "ALL" ? "All Roles" : r === "admin" ? "Admin" : "Student"}</option>)}
+          {ROLES.map((r) => <option key={r} value={r}>{ROLE_FILTER_LABELS[r]}</option>)}
         </select>
         <button type="button" className={`pt-btn pt-btn-secondary pt-btn-icon ${showFilters ? "active" : ""}`} aria-expanded={showFilters} onClick={() => setShowFilters((v) => !v)}>
           <IFilter /> Filters
@@ -558,7 +571,7 @@ export function AdminUsersPage() {
                 {pageRows.length === 0 && <tr><td colSpan={8} className="pt-muted" style={{ padding: "var(--space-5)", textAlign: "center" }}>No matching accounts.</td></tr>}
                 {pageRows.map((u) => (
                   <tr key={u.id} className={selected.has(u.id) ? "pt-uac-selected" : undefined}>
-                    <td><input type="checkbox" checked={selected.has(u.id)} onChange={() => toggleRow(u.id)} aria-label={`Select ${u.email}`} /></td>
+                    <td><input type="checkbox" checked={selected.has(u.id)} onChange={() => toggleRow(u.id)} disabled={isProtected(u)} aria-label={`Select ${u.email}`} /></td>
                     <td>
                       <div className="pt-uac-usercell">
                         <span className="pt-uac-avatar" aria-hidden="true">{initials(u.fullName, u.email)}</span>
@@ -591,7 +604,7 @@ export function AdminUsersPage() {
             {pageRows.map((u) => (
               <div key={u.id} className={`pt-uac-card ${selected.has(u.id) ? "sel" : ""}`}>
                 <div className="pt-uac-card-top">
-                  <input type="checkbox" checked={selected.has(u.id)} onChange={() => toggleRow(u.id)} aria-label={`Select ${u.email}`} />
+                  <input type="checkbox" checked={selected.has(u.id)} onChange={() => toggleRow(u.id)} disabled={isProtected(u)} aria-label={`Select ${u.email}`} />
                   <span className="pt-uac-avatar" aria-hidden="true">{initials(u.fullName, u.email)}</span>
                   <div className="pt-uac-card-id">
                     <span className="pt-uac-username">{u.fullName || "—"}</span>

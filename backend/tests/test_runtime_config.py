@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy.orm import sessionmaker
 
 from app.core import crypto
-from app.core.constants import USER_ROLE_ADMIN
+from app.core.constants import USER_ROLE_ADMIN, USER_ROLE_SUPER_ADMIN
 from app.core.security import hash_password
 from app.database.base import Base
 from app.database.connection import reset_engine
@@ -43,7 +43,7 @@ def _make_user(engine, email, role, password="adminpass1"):
 @pytest.fixture()
 def admins(engine):
     _make_user(engine, "admin@school.edu", USER_ROLE_ADMIN)
-    _make_user(engine, "super@school.edu", USER_ROLE_ADMIN)
+    _make_user(engine, "super@school.edu", USER_ROLE_SUPER_ADMIN)
 
 
 # --------------------------------------------------------------- encryption
@@ -56,11 +56,14 @@ def test_crypto_roundtrip_and_masking():
 
 
 # --------------------------------------------------------------- credentials RBAC
-def test_replace_key_allowed_for_any_admin(client, engine, admins):
-    # Two-role model: every admin may replace credentials (no super-admin tier).
+def test_replace_key_is_super_admin_only(client, engine, admins):
     admin = login_token(client, "admin@school.edu", "adminpass1")
     r = client.post("/api/admin/runtime/credentials/openai",
                     json={"key": "sk-newkey-123456789"}, headers=auth_header(admin))
+    assert r.status_code == 403
+    su = login_token(client, "super@school.edu", "adminpass1")
+    r = client.post("/api/admin/runtime/credentials/openai",
+                    json={"key": "sk-newkey-123456789"}, headers=auth_header(su))
     assert r.status_code == 200
     assert r.json()["success"] is True
 
@@ -97,7 +100,12 @@ def test_credential_audit_has_no_raw_secret(client, engine, admins):
 
 # --------------------------------------------------------------- AI config editing
 def test_openai_model_change_persists_and_rejects_unapproved(client, engine, admins):
-    admin = login_token(client, "admin@school.edu", "adminpass1")
+    # AI configuration is system administration: normal admin refused.
+    normal = login_token(client, "admin@school.edu", "adminpass1")
+    assert client.patch("/api/admin/runtime/ai-configuration/openai",
+                        json={"model": "gpt-4o"}, headers=auth_header(normal)).status_code == 403
+    assert client.get("/api/admin/runtime/ai-configuration", headers=auth_header(normal)).status_code == 403
+    admin = login_token(client, "super@school.edu", "adminpass1")
     ok = client.patch("/api/admin/runtime/ai-configuration/openai",
                       json={"model": "gpt-4o"}, headers=auth_header(admin))
     assert ok.status_code == 200 and ok.json()["applyMode"] == "new_sessions"

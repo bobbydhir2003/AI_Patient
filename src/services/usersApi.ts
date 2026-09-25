@@ -6,7 +6,9 @@
 import { API_BASE_URL, ApiError } from "./api";
 
 export type AccountStatus = "PENDING" | "ACTIVE" | "REJECTED" | "DISABLED";
-export type UserRole = "student" | "admin";
+export type UserRole = "student" | "admin" | "super_admin";
+/** Roles the User Accounts API can assign. super_admin is never assignable. */
+export type AssignableRole = "student" | "admin";
 
 export interface AdminUser {
   id: string;
@@ -81,7 +83,7 @@ export const approveUser = (t: string | null, id: string) => post(t, id, "approv
 export const enableUser = (t: string | null, id: string) => post(t, id, "enable");
 export const rejectUser = (t: string | null, id: string, note = "") => post(t, id, "reject", { note });
 export const disableUser = (t: string | null, id: string, note = "") => post(t, id, "disable", { note });
-export const changeUserRole = (t: string | null, id: string, role: UserRole) => post(t, id, "role", { role });
+export const changeUserRole = (t: string | null, id: string, role: AssignableRole) => post(t, id, "role", { role });
 
 // ------------------------------- bulk actions -------------------------------
 const bulk = (token: string | null, path: string, body?: unknown) =>

@@ -36,6 +36,7 @@ import { TrafficDashboardPage } from "./pages/admin/system/TrafficDashboardPage"
 import { LoadCapacityTestingPage } from "./pages/admin/system/LoadCapacityTestingPage";
 import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
 import { AdminSurveyResetsPage } from "./pages/admin/AdminSurveyResetsPage";
+import { SuperAdminLoginPage } from "./pages/auth/SuperAdminLoginPage";
 import { AiConfigurationPage } from "./pages/admin/system/AiConfigurationPage";
 import { AiUsageCostPage } from "./pages/admin/system/AiUsageCostPage";
 import { ApiCredentialsPage } from "./pages/admin/system/ApiCredentialsPage";
@@ -46,7 +47,8 @@ import { ProtectedRoute } from "./portal/ProtectedRoute";
 function App() {
   const location = useLocation();
   const isHomePage = location.pathname === "/";
-  const isAdminArea = location.pathname.startsWith("/admin");
+  const isAdminArea =
+    location.pathname.startsWith("/admin") || location.pathname.startsWith("/superadmin");
 
   return (
     <>
@@ -112,24 +114,47 @@ function App() {
           <Route path="transcripts" element={<AdminTranscriptsPage />} />
           <Route path="assessments" element={<AdminAssessmentsPage />} />
           <Route path="users" element={<AdminUsersPage />} />
-          <Route path="survey-resets" element={<AdminSurveyResetsPage />} />
+          {/* Moved to the Super Admin area; old links redirect there, where the
+              super_admin guard still applies. */}
+          <Route path="survey-resets" element={<Navigate to="/superadmin/survey-resets" replace />} />
           <Route path="archived" element={<AdminArchivedPage />} />
           <Route path="profile" element={<AdminProfilePage />} />
           <Route path="audit-log" element={<AdminAuditLogPage />} />
 
-          {/* Technical / system administration (separate from the academic dashboard) */}
-          <Route path="system" element={<SystemDashboardPage />} />
-          <Route path="system/traffic" element={<TrafficDashboardPage />} />
-          <Route
-            path="system/load-testing"
-            element={<LoadCapacityTestingPage />}
-          />
-          <Route path="system/usage" element={<AiUsageCostPage />} />
-          <Route path="system/config" element={<AiConfigurationPage />} />
-          <Route path="system/credentials" element={<ApiCredentialsPage />} />
-          <Route path="system/health" element={<SystemHealthPage />} />
-          {/* Phase 1 LiveKit POC only - admin/test-gated, does not touch /interview */}
-          <Route path="system/livekit-poc" element={<LiveKitTestPage />} />
+          {/* System administration moved to /superadmin/* (super_admin only).
+              Old URLs (bookmarks, notification links) redirect there. */}
+          <Route path="system" element={<Navigate to="/superadmin/dashboard" replace />} />
+          <Route path="system/traffic" element={<Navigate to="/superadmin/traffic" replace />} />
+          <Route path="system/load-testing" element={<Navigate to="/superadmin/load-capacity" replace />} />
+          <Route path="system/usage" element={<Navigate to="/superadmin/ai-usage" replace />} />
+          <Route path="system/config" element={<Navigate to="/superadmin/ai-config" replace />} />
+          <Route path="system/credentials" element={<Navigate to="/superadmin/credentials" replace />} />
+          <Route path="system/health" element={<Navigate to="/superadmin/health" replace />} />
+          <Route path="system/livekit-poc" element={<Navigate to="/superadmin/livekit-poc" replace />} />
+        </Route>
+
+        {/* Super Admin portal. The URL grants nothing: the guard checks the
+            backend-provided role and every API re-checks require_super_admin. */}
+        <Route path="/superadmin/login" element={<SuperAdminLoginPage />} />
+        <Route
+          path="/superadmin"
+          element={
+            <ProtectedRoute role="super_admin">
+              <AdminLayout />
+            </ProtectedRoute>
+          }
+        >
+          <Route index element={<Navigate to="/superadmin/dashboard" replace />} />
+          <Route path="dashboard" element={<SystemDashboardPage />} />
+          <Route path="survey-resets" element={<AdminSurveyResetsPage />} />
+          <Route path="traffic" element={<TrafficDashboardPage />} />
+          <Route path="load-capacity" element={<LoadCapacityTestingPage />} />
+          <Route path="ai-usage" element={<AiUsageCostPage />} />
+          <Route path="ai-config" element={<AiConfigurationPage />} />
+          <Route path="credentials" element={<ApiCredentialsPage />} />
+          <Route path="health" element={<SystemHealthPage />} />
+          {/* Phase 1 LiveKit POC only - does not touch /interview */}
+          <Route path="livekit-poc" element={<LiveKitTestPage />} />
         </Route>
       </Routes>
       {!isHomePage && !isAdminArea && <AppFooter />}

@@ -10,7 +10,7 @@ from app.models import (
     InterviewSession,
     Student,
 )
-from tests.test_auth import auth_header, login_token, make_admin
+from tests.test_auth import auth_header, login_token, make_admin, make_super_admin
 
 
 def _factory(engine):
@@ -19,6 +19,11 @@ def _factory(engine):
 
 def admin_token(client, engine, email="admin@school.edu", password="adminpass1"):
     make_admin(engine, email, password)
+    return login_token(client, email, password)
+
+
+def super_admin_token(client, engine, email="super@school.edu", password="superpass1"):
+    make_super_admin(engine, email, password)
     return login_token(client, email, password)
 
 

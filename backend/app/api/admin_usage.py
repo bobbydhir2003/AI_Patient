@@ -1,6 +1,6 @@
 """AI Usage & Cost admin API.
 
-ADMIN ONLY (require_admin on every route). Serves the real-time AI Usage & Cost
+SUPER ADMIN ONLY (require_super_admin on every route; normal admin -> 403). Serves the real-time AI Usage & Cost
 dashboard from recorded ai_usage_events — the backend does the aggregation, the
 frontend only renders. Costs are ESTIMATED usage costs, never provider invoices.
 """
@@ -11,14 +11,14 @@ from sqlalchemy.orm import Session
 
 from app.core.pricing import pricing_snapshot
 from app.database.connection import get_db
-from app.dependencies.auth import require_admin
+from app.dependencies.auth import require_super_admin
 from app.services import runtime_config_service as rc
 from app.services import usage_service
 
 router = APIRouter(
     prefix="/admin/usage",
     tags=["admin-usage"],
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_super_admin)],
 )
 
 _RANGES = ("live", "5m", "15m", "1h", "6h", "24h", "7d", "30d", "today", "custom")

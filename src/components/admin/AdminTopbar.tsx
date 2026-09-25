@@ -35,14 +35,14 @@ function initials(name: string): string {
 
 type Icon = (p: IconProps) => ReactElement;
 
-// The system pages, moved out of the sidebar into the header "System Settings"
-// dropdown. Routes are unchanged, so active highlighting still works.
-const SYSTEM_ITEMS: { to: string; label: string; icon: Icon; end?: boolean }[] = [
-  { to: "/admin/system", label: "System Dashboard", icon: IconServer, end: true },
-  { to: "/admin/system/voices", label: "Patient Voices", icon: IconMic },
-  { to: "/admin/system/config", label: "AI Configuration", icon: IconCpu },
-  { to: "/admin/system/credentials", label: "API Credentials", icon: IconKey },
-  { to: "/admin/system/health", label: "System Health", icon: IconPulse },
+// Header "System Settings" dropdown. System pages live in the Super Admin area
+// and are listed only for super admins (their APIs are super_admin-only anyway);
+// the Admin Activity Log stays available to every admin.
+const SYSTEM_ITEMS: { to: string; label: string; icon: Icon; end?: boolean; superOnly?: boolean }[] = [
+  { to: "/superadmin/dashboard", label: "System Dashboard", icon: IconServer, end: true, superOnly: true },
+  { to: "/superadmin/ai-config", label: "AI Configuration", icon: IconCpu, superOnly: true },
+  { to: "/superadmin/credentials", label: "API Credentials", icon: IconKey, superOnly: true },
+  { to: "/superadmin/health", label: "System Health", icon: IconPulse, superOnly: true },
   { to: "/admin/audit-log", label: "Admin Activity Log", icon: IconAudit, end: true },
 ];
 
@@ -62,7 +62,8 @@ function relTime(iso: string): string {
 }
 
 export function AdminTopbar({ onToggleNav, navOpen = false }: { onToggleNav?: () => void; navOpen?: boolean } = {}) {
-  const { token, user, logout } = useAuth();
+  const { token, user, logout, isSuperAdmin } = useAuth();
+  const systemItems = SYSTEM_ITEMS.filter((i) => !i.superOnly || isSuperAdmin);
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -160,7 +161,9 @@ export function AdminTopbar({ onToggleNav, navOpen = false }: { onToggleNav?: ()
   }
 
   const hasHits = !!results && (results.students.length > 0 || results.sessions.length > 0);
-  const systemActive = location.pathname.startsWith("/admin/system") || location.pathname === "/admin/audit-log";
+  const systemActive =
+    ["/superadmin/dashboard", "/superadmin/ai-config", "/superadmin/credentials", "/superadmin/health"].includes(location.pathname) ||
+    location.pathname === "/admin/audit-log";
 
   return (
     <header className="pt-topbar" ref={rootRef}>
@@ -259,7 +262,7 @@ export function AdminTopbar({ onToggleNav, navOpen = false }: { onToggleNav?: ()
           </button>
           {sysOpen && (
             <div className="pt-sysmenu" role="menu" aria-label="System settings">
-              {SYSTEM_ITEMS.map(({ to, label, icon: Icon, end }) => (
+              {systemItems.map(({ to, label, icon: Icon, end }) => (
                 <NavLink
                   key={to}
                   to={to}
@@ -334,6 +337,7 @@ export function AdminTopbar({ onToggleNav, navOpen = false }: { onToggleNav?: ()
           <button
             className="pt-topbar-user"
             type="button"
+            title={user?.email}
             onClick={() => { setMenuOpen((v) => !v); setSysOpen(false); setNotifOpen(false); }}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
@@ -341,7 +345,7 @@ export function AdminTopbar({ onToggleNav, navOpen = false }: { onToggleNav?: ()
             <span className="pt-avatar" aria-hidden="true">{initials(user?.fullName ?? "Admin")}</span>
             <span className="pt-user-text">
               <span className="nm">{user?.fullName ?? "Admin"}</span>
-              <span className="em">{user?.email}</span>
+              <span className="em">{isSuperAdmin ? "Super Administrator" : user?.email}</span>
             </span>
           </button>
           {menuOpen && (

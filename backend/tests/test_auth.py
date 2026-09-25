@@ -10,14 +10,14 @@ def _factory(engine):
     return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 
-def make_admin(engine, email="admin@school.edu", password="adminpass1"):
+def make_admin(engine, email="admin@school.edu", password="adminpass1", role=USER_ROLE_ADMIN):
     db = _factory(engine)()
     try:
         user = User(
             email=email,
             password_hash=hash_password(password),
             full_name="Admin",
-            role=USER_ROLE_ADMIN,
+            role=role,
             is_active=True,
         )
         db.add(user)
@@ -25,6 +25,12 @@ def make_admin(engine, email="admin@school.edu", password="adminpass1"):
         return user.id
     finally:
         db.close()
+
+
+def make_super_admin(engine, email="super@school.edu", password="superpass1"):
+    """A super_admin account (system administration). Tests only - production
+    super admins come from scripts/create_super_admin.py."""
+    return make_admin(engine, email=email, password=password, role="super_admin")
 
 
 def register(client, email="stud@school.edu", password="studpass1", number="S1", approve=True):

@@ -22,7 +22,10 @@ interface NavItem {
   end?: boolean;
 }
 
-const SECTIONS: { title: string; items: NavItem[] }[] = [
+// Conditional rendering, one sidebar: normal admins see Academic Management
+// only; super admins also see Super Administration. Hiding is UX only - every
+// Super Administration API independently requires super_admin on the backend.
+const SECTIONS: { title: string; superOnly?: boolean; items: NavItem[] }[] = [
   {
     title: "Academic Management",
     items: [
@@ -33,22 +36,24 @@ const SECTIONS: { title: string; items: NavItem[] }[] = [
       { to: "/admin/transcripts", label: "Transcripts", icon: IconTranscript },
       { to: "/admin/assessments", label: "Assessments", icon: IconAssessments },
       { to: "/admin/users", label: "User Accounts", icon: IconStudents },
-      { to: "/admin/survey-resets", label: "Survey Resets", icon: IconRefresh },
     ],
   },
   {
-    title: "System Administration",
+    title: "Super Administration",
+    superOnly: true,
     items: [
-      { to: "/admin/system", label: "System Dashboard", icon: IconDashboard, end: true },
-      { to: "/admin/system/traffic", label: "Traffic Dashboard", icon: IconSessions },
-      { to: "/admin/system/load-testing", label: "Load & Capacity Testing", icon: IconSessions },
-      { to: "/admin/system/usage", label: "AI Usage & Cost", icon: IconAssessments },
+      { to: "/superadmin/survey-resets", label: "Survey Resets", icon: IconRefresh },
+      { to: "/superadmin/dashboard", label: "System Dashboard", icon: IconDashboard },
+      { to: "/superadmin/traffic", label: "Traffic Dashboard", icon: IconSessions },
+      { to: "/superadmin/load-capacity", label: "Load & Capacity Testing", icon: IconSessions },
+      { to: "/superadmin/ai-usage", label: "AI Usage & Cost", icon: IconAssessments },
     ],
   },
 ];
 
 export function AdminSidebar({ open = false, onClose }: { open?: boolean; onClose?: () => void }) {
-  const { logout } = useAuth();
+  const { logout, isSuperAdmin } = useAuth();
+  const sections = SECTIONS.filter((s) => !s.superOnly || isSuperAdmin);
 
   return (
     <>
@@ -63,7 +68,7 @@ export function AdminSidebar({ open = false, onClose }: { open?: boolean; onClos
         aria-label="Admin navigation"
         aria-hidden={undefined}
       >
-      {SECTIONS.map((section) => (
+      {sections.map((section) => (
         <div key={section.title}>
           <div className="pt-nav-section-label">{section.title}</div>
           {section.items

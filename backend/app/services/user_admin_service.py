@@ -2,8 +2,12 @@
 
 All permission rules are enforced HERE (backend), never trusted from the client:
 - an admin can never change their own role (self-lockout protection);
-- there are exactly two roles (student/admin); every admin has all admin powers;
-- the LAST active admin cannot be demoted, disabled or rejected;
+- only student/admin are ASSIGNABLE; super_admin is granted solely by the
+  server-side bootstrap command (scripts/create_super_admin.py), never here;
+- a super_admin account is PROTECTED: only another super admin may approve,
+  reject, disable, enable, re-role or delete it (single and bulk paths alike);
+- the LAST active admin cannot be demoted, disabled or rejected, and the LAST
+  active super admin cannot be demoted, disabled, rejected or deleted;
 - a user cannot disable/reject themselves.
 Every action is audited (target + old->new). Secrets are never involved here.
 
@@ -21,9 +25,10 @@ from app.core.constants import (
     ACCOUNT_STATUS_PENDING,
     ACCOUNT_STATUS_REJECTED,
     ADMIN_ROLES,
-    USER_ROLE_ADMIN,
-    USER_ROLE_STUDENT,
-    USER_ROLES,
+    ASSIGNABLE_ROLES,
+    AUDIT_RECORD_SUPER_ADMIN_USER,
+    SUPER_ADMIN_ROLES,
+    USER_ROLE_SUPER_ADMIN,
 )
 from app.core.exceptions import (
     DeleteConfirmationError,
@@ -61,12 +66,41 @@ def _active_admins(db: Session, exclude_id: str | None = None) -> int:
     return int(db.execute(stmt).scalar_one())
 
 
+def _active_super_admins(db: Session, exclude_id: str | None = None) -> int:
+    stmt = select(func.count(User.id)).where(
+        User.role == USER_ROLE_SUPER_ADMIN, User.account_status == ACCOUNT_STATUS_ACTIVE
+    )
+    if exclude_id:
+        stmt = stmt.where(User.id != exclude_id)
+    return int(db.execute(stmt).scalar_one())
+
+
+PROTECTED_SUPER_ADMIN = "protected_super_admin"
+
+
+def _guard_privileged_target(actor: User, target: User) -> None:
+    """A super_admin account can only be managed by a super admin. Raised for
+    EVERY mutating account operation so a normal admin can never disable,
+    reject, delete, re-role or otherwise alter a super admin, directly or via a
+    bulk request."""
+    if target.role == USER_ROLE_SUPER_ADMIN and actor.role not in SUPER_ADMIN_ROLES:
+        raise ForbiddenError("Only a Super Admin can manage a Super Admin account.")
+
+
+def _user_record_type(*roles: str | None) -> str:
+    """Account events that involve a super admin (target is one, or the role
+    change is from/to super_admin) are tagged so only super admins see them in
+    the Activity Log / notifications (see constants.PRIVILEGED_AUDIT_*)."""
+    return AUDIT_RECORD_SUPER_ADMIN_USER if USER_ROLE_SUPER_ADMIN in roles else "user"
+
+
 def _audit(db: Session, actor: User, action: str, target: User, old: str, new: str) -> None:
     AuditRepository(db).record(
         admin_user_id=actor.id,
         admin_email=actor.email,
         action_type=action,
-        record_type="user",
+        # old/new are statuses or roles; either way a super_admin mention counts.
+        record_type=_user_record_type(target.role, old, new),
         record_id=target.id,
         description=f"{target.email}: {old} -> {new}",
     )
@@ -116,6 +150,7 @@ def status_summary(db: Session) -> dict:
 # ---------------------------------------------------------------- status ops
 def approve(db: Session, actor: User, user_id: str) -> User:
     target = _get(db, user_id)
+    _guard_privileged_target(actor, target)
     old = target.account_status
     if old != ACCOUNT_STATUS_PENDING:
         raise ValidationFailedError("Only a pending account can be approved.")
@@ -129,6 +164,7 @@ def approve(db: Session, actor: User, user_id: str) -> User:
 
 def reject(db: Session, actor: User, user_id: str, note: str | None = None) -> User:
     target = _get(db, user_id)
+    _guard_privileged_target(actor, target)
     _guard_not_last_admin(db, target, "reject")
     old = target.account_status
     target.account_status = ACCOUNT_STATUS_REJECTED
@@ -143,6 +179,7 @@ def disable(db: Session, actor: User, user_id: str, note: str | None = None) -> 
     target = _get(db, user_id)
     if target.id == actor.id:
         raise ForbiddenError("You cannot disable your own account.")
+    _guard_privileged_target(actor, target)
     _guard_not_last_admin(db, target, "disable")
     old = target.account_status
     target.account_status = ACCOUNT_STATUS_DISABLED
@@ -155,6 +192,7 @@ def disable(db: Session, actor: User, user_id: str, note: str | None = None) -> 
 
 def enable(db: Session, actor: User, user_id: str) -> User:
     target = _get(db, user_id)
+    _guard_privileged_target(actor, target)
     old = target.account_status
     target.account_status = ACCOUNT_STATUS_ACTIVE
     _sync_active(target)
@@ -171,6 +209,14 @@ def _pending_ids(db: Session) -> list[str]:
             select(User.id).where(User.account_status == ACCOUNT_STATUS_PENDING)
         ).scalars().all()
     )
+
+
+def _is_protected(actor: User, target: User) -> bool:
+    try:
+        _guard_privileged_target(actor, target)
+    except ForbiddenError:
+        return True
+    return False
 
 
 def bulk_approve(db: Session, actor: User, user_ids: list[str]) -> dict:
@@ -191,6 +237,9 @@ def bulk_approve(db: Session, actor: User, user_ids: list[str]) -> dict:
             continue
         if target.account_status != ACCOUNT_STATUS_PENDING:
             skipped.append({"user_id": uid, "reason": f"not_pending ({target.account_status})"})
+            continue
+        if _is_protected(actor, target):
+            skipped.append({"user_id": uid, "reason": PROTECTED_SUPER_ADMIN})
             continue
         old = target.account_status
         target.account_status = ACCOUNT_STATUS_ACTIVE
@@ -226,6 +275,9 @@ def bulk_reject(db: Session, actor: User, user_ids: list[str], note: str | None 
             continue
         if target.id == actor.id:
             skipped.append({"user_id": uid, "reason": "cannot_reject_self"})
+            continue
+        if _is_protected(actor, target):
+            skipped.append({"user_id": uid, "reason": PROTECTED_SUPER_ADMIN})
             continue
         if target.account_status == ACCOUNT_STATUS_REJECTED:
             skipped.append({"user_id": uid, "reason": "already_rejected"})
@@ -284,6 +336,9 @@ def bulk_delete(db: Session, actor: User, user_ids: list[str], confirm: str) -> 
         if target.id == actor.id:
             skipped.append({"user_id": uid, "reason": "cannot_delete_self"})
             continue
+        if _is_protected(actor, target):
+            skipped.append({"user_id": uid, "reason": PROTECTED_SUPER_ADMIN})
+            continue
         try:
             _guard_not_last_admin(db, target, "delete")
         except ForbiddenError as exc:
@@ -294,6 +349,7 @@ def bulk_delete(db: Session, actor: User, user_ids: list[str], confirm: str) -> 
         email = target.email
         prior_status = target.account_status
         student_id = target.student_id
+        record_type = _user_record_type(target.role)
         try:
             with db.begin_nested():
                 if student_id:
@@ -304,10 +360,10 @@ def bulk_delete(db: Session, actor: User, user_ids: list[str], confirm: str) -> 
                         admin_service.purge_student_tree(db, actor, student)
                     else:
                         db.delete(target)  # dangling student_id: remove login only
-                        _audit_delete(db, actor, uid, email, prior_status)
+                        _audit_delete(db, actor, uid, email, prior_status, record_type)
                 else:
                     db.delete(target)  # admin-only / studentless account
-                    _audit_delete(db, actor, uid, email, prior_status)
+                    _audit_delete(db, actor, uid, email, prior_status, record_type)
                 db.flush()
         except Exception as exc:  # savepoint auto-rolled back; batch continues
             skipped.append({"user_id": uid, "reason": f"delete_failed: {exc.__class__.__name__}"})
@@ -318,12 +374,14 @@ def bulk_delete(db: Session, actor: User, user_ids: list[str], confirm: str) -> 
     return {"succeeded": succeeded, "skipped": skipped, "summary": status_summary(db)}
 
 
-def _audit_delete(db: Session, actor: User, user_id: str, email: str, prior_status: str) -> None:
+def _audit_delete(
+    db: Session, actor: User, user_id: str, email: str, prior_status: str, record_type: str = "user"
+) -> None:
     AuditRepository(db).record(
         admin_user_id=actor.id,
         admin_email=actor.email,
         action_type="ACCOUNT_DELETED",
-        record_type="user",
+        record_type=record_type,
         record_id=user_id,
         description=f"{email}: {prior_status} -> permanently deleted (account + all local data).",
     )
@@ -331,25 +389,26 @@ def _audit_delete(db: Session, actor: User, user_id: str, email: str, prior_stat
 
 # ---------------------------------------------------------------- role ops
 def change_role(db: Session, actor: User, user_id: str, new_role: str) -> User:
-    if new_role not in USER_ROLES:
+    # 1) Only student/admin are assignable through this API - by ANY caller,
+    #    super admins included. super_admin comes only from the bootstrap command.
+    if new_role == USER_ROLE_SUPER_ADMIN:
+        raise ForbiddenError("The Super Admin role cannot be assigned here.")
+    if new_role not in ASSIGNABLE_ROLES:
         raise ValidationFailedError("Unknown role.")
     target = _get(db, user_id)
     old_role = target.role
     if old_role == new_role:
         return target
 
-    # 1) No one may change their OWN role (prevents self-promotion/lockout).
+    # 2) No one may change their OWN role (prevents self-promotion/lockout).
     if target.id == actor.id:
         raise ForbiddenError("You cannot change your own role.")
-
-    # 2) Only the two application roles are assignable. Every admin has the same
-    #    (full) powers, so any admin may promote a student to admin or demote an
-    #    admin to student.
-    if new_role not in (USER_ROLE_STUDENT, USER_ROLE_ADMIN):
-        raise ForbiddenError("Administrators can only assign the student or admin role.")
-    # 3) Never demote/remove the last active administrator.
+    # 3) Only a super admin may change a super admin's role.
+    _guard_privileged_target(actor, target)
+    # 4) Never demote/remove the last active administrator / super admin.
     if old_role in ADMIN_ROLES and new_role not in ADMIN_ROLES:
         _guard_not_last_admin(db, target, "demote")
+    _guard_not_last_super_admin(db, target, "demote")
 
     target.role = new_role
     _audit(db, actor, "ROLE_CHANGED", target, old_role, new_role)
@@ -363,3 +422,13 @@ def _guard_not_last_admin(db: Session, target: User, action: str) -> None:
     if target.role in ADMIN_ROLES and target.account_status == ACCOUNT_STATUS_ACTIVE:
         if _active_admins(db, exclude_id=target.id) == 0:
             raise ForbiddenError(f"Cannot {action} the last active administrator.")
+    _guard_not_last_super_admin(db, target, action)
+
+
+def _guard_not_last_super_admin(db: Session, target: User, action: str) -> None:
+    """System administration must never become unreachable: the last active
+    super admin cannot be demoted, disabled, rejected or deleted (the bootstrap
+    command remains the recovery path)."""
+    if target.role == USER_ROLE_SUPER_ADMIN and target.account_status == ACCOUNT_STATUS_ACTIVE:
+        if _active_super_admins(db, exclude_id=target.id) == 0:
+            raise ForbiddenError(f"Cannot {action} the last active Super Admin.")

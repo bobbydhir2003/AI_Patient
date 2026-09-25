@@ -11,20 +11,25 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog, User
-from app.repositories.audit_repository import AuditRepository
+from app.repositories.audit_repository import AuditRepository, can_view_privileged
 from app.schemas.notification_schema import NotificationListOut, NotificationOut
 
-# audit action_type -> (human title, notification type, link)
+# audit action_type -> (human title, notification type, link). The system events
+# below are only ever delivered to super admins (list_notifications filters
+# server-side), so they link into the Super Admin area.
 _MAP = {
-    "audio_cache_cleared": ("Audio cache cleared", "system", "/admin/system"),
-    "voice_previewed": ("Patient voice preview used", "voice", "/admin/system/voices"),
-    "voice_updated": ("Patient voice updated", "voice", "/admin/system/voices"),
-    "voice_restored": ("Patient voice restored to default", "voice", "/admin/system/voices"),
-    "credential_replaced": ("API credential replaced", "credential", "/admin/system/credentials"),
-    "credential_removed": ("API credential removed", "credential", "/admin/system/credentials"),
-    "credential_tested": ("API connection tested", "credential", "/admin/system/credentials"),
-    "ai_config_updated": ("AI configuration updated", "config", "/admin/system/config"),
-    "config_restored": ("Configuration restored", "config", "/admin/system/config"),
+    "audio_cache_cleared": ("Audio cache cleared", "system", "/superadmin/dashboard"),
+    "voice_previewed": ("Patient voice preview used", "voice", "/superadmin/dashboard"),
+    "voice_updated": ("Patient voice updated", "voice", "/superadmin/dashboard"),
+    "voice_restored": ("Patient voice restored to default", "voice", "/superadmin/dashboard"),
+    "credential_replaced": ("API credential replaced", "credential", "/superadmin/credentials"),
+    "credential_removed": ("API credential removed", "credential", "/superadmin/credentials"),
+    "credential_tested": ("API connection tested", "credential", "/superadmin/credentials"),
+    "ai_config_updated": ("AI configuration updated", "config", "/superadmin/ai-config"),
+    "config_restored": ("Configuration restored", "config", "/superadmin/ai-config"),
+    "load_test_started": ("Load test started", "system", "/superadmin/load-capacity"),
+    "load_test_stopped": ("Load test stopped", "system", "/superadmin/load-capacity"),
+    "survey_reset": ("Survey reset", "activity", "/superadmin/survey-resets"),
     "student_archived": ("Student archived", "student", "/admin/students"),
     "student_reactivated": ("Student reactivated", "student", "/admin/students"),
     "student_deleted": ("Student deleted", "student", "/admin/students"),
@@ -64,7 +69,9 @@ def _to_notification(row: AuditLog, read_at: datetime | None) -> NotificationOut
 
 
 def list_notifications(db: Session, user: User, limit: int = 20) -> NotificationListOut:
-    rows, _ = AuditRepository(db).list(limit=limit, offset=0)  # newest first
+    rows, _ = AuditRepository(db).list(  # newest first; role-aware visibility
+        limit=limit, offset=0, include_privileged=can_view_privileged(user.role)
+    )
     read_at = _aware(user.notifications_read_at)
     items = [_to_notification(r, read_at) for r in rows]
     unread = sum(1 for n in items if not n.is_read)

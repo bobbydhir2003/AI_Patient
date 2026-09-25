@@ -9,7 +9,7 @@ from sqlalchemy import inspect as sa_inspect
 
 from app.models import AiUsageEvent
 from tests.conftest import FakeOpenAIClient, bearer, make_client
-from tests.test_auth import login_token, make_admin
+from tests.test_auth import login_token, make_super_admin
 
 _MIGRATION = pathlib.Path(__file__).resolve().parents[1] / (
     "app/database/migrations/versions/0017_ai_usage_events.py"
@@ -29,8 +29,8 @@ def test_ai_usage_events_table_exists(engine):
 # TEST 2/3/4 — empty table → endpoints return 200 with legitimate zero aggregates.
 def test_empty_endpoints_return_200_with_zeroes(engine):
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
-        make_admin(engine, email="empty_admin@school.edu")
-        ah = bearer(login_token(c, "empty_admin@school.edu", "adminpass1"))
+        make_super_admin(engine, email="empty_admin@school.edu")
+        ah = bearer(login_token(c, "empty_admin@school.edu", "superpass1"))
 
         s = c.get("/api/admin/usage/summary?range=today", headers=ah)
         assert s.status_code == 200

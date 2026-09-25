@@ -89,7 +89,22 @@ def register(db: Session, payload: RegisterRequest) -> RegisterResult:
     )
 
 
-def login(db: Session, email: str, password: str, client_ip: str = "unknown") -> TokenResponse:
+def login(
+    db: Session,
+    email: str,
+    password: str,
+    client_ip: str = "unknown",
+    *,
+    required_roles: tuple[str, ...] | None = None,
+) -> TokenResponse:
+    """Verify credentials and issue a token.
+
+    ``required_roles`` (the Super Admin portal login) makes every failure look
+    identical to the client: unknown email, wrong password, another role, or an
+    ineligible (pending/rejected/disabled/inactive) account ALL raise the same
+    generic InvalidCredentialsError (401) and count as a failed attempt for the
+    brute-force throttle. The real reason goes only to the server log. Nothing
+    is revealed, last_login is not touched and no token is issued."""
     # A9: brute-force throttle. Refuse early (generic 429) when this IP/email is
     # temporarily locked out, without revealing whether the account exists.
     login_throttle.check_login_allowed(client_ip, email)
@@ -105,6 +120,19 @@ def login(db: Session, email: str, password: str, client_ip: str = "unknown") ->
     if not verify_password(password, user.password_hash):
         login_throttle.record_login_failure(client_ip, email)
         raise InvalidCredentialsError()
+
+    if required_roles is not None:
+        status = getattr(user, "account_status", ACCOUNT_STATUS_ACTIVE)
+        reason = None
+        if user.role not in required_roles:
+            reason = "role"
+        elif status != ACCOUNT_STATUS_ACTIVE or not user.is_active:
+            reason = f"status:{status}"
+        if reason is not None:
+            login_throttle.record_login_failure(client_ip, email)
+            # Internal only (user id, never the email or password).
+            logger.warning("privileged_login_denied user_id=%s reason=%s", user.id, reason)
+            raise InvalidCredentialsError()
 
     # D4: account-status gate (distinct, non-network messages). Credentials were
     # correct, so a successful attempt is recorded (clears the throttle) before

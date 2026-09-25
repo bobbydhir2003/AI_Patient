@@ -12,12 +12,20 @@ import json
 
 from app.core.config import get_settings
 from app.services.system_service import mask_secret
-from tests.test_auth import auth_header, login_token, make_admin, register
+from tests.test_auth import auth_header, login_token, make_admin, make_super_admin, register
 
 
 def admin_token(client, engine):
-    make_admin(engine, email="sysadmin@school.edu", password="adminpass1")
+    # The System Dashboard is system administration: super_admin only.
+    make_super_admin(engine, email="sysadmin@school.edu", password="adminpass1")
     return login_token(client, "sysadmin@school.edu", "adminpass1")
+
+
+def test_system_endpoints_forbidden_for_normal_admin(client, engine):
+    make_admin(engine, email="plainadmin@school.edu", password="adminpass1")
+    tok = login_token(client, "plainadmin@school.edu", "adminpass1")
+    for path in ("/api/admin/system/overview", "/api/admin/system/live"):
+        assert client.get(path, headers=auth_header(tok)).status_code == 403, path
 
 
 # ------------------------------------------------------------------ authz

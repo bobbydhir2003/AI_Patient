@@ -7,7 +7,7 @@ import types
 import pytest
 
 from tests.conftest import FakeOpenAIClient, bearer, make_client, register_student
-from tests.test_auth import login_token, make_admin
+from tests.test_auth import login_token, make_admin, make_super_admin
 
 
 # ==========================================================================
@@ -95,19 +95,23 @@ def test_traffic_dashboard_requires_admin(engine):
         h = bearer(stud["accessToken"])
         for ep in _endpoints():
             assert c.get(ep, headers=h).status_code == 403, ep
-        # admin -> 200
+        # normal admin -> 403 (traffic is system administration)
         make_admin(engine, email="admin@school.edu")
-        atoken = login_token(c, "admin@school.edu", "adminpass1")
-        ah = bearer(atoken)
+        ah = bearer(login_token(c, "admin@school.edu", "adminpass1"))
         for ep in _endpoints():
-            assert c.get(ep, headers=ah).status_code == 200, ep
+            assert c.get(ep, headers=ah).status_code == 403, ep
+        # super admin -> 200
+        make_super_admin(engine, email="super@school.edu")
+        sh = bearer(login_token(c, "super@school.edu", "superpass1"))
+        for ep in _endpoints():
+            assert c.get(ep, headers=sh).status_code == 200, ep
 
 
 def test_overview_has_no_fabricated_infrastructure(engine):
     """No fake nodes / Redis / autoscaling numbers - only real, measurable data."""
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
-        make_admin(engine, email="a2@school.edu")
-        ah = bearer(login_token(c, "a2@school.edu", "adminpass1"))
+        make_super_admin(engine, email="a2@school.edu")
+        ah = bearer(login_token(c, "a2@school.edu", "superpass1"))
         ov = c.get("/api/admin/system/traffic/overview", headers=ah).json()
         blob = str(ov).lower()
         for forbidden in ("ip-10-", "redis", "autoscal", "in-service", "standby", "worker node"):
@@ -127,8 +131,8 @@ def test_history_time_range(engine):
         t.history.record({"_ts": time.time(), "t": "now", "active_users": 1, "http_rpm": 5,
                           "openai_rpm": 0, "elevenlabs_rpm": 0, "rate_limited": 0})
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
-        make_admin(engine, email="a3@school.edu")
-        ah = bearer(login_token(c, "a3@school.edu", "adminpass1"))
+        make_super_admin(engine, email="a3@school.edu")
+        ah = bearer(login_token(c, "a3@school.edu", "superpass1"))
         r = c.get("/api/admin/system/traffic/history?minutes=15", headers=ah).json()
         assert r["minutes"] == 15
         assert len(r["points"]) >= 3

@@ -2,6 +2,12 @@ import { useAuth } from "../../state/AuthContext";
 import { ActiveBadge, LoadingState } from "../../portal/ui";
 import { fmtDate, fmtDateTime } from "../../portal/format";
 
+const ROLE_LABELS: Record<string, string> = {
+  super_admin: "Super Administrator",
+  admin: "Administrator",
+  student: "Student",
+};
+
 export function AdminProfilePage() {
   const { user, logout } = useAuth();
 
@@ -24,7 +30,7 @@ export function AdminProfilePage() {
           <dt>Email</dt>
           <dd>{user.email}</dd>
           <dt>Role</dt>
-          <dd style={{ textTransform: "capitalize" }}>{user.role}</dd>
+          <dd>{ROLE_LABELS[user.role] ?? user.role}</dd>
           <dt>Account number</dt>
           <dd>{user.studentNumber || "—"}</dd>
           <dt>Member since</dt>

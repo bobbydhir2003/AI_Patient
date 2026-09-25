@@ -1,7 +1,7 @@
 """Traffic Dashboard admin API (Priority B).
 
-All routes require an admin account (require_admin) - this operational telemetry
-is never exposed to students. Every value comes from real measurement; see
+SUPER ADMIN ONLY: all routes require require_super_admin - this operational
+telemetry is never exposed to students or normal admins. Every value comes from real measurement; see
 app/services/traffic_service.py. Responses are intentionally lightweight (rolling
 in-memory counters + cheap indexed queries) so polling the dashboard does not
 itself become a source of load.
@@ -10,13 +10,13 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
-from app.dependencies.auth import require_admin
+from app.dependencies.auth import require_super_admin
 from app.services import traffic_service
 
 router = APIRouter(
     prefix="/admin/system/traffic",
     tags=["admin-traffic"],
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_super_admin)],
 )
 
 

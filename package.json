@@ -20,7 +20,8 @@
     "test:assessmentview": "node --test scripts/test-assessment-view-tracker.mjs",
     "test:livekitpoc": "tsc src/services/livekit/livekitPocEngine.ts src/services/livekit/liveKitTranscriptMessages.ts src/hooks/useLiveKitInterviewVoice.ts --ignoreConfig --outDir .test-build/livekit --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --types vite/client && node --experimental-test-module-mocks --test scripts/test-livekit-poc.mjs",
     "test:studentdata": "node --test scripts/test-admin-student-data.mjs",
-    "test:surveyresets": "node --test scripts/test-admin-survey-resets.mjs"
+    "test:surveyresets": "node --test scripts/test-admin-survey-resets.mjs",
+    "test:superadmin": "node --test scripts/test-super-admin.mjs"
   },
   "dependencies": {
     "livekit-client": "^2.22.0",

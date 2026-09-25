@@ -240,7 +240,8 @@ def build_alerts(
 
 # ----------------------------- activity -----------------------------
 def list_activity(db: Session, limit: int = 8) -> list[ActivityOut]:
-    rows, _ = AuditRepository(db).list(limit=limit, offset=0)
+    # System Dashboard (super_admin-only API) shows every event.
+    rows, _ = AuditRepository(db).list(limit=limit, offset=0, include_privileged=True)
     out: list[ActivityOut] = []
     for r in rows:
         target = f"{r.record_type}:{r.record_id}".strip(":") if r.record_type else ""

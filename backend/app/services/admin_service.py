@@ -14,6 +14,7 @@ from app.core import constants
 from app.core.exceptions import (
     AssessmentNotFoundError,
     DeleteConfirmationError,
+    ForbiddenError,
     SelfDeletionError,
     SessionNotFoundError,
     StudentNotFoundError,
@@ -30,7 +31,7 @@ from app.models import (
     SurveyReceiptReset,
     User,
 )
-from app.repositories.audit_repository import AuditRepository
+from app.repositories.audit_repository import AuditRepository, can_view_privileged
 from app.schemas.admin import (
     AssessmentLevelCount,
     AuditLogOut,
@@ -673,10 +674,18 @@ def get_session_transcript(db: Session, session_id: str) -> list[TranscriptMessa
 
 
 # ------------------------------------------------------------------ audit log
-def list_audit_logs(db: Session, *, page: int = 1, page_size: int = 25) -> PaginatedAuditLogs:
+def list_audit_logs(
+    db: Session, viewer: User, *, page: int = 1, page_size: int = 25
+) -> PaginatedAuditLogs:
+    """Activity Log. System-administration events are returned only to a super
+    admin (role-aware, server-side; see constants.PRIVILEGED_AUDIT_*)."""
     page = max(1, page)
     page_size = min(max(1, page_size), 100)
-    rows, total = AuditRepository(db).list(limit=page_size, offset=(page - 1) * page_size)
+    rows, total = AuditRepository(db).list(
+        limit=page_size,
+        offset=(page - 1) * page_size,
+        include_privileged=can_view_privileged(viewer.role),
+    )
     return PaginatedAuditLogs(
         items=[AuditLogOut.model_validate(r) for r in rows],
         total=total,
@@ -686,11 +695,24 @@ def list_audit_logs(db: Session, *, page: int = 1, page_size: int = 25) -> Pagin
 
 
 # ------------------------------------------------------------------ mutations
+def _guard_linked_super_admin(admin: User, student: Student) -> None:
+    """A student profile linked to a super_admin login (e.g. a promoted student)
+    must not be archived/deleted by a normal admin: both actions also disable or
+    delete that privileged login account."""
+    if (
+        student.user is not None
+        and student.user.role == constants.USER_ROLE_SUPER_ADMIN
+        and admin.role not in constants.SUPER_ADMIN_ROLES
+    ):
+        raise ForbiddenError("Only a Super Admin can manage a Super Admin account.")
+
+
 def set_student_status(db: Session, admin: User, student_id: str, is_active: bool) -> Student:
     student = _get_student_or_404(db, student_id)
     # Guard: an admin cannot deactivate the account they are logged in with.
     if student.user is not None and student.user.id == admin.id:
         raise SelfDeletionError()
+    _guard_linked_super_admin(admin, student)
 
     student.is_active = is_active
     if student.user is not None:
@@ -862,5 +884,6 @@ def delete_student(db: Session, admin: User, student_id: str, *, confirm: str) -
     student = _get_student_or_404(db, student_id)
     if student.user is not None and student.user.id == admin.id:
         raise SelfDeletionError()
+    _guard_linked_super_admin(admin, student)
     purge_student_tree(db, admin, student)
     db.commit()

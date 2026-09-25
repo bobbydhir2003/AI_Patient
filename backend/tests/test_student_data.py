@@ -25,7 +25,7 @@ from app.schemas.session_schema import SessionCreateRequest
 from app.services import assessment_view_service as avs
 from app.services import session_service, student_data_service
 from tests.conftest import make_client
-from tests.test_admin import admin_token
+from tests.test_admin import admin_token, super_admin_token
 from tests.test_auth import auth_header
 from tests.test_surveys import CARLY, POST_ANSWERS, PRE_ANSWERS, SOFIA, _new_session
 
@@ -46,6 +46,12 @@ def api(engine, fake_client):
 @pytest.fixture()
 def admin(api, engine):
     return auth_header(admin_token(api, engine))
+
+
+@pytest.fixture()
+def superadmin(api, engine):
+    """Survey resets are system administration (super_admin only)."""
+    return auth_header(super_admin_token(api, engine))
 
 
 @pytest.fixture()
@@ -321,13 +327,13 @@ def _reset(api, admin, student_id, scope, **extra):
     )
 
 
-def test_reset_post_only(api, admin, engine, redcap):
+def test_reset_post_only(api, superadmin, engine, redcap):
     sid = _complete_survey(api)
     student_id = _default_student_id(engine)
     [old] = [r for r in _receipts_for(engine, student_id)]
     old_record = old.redcap_record_id
 
-    r = _reset(api, admin, student_id, "post")
+    r = _reset(api, superadmin, student_id, "post")
     assert r.status_code == 200, r.text
     sv = r.json()["survey"]
     assert sv["pre"]["completed"] is True and sv["post"]["completed"] is False
@@ -349,10 +355,10 @@ def test_reset_post_only(api, admin, engine, redcap):
     assert _status(api, sid)["globalSurveyStatus"] == "completed"
 
 
-def test_reset_pre_only(api, admin, engine, redcap):
+def test_reset_pre_only(api, superadmin, engine, redcap):
     sid = _complete_survey(api)
     student_id = _default_student_id(engine)
-    r = _reset(api, admin, student_id, "pre")
+    r = _reset(api, superadmin, student_id, "pre")
     assert r.status_code == 200, r.text
     sv = r.json()["survey"]
     assert sv["pre"]["completed"] is False and sv["post"]["completed"] is True
@@ -365,14 +371,14 @@ def test_reset_pre_only(api, admin, engine, redcap):
     assert _status(api, sid)["globalSurveyStatus"] == "completed"
 
 
-def test_reset_both_makes_repeated_case_student_eligible_again(api, admin, engine, redcap):
+def test_reset_both_makes_repeated_case_student_eligible_again(api, superadmin, engine, redcap):
     _complete_survey(api, CARLY)
     student_id = _default_student_id(engine)
     old_record = _receipts_for(engine, student_id)[0].redcap_record_id
     sofia = _new_session(api, SOFIA)
     assert _status(api, sofia)["isSurveyOwnerCase"] is False  # would show "skip"
 
-    r = _reset(api, admin, student_id, "both")
+    r = _reset(api, superadmin, student_id, "both")
     assert r.status_code == 200, r.text
     assert r.json()["survey"]["globalStatus"] == "not_started"
     assert _receipts_for(engine, student_id) == []
@@ -386,7 +392,7 @@ def test_reset_both_makes_repeated_case_student_eligible_again(api, admin, engin
     assert redcap[0]["record_id"] != old_record
 
 
-def test_reset_targets_only_that_student_and_keeps_all_other_data(api, admin, engine, redcap):
+def test_reset_targets_only_that_student_and_keeps_all_other_data(api, superadmin, engine, redcap):
     _complete_survey(api, CARLY)
     student_id = _default_student_id(engine)
     s_id, run_id = _seed_session(engine, student_id, case="camden")
@@ -414,7 +420,7 @@ def test_reset_targets_only_that_student_and_keeps_all_other_data(api, admin, en
         for m in (InterviewSession, ConversationTurn, AssessmentRun, AssessmentViewSession, AssessmentViewVisit)
     }
     # A studentId in the body is ignored: identity comes from the route only.
-    assert _reset(api, admin, student_id, "both", studentId=other_id).status_code == 200
+    assert _reset(api, superadmin, student_id, "both", studentId=other_id).status_code == 200
     after = {
         m.__name__: _count(engine, m)
         for m in (InterviewSession, ConversationTurn, AssessmentRun, AssessmentViewSession, AssessmentViewVisit)
@@ -434,26 +440,31 @@ def test_reset_targets_only_that_student_and_keeps_all_other_data(api, admin, en
     assert _resets_for(engine, other_id) == []
 
 
-def test_reset_not_applicable_and_validation(api, admin, engine, redcap):
+def test_reset_not_applicable_and_validation(api, superadmin, engine, redcap):
     student_id = _default_student_id(engine)
-    assert _reset(api, admin, student_id, "both").status_code == 409  # nothing to reset
+    assert _reset(api, superadmin, student_id, "both").status_code == 409  # nothing to reset
     sid = _new_session(api, CARLY)
     api.post(f"/api/interviews/{sid}/surveys/pre", json=PRE_ANSWERS)
-    assert _reset(api, admin, student_id, "post").status_code == 409  # Post never done
+    assert _reset(api, superadmin, student_id, "post").status_code == 409  # Post never done
     assert _resets_for(engine, student_id) == []
-    assert _reset(api, admin, student_id, "everything").status_code == 422
-    assert _reset(api, admin, "missing-student", "both").status_code == 404
+    assert _reset(api, superadmin, student_id, "everything").status_code == 422
+    assert _reset(api, superadmin, "missing-student", "both").status_code == 404
 
 
-def test_reset_is_admin_only(api, engine, redcap):
+def test_reset_is_super_admin_only(api, admin, engine, redcap):
     _complete_survey(api)
     student_id = _default_student_id(engine)
+    # No header = the seeded default STUDENT.
     r = api.post(f"/api/admin/student-data/{student_id}/survey-reset", json={"scope": "both"})
     assert r.status_code == 403
+    # A normal admin can VIEW Student Data but cannot reset any scope.
+    assert api.get(f"/api/admin/student-data/{student_id}", headers=admin).status_code == 200
+    for scope in ("pre", "post", "both"):
+        assert _reset(api, admin, student_id, scope).status_code == 403, scope
     assert _resets_for(engine, student_id) == []
 
 
-def test_deleting_student_also_removes_reset_history(api, admin, engine, redcap):
+def test_deleting_student_also_removes_reset_history(api, admin, superadmin, engine, redcap):
     sid, _ = _seed_student(engine, name="Del", number="DEL1")
     db = _factory(engine)()
     try:
@@ -465,7 +476,7 @@ def test_deleting_student_also_removes_reset_history(api, admin, engine, redcap)
         db.commit()
     finally:
         db.close()
-    assert _reset(api, admin, sid, "both").status_code == 200
+    assert _reset(api, superadmin, sid, "both").status_code == 200
     r = api.request(
         "DELETE", f"/api/admin/students/{sid}", json={"confirm": "DELETE"}, headers=admin
     )

@@ -12,24 +12,33 @@ Or with explicit flags:
 
 If an account with the email already exists it is promoted to admin and its
 password reset, so this command is safe to re-run.
+
+A SUPER ADMIN account is never touched: this command refuses (exit code 4)
+before prompting for a password or changing anything, so it can never demote,
+re-password or re-activate a super admin (nor bypass the last-active-super-admin
+protection). There is deliberately no override flag; super admin accounts are
+managed only through scripts/create_super_admin.py and the Super Admin UI.
 """
 import argparse
 import getpass
 import sys
 
 from app.core.config import get_settings
-from app.core.constants import USER_ROLE_ADMIN
+from app.core.constants import USER_ROLE_ADMIN, USER_ROLE_SUPER_ADMIN
 from app.core.security import hash_password
 from app.database.connection import get_session_factory
 from app.repositories.user_repository import UserRepository
 
 
-def main() -> int:
+SUPER_ADMIN_REFUSAL = "Refusing to modify a Super Admin account with create_admin."
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Create or update an admin user.")
     parser.add_argument("--email", default=None)
     parser.add_argument("--password", default=None)
     parser.add_argument("--full-name", default=None)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     settings = get_settings()
     email = (args.email or settings.admin_email or "").strip().lower()
@@ -38,14 +47,8 @@ def main() -> int:
 
     if not email:
         email = input("Admin email: ").strip().lower()
-    if not password:
-        password = getpass.getpass("Admin password: ")
-
-    if not email or not password:
+    if not email:
         print("ERROR: both an email and a password are required.", file=sys.stderr)
-        return 2
-    if len(password) < 8:
-        print("ERROR: password must be at least 8 characters.", file=sys.stderr)
         return 2
 
     factory = get_session_factory()
@@ -53,11 +56,25 @@ def main() -> int:
     try:
         repo = UserRepository(db)
         existing = repo.get_by_email(email)
+        # Checked FIRST: nothing below may run for a super admin.
+        if existing is not None and existing.role == USER_ROLE_SUPER_ADMIN:
+            print(f"ERROR: {SUPER_ADMIN_REFUSAL}", file=sys.stderr)
+            return 4
+
+        if not password:
+            password = getpass.getpass("Admin password: ")
+        if not password:
+            print("ERROR: both an email and a password are required.", file=sys.stderr)
+            return 2
+        if len(password) < 8:
+            print("ERROR: password must be at least 8 characters.", file=sys.stderr)
+            return 2
+
         if existing is not None:
             existing.role = USER_ROLE_ADMIN
             existing.is_active = True
-            # There is only ONE admin role now; the bootstrap admin has exactly
-            # the same powers as any other admin. No special system-admin flag.
+            # A normal (academic) admin; system administration requires the
+            # separate super_admin role (scripts/create_super_admin.py).
             existing.password_hash = hash_password(password)
             if full_name:
                 existing.full_name = full_name

@@ -71,16 +71,15 @@ def patched(engine, monkeypatch):
     monkeypatch.setattr(lts, "_monitor", lambda job_id: None)  # no background finalize
     monkeypatch.setattr(lts, "get_session_factory", lambda: _factory(engine))
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
-        # Two-role model: every admin has full load-testing access. There is no
-        # separate super-admin tier anymore.
+        # Load & capacity testing is SUPER ADMIN ONLY; a normal admin exists
+        # too so the RBAC tests can prove it is refused.
+        make_user(engine, email="sup@s.edu", role="super_admin")
         make_user(engine, email="adm@s.edu", role="admin")
         yield c, engine
 
 
 def _super(c):
-    # Backwards-compatible name used by the positive-path tests below; it now
-    # simply returns a normal admin token (admins have all admin powers).
-    return bearer(login_token(c, "adm@s.edu", "pw12345678"))
+    return bearer(login_token(c, "sup@s.edu", "pw12345678"))
 
 
 def _admin(c):
@@ -98,20 +97,46 @@ def test_config_rbac(patched):
     c, _ = patched
     assert c.get("/api/admin/system/load-tests/config").status_code == 401
     assert c.get("/api/admin/system/load-tests/config", headers=_student(c)).status_code == 403
-    assert c.get("/api/admin/system/load-tests/config", headers=_admin(c)).status_code == 200
+    assert c.get("/api/admin/system/load-tests/config", headers=_admin(c)).status_code == 403
+    assert c.get("/api/admin/system/load-tests/config", headers=_super(c)).status_code == 200
 
 
-def test_create_forbidden_for_student(patched, engine):
-    c, _ = patched
+def test_create_and_stop_forbidden_for_student_and_admin(patched, engine):
+    c, engine = patched
     body = {"testType": "smoke", "providerMode": "SIMULATED_AI", "targetUsers": 5, "durationSeconds": 30}
-    # A student is forbidden; a normal admin is allowed (covered elsewhere).
     assert c.post("/api/admin/system/load-tests", json=body, headers=_student(c)).status_code == 403
+    # A normal admin cannot start a load test by calling the API directly...
+    assert c.post("/api/admin/system/load-tests", json=body, headers=_admin(c)).status_code == 403
+    assert c.get("/api/admin/system/load-tests/active", headers=_super(c)).json()["job"] is None
+    # ...nor stop one a super admin started.
+    j = c.post("/api/admin/system/load-tests", json=body, headers=_super(c)).json()
+    assert c.post(f"/api/admin/system/load-tests/{j['id']}/stop", headers=_admin(c)).status_code == 403
+    assert c.get(f"/api/admin/system/load-tests/{j['id']}/metrics", headers=_admin(c)).status_code == 403
+
+
+def test_start_and_stop_are_audited(patched, engine):
+    from sqlalchemy import select
+
+    from app.models import AuditLog
+
+    c, engine = patched
+    body = {"testType": "smoke", "providerMode": "SIMULATED_AI", "targetUsers": 5, "durationSeconds": 30}
+    j = c.post("/api/admin/system/load-tests", json=body, headers=_super(c)).json()
+    assert c.post(f"/api/admin/system/load-tests/{j['id']}/stop", headers=_super(c)).status_code == 200
+    db = _factory(engine)()
+    try:
+        rows = db.execute(select(AuditLog).where(AuditLog.record_id == j["id"])).scalars().all()
+        assert sorted(r.action_type for r in rows) == ["load_test_started", "load_test_stopped"]
+        assert {r.admin_email for r in rows} == {"sup@s.edu"}
+    finally:
+        db.close()
 
 
 def test_recent_and_metrics_rbac(patched):
     c, _ = patched
     assert c.get("/api/admin/system/load-tests/recent", headers=_student(c)).status_code == 403
-    assert c.get("/api/admin/system/load-tests/recent", headers=_admin(c)).status_code == 200
+    assert c.get("/api/admin/system/load-tests/recent", headers=_admin(c)).status_code == 403
+    assert c.get("/api/admin/system/load-tests/recent", headers=_super(c)).status_code == 200
 
 
 # ============================ Empty state ============================

@@ -1,11 +1,12 @@
 """Admin "Student Data" API: a student-centred view (list -> one student's full
-history) plus the admin survey reset. Every route requires an admin; the student
-is always identified by the route, never by a request body."""
+history) plus the survey reset. Viewing requires an admin; the survey reset
+requires a SUPER ADMIN. The student is always identified by the route, never by a
+request body."""
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
-from app.dependencies.auth import require_admin
+from app.dependencies.auth import require_admin, require_super_admin
 from app.models import User
 from app.schemas.student_data import (
     PaginatedStudentData,
@@ -45,7 +46,7 @@ def get_student_data(student_id: str, db: Session = Depends(get_db)) -> StudentD
 def reset_survey(
     student_id: str,
     payload: SurveyResetIn,
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ) -> SurveyResetOut:
     return student_data_service.reset_survey(db, admin, student_id, scope=payload.scope)

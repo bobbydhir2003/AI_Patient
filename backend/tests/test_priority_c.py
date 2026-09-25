@@ -5,7 +5,7 @@ import types
 import pytest
 
 from tests.conftest import FakeOpenAIClient, bearer, make_client, register_student
-from tests.test_auth import login_token, make_admin
+from tests.test_auth import login_token, make_admin, make_super_admin
 
 
 # ==========================================================================
@@ -184,8 +184,8 @@ def test_worker_pauses_on_critical_and_resumes(engine, monkeypatch):
 def _overview(engine, admin_email):
     from app.database.connection import get_db  # noqa
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
-        make_admin(engine, email=admin_email)
-        ah = bearer(login_token(c, admin_email, "adminpass1"))
+        make_super_admin(engine, email=admin_email)  # traffic = system administration
+        ah = bearer(login_token(c, admin_email, "superpass1"))
         return c.get("/api/admin/system/traffic/overview", headers=ah).json()
 
 

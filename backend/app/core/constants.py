@@ -95,19 +95,25 @@ ROLE_STUDENT = "student"
 ROLE_PATIENT = "patient"
 
 # --- User account roles (authentication / RBAC) ---
-# The application has exactly TWO roles. Every admin holds ALL administrative
-# powers; there is no separate super/system admin tier anymore.
+# Three roles:
+# - student:     coursework (patient simulator only).
+# - admin:       academic administration (dashboard, student data, students,
+#                sessions, transcripts, assessments, user accounts).
+# - super_admin: everything an admin can do PLUS system administration (survey
+#                resets, system dashboard/runtime config/credentials, traffic,
+#                load & capacity testing, AI usage & cost). Granted ONLY by the
+#                server-side bootstrap command (scripts/create_super_admin.py),
+#                never through the User Accounts API.
 USER_ROLE_STUDENT = "student"
 USER_ROLE_ADMIN = "admin"
-USER_ROLES = (USER_ROLE_STUDENT, USER_ROLE_ADMIN)
-# Roles that may reach the admin area.
-ADMIN_ROLES = (USER_ROLE_ADMIN,)
-
-# LEGACY (do NOT use for authorization). Kept only so the role-consolidation
-# migration and defensive normalization can recognize pre-existing rows whose
-# role was "super_admin" and treat them as ordinary admins.
 USER_ROLE_SUPER_ADMIN = "super_admin"
-LEGACY_ADMIN_ROLES = ("super_admin", "system_admin")
+USER_ROLES = (USER_ROLE_STUDENT, USER_ROLE_ADMIN, USER_ROLE_SUPER_ADMIN)
+# Roles that may reach the (academic) admin area. A super admin is also an admin.
+ADMIN_ROLES = (USER_ROLE_ADMIN, USER_ROLE_SUPER_ADMIN)
+# Roles that may reach system administration (require_super_admin).
+SUPER_ADMIN_ROLES = (USER_ROLE_SUPER_ADMIN,)
+# Roles the User Accounts API may ASSIGN. super_admin is deliberately absent.
+ASSIGNABLE_ROLES = (USER_ROLE_STUDENT, USER_ROLE_ADMIN)
 
 # --- Account status (separate from role; approval lifecycle) ---
 ACCOUNT_STATUS_PENDING = "PENDING"    # newly registered; awaiting admin approval
@@ -148,6 +154,38 @@ AUDIT_SESSION_DELETED = "session_deleted"
 AUDIT_ASSESSMENT_DELETED = "assessment_deleted"
 AUDIT_MESSAGE_DELETED = "message_deleted"
 AUDIT_SURVEY_RESET = "survey_reset"
+AUDIT_LOAD_TEST_STARTED = "load_test_started"
+AUDIT_LOAD_TEST_STOPPED = "load_test_stopped"
+
+# --- Audit visibility (Activity Log + notification feed) ---
+# Rows matching EITHER set are system-administration events: visible to super
+# admins only (filtered server-side in AuditRepository.list). Nothing is ever
+# deleted; this controls visibility only. Everything else (account approvals,
+# student<->admin role changes, student/session/assessment actions) stays
+# visible to every admin.
+AUDIT_RECORD_SUPER_ADMIN_USER = "super_admin_user"  # account events about a super admin
+PRIVILEGED_AUDIT_ACTIONS = (
+    AUDIT_CREDENTIAL_REPLACED,
+    AUDIT_CREDENTIAL_REMOVED,
+    AUDIT_CREDENTIAL_TESTED,
+    AUDIT_AI_CONFIG_UPDATED,
+    AUDIT_CONFIG_RESTORED,
+    AUDIT_SURVEY_RESET,
+    AUDIT_LOAD_TEST_STARTED,
+    AUDIT_LOAD_TEST_STOPPED,
+    # Legacy system events that may still exist in historical rows.
+    "audio_cache_cleared",
+    "voice_previewed",
+    "voice_updated",
+    "voice_restored",
+)
+PRIVILEGED_AUDIT_RECORD_TYPES = (
+    AUDIT_RECORD_SUPER_ADMIN_USER,
+    "credential",
+    "openai_config",
+    "load_test",
+    "survey_reset_bulk",
+)
 
 # Storage alert threshold (percent used) - configurable real threshold.
 STORAGE_WARNING_PERCENT = 80.0

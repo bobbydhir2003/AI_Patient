@@ -1,8 +1,11 @@
-"""Two-role consolidation tests (student/admin only).
+"""Role-tier tests (student / admin / super_admin).
 
-These cover PART 16 of the Admin + System Dashboard consolidation:
-- authorization: student blocked / admin allowed across every admin surface;
-- roles: only student/admin accepted; legacy super_admin folds into admin;
+Originally the two-role consolidation suite; updated for the re-introduced
+super_admin tier:
+- authorization: student blocked everywhere; admin allowed on ACADEMIC admin
+  surfaces but 403 on SYSTEM administration; super_admin allowed on both;
+- roles: only student/admin are assignable through the API; legacy rows that
+  migration 0016 folded into admin stay ordinary admins;
 - credential security: keys never returned unmasked; student cannot change them;
 - workers: heartbeat reports a live worker, an expired one is not reported, and
   the dashboard invents nothing without Redis records.
@@ -39,22 +42,34 @@ def _admin(c, engine, email="admin_rc@school.edu"):
     return bearer(login_token(c, email, "pw12345678"))
 
 
+def _super(c, engine, email="super_rc@school.edu"):
+    _make_user(engine, email, role="super_admin")
+    return bearer(login_token(c, email, "pw12345678"))
+
+
 def _student(c, email="stud_rc@school.edu"):
     register(c, email=email, password="studpass1", number="RC1")
     return bearer(login_token(c, email, "studpass1"))
 
 
 # ============================ AUTHORIZATION (1-7) ============================
-ADMIN_GET_ENDPOINTS = [
+ACADEMIC_GET_ENDPOINTS = [
     "/api/admin/dashboard",                       # normal admin dashboard
     "/api/admin/users",                           # user management
+    "/api/admin/student-data",                    # student data
+]
+SYSTEM_GET_ENDPOINTS = [
     "/api/admin/system/overview",                 # system dashboard data
     "/api/admin/system/live",                     # live worker/architecture view
     "/api/admin/runtime/credentials",             # API credentials
     "/api/admin/runtime/history",                 # configuration history
+    "/api/admin/runtime/ai-configuration",        # AI configuration
     "/api/admin/system/load-tests/config",        # load testing
     "/api/admin/system/traffic/overview",         # traffic monitoring
+    "/api/admin/usage/summary",                   # AI usage & cost
+    "/api/admin/survey-resets",                   # survey resets
 ]
+ADMIN_GET_ENDPOINTS = ACADEMIC_GET_ENDPOINTS + SYSTEM_GET_ENDPOINTS
 
 
 def test_student_cannot_access_admin_endpoints(engine):
@@ -67,20 +82,28 @@ def test_student_cannot_access_admin_endpoints(engine):
             assert c.get(path).status_code == 401, f"{path} should be 401 anon"
 
 
-def test_admin_can_access_all_admin_endpoints(engine):
-    """A single normal admin (no super/system tier) reaches every admin surface:
-    management, system dashboard, voices, credentials and load testing. This is
-    the core 'any admin controls the full System Dashboard' guarantee."""
+def test_admin_reaches_academic_but_not_system_endpoints(engine):
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
         ah = _admin(c, engine)
-        for path in ADMIN_GET_ENDPOINTS:
+        for path in ACADEMIC_GET_ENDPOINTS:
             r = c.get(path, headers=ah)
             assert r.status_code == 200, f"{path} should be 200 for an admin, got {r.status_code}: {r.text}"
+        for path in SYSTEM_GET_ENDPOINTS:
+            r = c.get(path, headers=ah)
+            assert r.status_code == 403, f"{path} should be 403 for a normal admin, got {r.status_code}"
 
 
-def test_old_super_admin_requirement_no_longer_blocks_admin(engine, monkeypatch):
-    """Endpoints that historically required super_admin (credential replace, load
-    test create) now accept a normal admin.
+def test_super_admin_reaches_every_admin_endpoint(engine):
+    with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
+        sh = _super(c, engine)
+        for path in ADMIN_GET_ENDPOINTS:
+            r = c.get(path, headers=sh)
+            assert r.status_code == 200, f"{path} should be 200 for a super admin, got {r.status_code}: {r.text}"
+
+
+def test_load_test_create_requires_super_admin(engine, monkeypatch):
+    """Load-test create is super_admin-only: a normal admin gets 403 on a direct
+    API call, a super admin is accepted.
 
     This is an authorization-only check - it has no business spawning a REAL
     load-test subprocess/background thread. Un-patched, load_test_service.
@@ -110,15 +133,16 @@ def test_old_super_admin_requirement_no_longer_blocks_admin(engine, monkeypatch)
 
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
         ah = _admin(c, engine)
-        # Load-test create (was super-admin-only).
         body = {"testType": "smoke", "providerMode": "SIMULATED_AI",
                 "targetUsers": 5, "durationSeconds": 30}
-        r = c.post("/api/admin/system/load-tests", json=body, headers=ah)
-        assert r.status_code in (200, 201, 409), r.text  # not 403
+        assert c.post("/api/admin/system/load-tests", json=body, headers=ah).status_code == 403
+        sh = _super(c, engine)
+        r = c.post("/api/admin/system/load-tests", json=body, headers=sh)
+        assert r.status_code in (200, 201, 409), r.text
 
 
 # ============================ ROLES (8-10) ============================
-def test_only_student_and_admin_roles_accepted(engine):
+def test_only_student_and_admin_roles_assignable(engine):
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
         ah = _admin(c, engine)
         target = _make_user(engine, "target_rc@school.edu", role="student")
@@ -156,7 +180,7 @@ def test_admin_frontend_receives_correct_role(engine):
 # ============================ CREDENTIAL SECURITY (21-23) ============================
 def test_api_keys_never_returned_unmasked(engine):
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
-        ah = _admin(c, engine)
+        ah = _super(c, engine)
         body = c.get("/api/admin/runtime/credentials", headers=ah).json()
         blob = json.dumps(body)
         assert "encrypted_secret" not in blob and "encryptedSecret" not in blob

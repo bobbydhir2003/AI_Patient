@@ -19,7 +19,7 @@ from app.core import pricing
 from app.models import AiUsageEvent
 from app.services import usage_recorder, usage_service
 from tests.conftest import bearer, make_client, FakeOpenAIClient
-from tests.test_auth import login_token, make_admin, register
+from tests.test_auth import login_token, make_admin, make_super_admin, register
 
 
 def _factory(engine):
@@ -144,13 +144,19 @@ def test_time_filter_excludes_old_events(engine):
 
 
 # --------------------------------------------------- 9: admin authorization
-def test_usage_endpoints_require_admin(engine):
+def test_usage_endpoints_require_super_admin(engine):
     with make_client(engine, FakeOpenAIClient(), authenticate=False) as c:
+        make_super_admin(engine, email="super_usage@school.edu")
+        sa = bearer(login_token(c, "super_usage@school.edu", "superpass1"))
+        assert c.get("/api/admin/usage/summary?range=today", headers=sa).status_code == 200
+        assert c.get("/api/admin/usage/timeseries?range=24h", headers=sa).status_code == 200
+        assert c.get("/api/admin/usage/sessions?range=today", headers=sa).status_code == 200
+
+        # AI Usage & Cost is system administration: a normal admin is refused.
         make_admin(engine, email="admin_usage@school.edu")
         ah = bearer(login_token(c, "admin_usage@school.edu", "adminpass1"))
-        assert c.get("/api/admin/usage/summary?range=today", headers=ah).status_code == 200
-        assert c.get("/api/admin/usage/timeseries?range=24h", headers=ah).status_code == 200
-        assert c.get("/api/admin/usage/sessions?range=today", headers=ah).status_code == 200
+        for path in ("/api/admin/usage/summary", "/api/admin/usage/timeseries", "/api/admin/usage/sessions"):
+            assert c.get(path, headers=ah).status_code == 403, path
 
         register(c, email="stud_usage@school.edu", password="studpass1", number="U1")
         sh = bearer(login_token(c, "stud_usage@school.edu", "studpass1"))

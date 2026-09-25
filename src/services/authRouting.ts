@@ -2,17 +2,17 @@
  * Role-based post-authentication routing (pure + dependency-free so it can be
  * unit-tested with `node --test`).
  *
- * Final role model — exactly TWO roles, and BOTH land on Patient Cases:
- *  - Student -> Patient Cases dashboard (/student/dashboard).
- *  - Admin   -> Patient Cases dashboard (/student/dashboard). Admins are NOT
- *              force-redirected into the admin area; they reach Admin Management
- *              and the System Dashboard from the controls shown on the Patient
- *              Cases dashboard (see StudentDashboardPage + AdminSidebar).
+ * Role model — THREE roles; the main login lands every role on Patient Cases:
+ *  - Student     -> Patient Cases dashboard (/student/dashboard).
+ *  - Admin       -> Patient Cases dashboard; reaches Admin Management (academic
+ *                   administration) from there.
+ *  - Super Admin -> same as Admin, plus the Super Admin area (/superadmin/*),
+ *                   which also has its own portal login (/superadmin/login).
  *
- * Permissions are still enforced by the backend (require_admin); this module
- * only decides where to send the browser after sign in.
+ * Permissions are enforced by the backend (require_admin / require_super_admin);
+ * this module only decides where to send the browser.
  */
-export type Role = "student" | "admin";
+export type Role = "student" | "admin" | "super_admin";
 
 /** Minimal shape needed to make routing decisions (a subset of AuthUser). */
 export interface RoutingUser {
@@ -22,12 +22,23 @@ export interface RoutingUser {
 /** Case-hub / Patient Cases destination shared by both roles. */
 export const PATIENT_CASES_PATH = "/student/dashboard";
 
-/** THE single login entry point + logout / unauthenticated / session-expired
- * destination for the whole app. There is no separate admin login screen. */
+/** THE main login entry point + logout / unauthenticated / session-expired
+ * destination for the whole app. */
 export const LOGIN_ROUTE = "/";
 
+/** Super Admin portal sign-in and landing page. The URL grants nothing: every
+ * /superadmin API call is re-checked server-side (require_super_admin). */
+export const SUPERADMIN_LOGIN_ROUTE = "/superadmin/login";
+export const SUPERADMIN_HOME = "/superadmin/dashboard";
+
+/** Admin OR super admin: may reach academic Admin Management. */
 export function isAdminRole(role: Role | null | undefined): boolean {
-  return role === "admin";
+  return role === "admin" || role === "super_admin";
+}
+
+/** Super admin only: may reach system administration (/superadmin/*). */
+export function isSuperAdminRole(role: Role | null | undefined): boolean {
+  return role === "super_admin";
 }
 
 /** Whether the account may reach the Admin Management area / System Dashboard. */

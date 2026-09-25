@@ -1,7 +1,7 @@
 """Load & Capacity Testing admin API (Priority J).
 
-ADMIN ONLY. Every route requires require_admin, so a student receives 403 while
-every administrator has full access. The load generator runs in a SEPARATE
+SUPER ADMIN ONLY. Every route requires require_super_admin, so a student or a
+normal admin receives 403 (including direct start/stop calls). The load generator runs in a SEPARATE
 process; these endpoints only create/read/stop jobs and return REAL measured
 telemetry. Real (paid) provider modes require an explicit confirmation flag
 before they start.
@@ -10,16 +10,18 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.constants import AUDIT_LOAD_TEST_STARTED, AUDIT_LOAD_TEST_STOPPED
 from app.database.connection import get_db
-from app.dependencies.auth import require_admin
+from app.dependencies.auth import require_super_admin
 from app.models.user import User
+from app.repositories.audit_repository import AuditRepository
 from app.schemas.load_test_schema import LoadTestCreateRequest
 from app.services import load_test_service
 
 router = APIRouter(
     prefix="/admin/system/load-tests",
     tags=["admin-load-tests"],
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_super_admin)],
 )
 
 
@@ -44,10 +46,15 @@ def config() -> dict:
 @router.post("")
 def create(
     payload: LoadTestCreateRequest,
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_super_admin),
     db: Session = Depends(get_db),
 ) -> dict:
     job = load_test_service.create_job(db, req=payload, created_by=current_user.email)
+    _audit(
+        db, current_user, AUDIT_LOAD_TEST_STARTED, job.id,
+        f"Started {payload.test_type} load test ({payload.provider_mode}, "
+        f"{payload.target_users} users, {payload.duration_seconds}s).",
+    )
     return load_test_service.to_out(job)
 
 
@@ -77,5 +84,19 @@ def get_metrics(job_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/{job_id}/stop")
-def stop(job_id: str, db: Session = Depends(get_db)) -> dict:
-    return load_test_service.to_out(load_test_service.stop_job(db, job_id))
+def stop(
+    job_id: str,
+    current_user: User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    job = load_test_service.stop_job(db, job_id)
+    _audit(db, current_user, AUDIT_LOAD_TEST_STOPPED, job.id, f"Stop requested (status {job.status}).")
+    return load_test_service.to_out(job)
+
+
+def _audit(db: Session, admin: User, action: str, job_id: str, description: str) -> None:
+    AuditRepository(db).record(
+        admin_user_id=admin.id, admin_email=admin.email, action_type=action,
+        record_type="load_test", record_id=job_id, description=description,
+    )
+    db.commit()

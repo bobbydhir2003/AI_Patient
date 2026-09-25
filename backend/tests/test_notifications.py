@@ -5,7 +5,7 @@ Unread count = audit events newer than the admin's last "mark all read".
 from sqlalchemy.orm import sessionmaker
 
 from app.models import AuditLog
-from tests.test_auth import auth_header, login_token, make_admin
+from tests.test_auth import auth_header, login_token, make_admin, make_super_admin
 
 
 def _factory(engine):
@@ -27,6 +27,13 @@ def _admin(client, engine):
     return login_token(client, "notif@school.edu", "adminpass1")
 
 
+def _super(client, engine):
+    # System events (audio/voice/config/credentials) are delivered to super
+    # admins only; see test_system_events_never_reach_a_normal_admin.
+    make_super_admin(engine, email="notif_sa@school.edu", password="superpass1")
+    return login_token(client, "notif_sa@school.edu", "superpass1")
+
+
 def test_notifications_require_admin(client):
     assert client.get("/api/admin/notifications").status_code == 401
 
@@ -39,7 +46,7 @@ def test_empty_feed_has_no_unread(client, engine):
 
 
 def test_unread_reflects_real_events_and_mapping(client, engine):
-    tok = _admin(client, engine)
+    tok = _super(client, engine)
     _add_audit(engine, "someone@school.edu", "audio_cache_cleared", "Cleared audio cache (2 entries)")
     _add_audit(engine, "someone@school.edu", "voice_previewed", "Previewed patient voice for camden",
                record_type="voice", record_id="camden")
@@ -54,7 +61,7 @@ def test_unread_reflects_real_events_and_mapping(client, engine):
 
 
 def test_mark_all_read_zeroes_unread_and_new_activity_reappears(client, engine):
-    tok = _admin(client, engine)
+    tok = _super(client, engine)
     _add_audit(engine, "x@school.edu", "ai_config_updated", "Updated OpenAI config: model")
     assert client.get("/api/admin/notifications", headers=auth_header(tok)).json()["unreadCount"] == 1
 
@@ -78,3 +85,21 @@ def test_student_notification_links_to_student(client, engine):
     body = client.get("/api/admin/notifications", headers=auth_header(tok)).json()
     n = body["notifications"][0]
     assert n["type"] == "student" and n["link"] == "/admin/students/stud123"
+
+
+def test_system_events_never_reach_a_normal_admin(client, engine):
+    """Visibility is filtered server-side: a normal admin's feed AND unread
+    badge ignore system events, while academic events still arrive."""
+    tok = _admin(client, engine)
+    _add_audit(engine, "x@school.edu", "ai_config_updated", "Updated OpenAI config: model")
+    _add_audit(engine, "y@school.edu", "credential_replaced", "Replaced openai API key")
+    _add_audit(engine, "z@school.edu", "load_test_started", "Started smoke load test",
+               record_type="load_test", record_id="job1")
+    body = client.get("/api/admin/notifications", headers=auth_header(tok)).json()
+    assert body["notifications"] == [] and body["unreadCount"] == 0
+
+    _add_audit(engine, "x@school.edu", "student_archived", "Archived student",
+               record_type="student", record_id="stud123")
+    body = client.get("/api/admin/notifications", headers=auth_header(tok)).json()
+    assert [n["title"] for n in body["notifications"]] == ["Student archived"]
+    assert body["unreadCount"] == 1
