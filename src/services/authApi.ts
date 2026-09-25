@@ -338,6 +338,89 @@ export function fetchAdminTranscript(token: string, sessionId: string): Promise<
   return authRequest<TranscriptMessage[]>(`/admin/sessions/${sessionId}/transcript`, token);
 }
 
+// ---------------- transcript downloads ----------------
+export interface TranscriptExportFilters {
+  caseId?: string;
+  /** YYYY-MM-DD calendar day in the admin's local time zone. */
+  date?: string;
+  search?: string;
+}
+
+/** Admin's IANA time zone, so exported dates/times match what the page shows. */
+function browserTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    return "";
+  }
+}
+
+function exportQuery(filters: TranscriptExportFilters): string {
+  const q = new URLSearchParams();
+  if (filters.caseId) q.set("case_id", filters.caseId);
+  if (filters.date) q.set("date", filters.date);
+  if (filters.search?.trim()) q.set("search", filters.search.trim());
+  const tz = browserTimeZone();
+  if (tz) q.set("tz", tz);
+  return q.toString();
+}
+
+/** Fetch an authenticated file and hand it to the browser as a download. The
+ * server-chosen filename (Content-Disposition) wins over the fallback. */
+async function downloadFile(path: string, token: string, fallbackName: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    let message = `Request failed with status ${response.status}`;
+    let code = "unknown_error";
+    try {
+      const body = (await response.json()) as { error?: { message?: string; code?: string } };
+      if (body.error?.message) message = body.error.message;
+      if (body.error?.code) code = body.error.code;
+    } catch {
+      /* keep defaults */
+    }
+    throw new ApiError(message, response.status, code);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const match = /filename="?([^";]+)"?/i.exec(disposition);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = match?.[1] ?? fallbackName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // Give the browser a moment to start the download before releasing the blob.
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+export function downloadAdminTranscriptPdf(token: string, sessionId: string): Promise<void> {
+  const tz = browserTimeZone();
+  const q = tz ? `?tz=${encodeURIComponent(tz)}` : "";
+  return downloadFile(
+    `/admin/transcripts/${encodeURIComponent(sessionId)}/download${q}`,
+    token,
+    `Transcript_${sessionId}.pdf`,
+  );
+}
+
+export function downloadAdminTranscriptExport(
+  token: string,
+  filters: TranscriptExportFilters,
+): Promise<void> {
+  return downloadFile(`/admin/transcripts/export?${exportQuery(filters)}`, token, "PTAI_Transcripts.zip");
+}
+
+export function fetchTranscriptExportCount(
+  token: string,
+  filters: TranscriptExportFilters,
+): Promise<{ count: number }> {
+  return authRequest<{ count: number }>(`/admin/transcripts/export/count?${exportQuery(filters)}`, token);
+}
+
 export function fetchAdminAssessment(token: string, sessionId: string): Promise<Assessment | null> {
   return authRequest<Assessment | null>(`/admin/sessions/${sessionId}/assessment`, token);
 }

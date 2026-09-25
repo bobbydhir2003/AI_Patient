@@ -99,6 +99,8 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Lets the admin UI read the server-chosen transcript download filename.
+        expose_headers=["Content-Disposition"],
     )
     _install_telemetry_middleware(_app)
     register_exception_handlers(_app)

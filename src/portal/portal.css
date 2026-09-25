@@ -210,6 +210,44 @@
   outline: 2px solid #fff;
   outline-offset: 2px;
 }
+/* Transcripts page bulk export: same red-accent treatment as the top-bar
+   "Back to Patient Simulator" control, pinned to the right of the filters. */
+.pt-export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 18px;
+  margin-left: auto;
+  border-radius: 10px;
+  border: 1.5px solid var(--color-accent);
+  background: rgba(217, 39, 46, 0.12);
+  color: #fff;
+  font-family: inherit;
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  white-space: nowrap;
+  box-shadow: 0 0 0 3px rgba(217, 39, 46, 0.10), 0 2px 12px rgba(217, 39, 46, 0.28);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.pt-export-btn:hover:not(:disabled) {
+  background: rgba(217, 39, 46, 0.22);
+  box-shadow: 0 0 0 3px rgba(217, 39, 46, 0.18), 0 4px 18px rgba(217, 39, 46, 0.4);
+}
+.pt-export-btn:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+.pt-export-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+.pt-export-btn[aria-busy="true"] {
+  cursor: progress;
+}
 .pt-topbar-back-arrow {
   font-size: 1.1rem;
   line-height: 1;
