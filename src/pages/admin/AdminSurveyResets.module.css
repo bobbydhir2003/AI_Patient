@@ -1,0 +1,160 @@
+/* Admin Survey Resets: page-specific pieces only. Cards, table, controls and
+   pagination reuse the shared User Accounts classes (pt-statcard, pt-uac-*). */
+
+/* ---------------- bulk action cards ---------------- */
+.bulkRow {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 360px));
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.bulkCard {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 20px;
+  border-radius: 10px;
+  border: 1px solid var(--color-accent-border);
+  background: linear-gradient(135deg, rgba(200, 16, 46, 0.28), rgba(120, 12, 24, 0.42));
+  color: #fff;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+.bulkCard:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  background: linear-gradient(135deg, rgba(200, 16, 46, 0.4), rgba(140, 16, 30, 0.55));
+}
+.bulkCard:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+.bulkCard:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.bulkPrimary {
+  background: linear-gradient(135deg, #b3101f, #8c0d1a);
+  border-color: #c8102e;
+}
+.bulkPrimary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #c8102e, #a00f1f);
+}
+.bulkIcon {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.22);
+}
+.bulkText {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.bulkTitle {
+  font-weight: 700;
+  font-size: 1.02rem;
+}
+.bulkSub {
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.78);
+}
+
+/* ---------------- warning banner ---------------- */
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 16px;
+  margin-bottom: var(--space-4);
+  border-radius: 10px;
+  border: 1px solid rgba(217, 164, 65, 0.55);
+  background: rgba(217, 164, 65, 0.1);
+  color: #f0c46b;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+.banner svg {
+  flex: 0 0 auto;
+  color: var(--color-warning);
+  margin-top: 1px;
+}
+
+/* ---------------- summary cards ---------------- */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
+}
+
+/* ---------------- table ---------------- */
+.tableScroll {
+  overflow-x: auto;
+}
+.table {
+  min-width: 1180px;
+}
+.table td {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+.nameCol {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.nowrap {
+  white-space: nowrap;
+}
+.when {
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+  font-size: 0.84rem;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.actionsHead {
+  text-align: left;
+}
+.actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+.actions :global(.pt-btn) {
+  white-space: nowrap;
+}
+.pagItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+@media (max-width: 1100px) {
+  .bulkRow {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 767px) {
+  .bulkRow {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 430px) {
+  .stats {
+    grid-template-columns: 1fr;
+  }
+}

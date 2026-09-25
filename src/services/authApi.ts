@@ -631,3 +631,72 @@ export function resetStudentSurvey(
     body: JSON.stringify({ scope }),
   });
 }
+
+// ---------------- admin Survey Resets ----------------
+/** completed | failed (REDCap import failed) | pending (package exists, stage not done) | not_started */
+export type SurveyStageStatus = "completed" | "failed" | "pending" | "not_started";
+
+export interface SurveyResetSummary {
+  totalStudents: number;
+  preCompleted: number;
+  postCompleted: number;
+  availableForReset: number;
+  preResettable: number;
+  postResettable: number;
+  bothResettable: number;
+}
+
+export interface SurveyResetRow {
+  studentId: string;
+  name: string;
+  email: string;
+  studentNumber: string;
+  isActive: boolean;
+  surveyCaseId: string | null;
+  surveyCaseName: string | null;
+  preStatus: SurveyStageStatus;
+  postStatus: SurveyStageStatus;
+  preCompletedAt: string | null;
+  postCompletedAt: string | null;
+  canResetPre: boolean;
+  canResetPost: boolean;
+  canResetBoth: boolean;
+  resetCount: number;
+  lastResetAt: string | null;
+  lastActivityAt: string | null;
+}
+
+export interface SurveyResetList extends Paginated<SurveyResetRow> {
+  summary: SurveyResetSummary;
+  caseOptions: { id: string; name: string }[];
+}
+
+export interface BulkSurveyResetResult {
+  scope: SurveyResetScope;
+  eligible: number;
+  reset: number;
+  skipped: number;
+  failed: number;
+  message: string;
+}
+
+export function fetchSurveyResets(
+  token: string,
+  params: { search?: string; status?: string; caseId?: string; page?: number; pageSize?: number },
+): Promise<SurveyResetList> {
+  const q = new URLSearchParams();
+  if (params.search) q.set("search", params.search);
+  if (params.status && params.status !== "all") q.set("status", params.status);
+  if (params.caseId) q.set("case_id", params.caseId);
+  q.set("page", String(params.page ?? 1));
+  q.set("page_size", String(params.pageSize ?? 10));
+  return authRequest<SurveyResetList>(`/admin/survey-resets?${q.toString()}`, token);
+}
+
+/** Admin-only. The target set (eligible real students) is computed server-side; the body carries only the scope. */
+export function bulkResetSurveys(token: string, scope: SurveyResetScope): Promise<BulkSurveyResetResult> {
+  return authRequest<BulkSurveyResetResult>("/admin/survey-resets/bulk", token, {
+    method: "POST",
+    body: JSON.stringify({ scope }),
+  });
+}

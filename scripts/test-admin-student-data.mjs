@@ -133,6 +133,8 @@ test("no Student Data / survey-reset UI leaks into student-facing code", () => {
     "src/services/authApi.ts",
     "src/pages/admin/AdminStudentDataPage.tsx",
     "src/pages/admin/StudentDataDetail.tsx",
+    // Admin Survey Resets reuses the same single-student reset API.
+    "src/pages/admin/AdminSurveyResetsPage.tsx",
   ]);
   assert.deepEqual(offenders.filter((f) => !allowed.has(f)), []);
 });

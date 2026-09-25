@@ -11,6 +11,7 @@ from app.api import (
     admin_load_tests,
     admin_runtime,
     admin_student_data,
+    admin_survey_resets,
     admin_system,
     admin_traffic,
     admin_usage,
@@ -117,6 +118,7 @@ def create_app() -> FastAPI:
     _app.include_router(admin_load_tests.router, prefix="/api")
     _app.include_router(admin_users.router, prefix="/api")
     _app.include_router(admin_student_data.router, prefix="/api")
+    _app.include_router(admin_survey_resets.router, prefix="/api")
     _app.include_router(access.public_router, prefix="/api")
     _app.include_router(access.admin_router, prefix="/api")
     _app.include_router(sessions.router, prefix="/api")

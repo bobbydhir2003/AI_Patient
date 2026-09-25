@@ -5,6 +5,7 @@ import {
   IconDashboard,
   IconLogout,
   IconProfile,
+  IconRefresh,
   IconSessions,
   IconStudentData,
   IconStudents,
@@ -32,6 +33,7 @@ const SECTIONS: { title: string; items: NavItem[] }[] = [
       { to: "/admin/transcripts", label: "Transcripts", icon: IconTranscript },
       { to: "/admin/assessments", label: "Assessments", icon: IconAssessments },
       { to: "/admin/users", label: "User Accounts", icon: IconStudents },
+      { to: "/admin/survey-resets", label: "Survey Resets", icon: IconRefresh },
     ],
   },
   {

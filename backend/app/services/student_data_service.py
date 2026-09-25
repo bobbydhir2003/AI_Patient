@@ -121,6 +121,63 @@ def _get_student_or_404(db: Session, student_id: str) -> Student:
 
 
 # ------------------------------------------------------------------ list
+def _view_and_survey_last(
+    db: Session, ids: list[str]
+) -> tuple[dict[str, datetime], dict[str, datetime | None]]:
+    """Two grouped lookups for a page of student ids (never per student)."""
+    view_last: dict[str, datetime] = {}
+    survey_last: dict[str, datetime | None] = {}
+    if ids:
+        for sid, last in db.execute(
+            select(AssessmentViewVisit.student_id, func.max(AssessmentViewVisit.last_heartbeat_at))
+            .where(AssessmentViewVisit.student_id.in_(ids))
+            .group_by(AssessmentViewVisit.student_id)
+        ).all():
+            view_last[sid] = last
+        for sid, pre, post in db.execute(
+            select(
+                SurveyReceipt.student_id,
+                func.max(SurveyReceipt.pre_synced_at),
+                func.max(SurveyReceipt.post_synced_at),
+            )
+            .where(SurveyReceipt.student_id.in_(ids))
+            .group_by(SurveyReceipt.student_id)
+        ).all():
+            survey_last[sid] = _latest(pre, post)
+    return view_last, survey_last
+
+
+def last_activity_for(db: Session, ids: list[str]) -> dict[str, datetime | None]:
+    """Last activity for a page of students, with the SAME definition as the
+    Student Data list (login, real interview start/completion, assessment-view
+    heartbeat, survey stage submission). Fixed number of grouped queries."""
+    if not ids:
+        return {}
+    login = dict(
+        db.execute(select(User.student_id, User.last_login_at).where(User.student_id.in_(ids))).all()
+    )
+    sessions = {
+        sid: (start, done)
+        for sid, start, done in db.execute(
+            select(
+                InterviewSession.student_id,
+                func.max(InterviewSession.started_at),
+                func.max(InterviewSession.completed_at),
+            )
+            .where(InterviewSession.student_id.in_(ids), _REAL_SESSION)
+            .group_by(InterviewSession.student_id)
+        ).all()
+    }
+    view_last, survey_last = _view_and_survey_last(db, ids)
+    return {
+        sid: _latest(
+            login.get(sid), *sessions.get(sid, (None, None)),
+            view_last.get(sid), survey_last.get(sid),
+        )
+        for sid in ids
+    }
+
+
 def list_students(
     db: Session,
     *,
@@ -178,27 +235,7 @@ def list_students(
     page_size = min(max(1, page_size), 100)
     rows = db.execute(stmt.limit(page_size).offset((page - 1) * page_size)).all()
     ids = [r.Student.id for r in rows]
-
-    # Two grouped lookups for the page only (never per student).
-    view_last: dict[str, datetime] = {}
-    survey_last: dict[str, datetime | None] = {}
-    if ids:
-        for sid, last in db.execute(
-            select(AssessmentViewVisit.student_id, func.max(AssessmentViewVisit.last_heartbeat_at))
-            .where(AssessmentViewVisit.student_id.in_(ids))
-            .group_by(AssessmentViewVisit.student_id)
-        ).all():
-            view_last[sid] = last
-        for sid, pre, post in db.execute(
-            select(
-                SurveyReceipt.student_id,
-                func.max(SurveyReceipt.pre_synced_at),
-                func.max(SurveyReceipt.post_synced_at),
-            )
-            .where(SurveyReceipt.student_id.in_(ids))
-            .group_by(SurveyReceipt.student_id)
-        ).all():
-            survey_last[sid] = _latest(pre, post)
+    view_last, survey_last = _view_and_survey_last(db, ids)
 
     items = []
     for r in rows:
@@ -245,6 +282,23 @@ def _primary_receipt(student: Student, receipts: list[SurveyReceipt]) -> SurveyR
 def _survey_state(
     student: Student, receipts: list[SurveyReceipt], resets: list[SurveyReceiptReset]
 ) -> SurveyStateOut:
+    return survey_state_from(
+        student, receipts,
+        reset_count=len(resets),
+        last_reset_at=_latest(*(r.reset_at for r in resets)),
+    )
+
+
+def survey_state_from(
+    student: Student,
+    receipts: list[SurveyReceipt],
+    *,
+    reset_count: int,
+    last_reset_at: datetime | None,
+) -> SurveyStateOut:
+    """The one definition of a student's survey state + reset eligibility. Also
+    used by the admin Survey Resets page (with grouped reset stats), so both
+    pages always agree on what "completed" and "can reset" mean."""
     owner = student.survey_owner_case_id
     if owner is None:
         global_status = SURVEY_OVERALL_NOT_STARTED
@@ -272,8 +326,8 @@ def _survey_state(
         can_reset_pre=owner_receipt is not None and pre.completed,
         can_reset_post=owner_receipt is not None and post.completed,
         can_reset_both=owner is not None or bool(receipts),
-        reset_count=len(resets),
-        last_reset_at=_latest(*(r.reset_at for r in resets)),
+        reset_count=reset_count,
+        last_reset_at=_utc(last_reset_at),
     )
 
 
@@ -526,6 +580,24 @@ def _snapshot(
 def reset_survey(db: Session, admin: User, student_id: str, *, scope: str) -> SurveyResetOut:
     """Make the student eligible to take the survey again (see module docstring).
     ``student_id`` comes from the route only; one transaction; audited."""
+    student = apply_survey_reset(db, admin, student_id, scope=scope)
+    receipts, resets = _load_survey(db, student.id)
+    db.refresh(student)
+    messages = {
+        "pre": "Pre survey reset. The student can complete it again.",
+        "post": "Post survey reset. The student can complete it again.",
+        "both": "Both surveys reset. The student can complete the survey again.",
+    }
+    return SurveyResetOut(
+        success=True, message=messages[scope], survey=_survey_state(student, receipts, resets)
+    )
+
+
+def apply_survey_reset(db: Session, admin: User, student_id: str, *, scope: str) -> Student:
+    """The single reset implementation (snapshot + rotate/release + audit, then
+    commit). Shared by the per-student route and the admin bulk reset so both
+    always have identical semantics. Raises SurveyResetNotApplicableError /
+    StudentNotFoundError without changing anything."""
     if scope not in (SURVEY_RESET_PRE, SURVEY_RESET_POST, SURVEY_RESET_BOTH):
         raise SurveyResetNotApplicableError("Unknown survey reset scope.")
     # Same row lock survey_service takes to claim ownership, so a reset can never
@@ -595,13 +667,4 @@ def reset_survey(db: Session, admin: User, student_id: str, *, scope: str) -> Su
         "survey_reset student_id=%s scope=%s case=%s by=%s",
         student.id, scope, case_for_log, admin.id,
     )
-    receipts, resets = _load_survey(db, student.id)
-    db.refresh(student)
-    messages = {
-        "pre": "Pre survey reset. The student can complete it again.",
-        "post": "Post survey reset. The student can complete it again.",
-        "both": "Both surveys reset. The student can complete the survey again.",
-    }
-    return SurveyResetOut(
-        success=True, message=messages[scope], survey=_survey_state(student, receipts, resets)
-    )
+    return student

@@ -35,6 +35,7 @@ import { SystemDashboardPage } from "./pages/admin/system/SystemDashboardPage";
 import { TrafficDashboardPage } from "./pages/admin/system/TrafficDashboardPage";
 import { LoadCapacityTestingPage } from "./pages/admin/system/LoadCapacityTestingPage";
 import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
+import { AdminSurveyResetsPage } from "./pages/admin/AdminSurveyResetsPage";
 import { AiConfigurationPage } from "./pages/admin/system/AiConfigurationPage";
 import { AiUsageCostPage } from "./pages/admin/system/AiUsageCostPage";
 import { ApiCredentialsPage } from "./pages/admin/system/ApiCredentialsPage";
@@ -111,6 +112,7 @@ function App() {
           <Route path="transcripts" element={<AdminTranscriptsPage />} />
           <Route path="assessments" element={<AdminAssessmentsPage />} />
           <Route path="users" element={<AdminUsersPage />} />
+          <Route path="survey-resets" element={<AdminSurveyResetsPage />} />
           <Route path="archived" element={<AdminArchivedPage />} />
           <Route path="profile" element={<AdminProfilePage />} />
           <Route path="audit-log" element={<AdminAuditLogPage />} />
