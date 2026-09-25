@@ -31,6 +31,20 @@ REFERRAL_CASE_IDS = (
 )
 CASE_IDS = STANDARD_CASE_IDS + REFERRAL_CASE_IDS
 
+# REDCap-only case identity. This is the SINGLE backend source of truth for the
+# numeric `case_id` field sent to REDCap on each survey submission. It is
+# deliberately INDEPENDENT of the internal `case_number` in each case JSON (which
+# is 5/6/7/8) - REDCap uses its own 1-4 numbering keyed by the case slug. The
+# value is always derived server-side from the session's case; the client never
+# supplies it. An unsupported case (e.g. a referral case with no survey) is not
+# present here and must fail loudly rather than send a wrong number.
+REDCAP_CASE_ID = {
+    "camden": 1,
+    "carly": 2,
+    "sofia": 3,
+    "jayden": 4,
+}
+
 CASE_CATEGORIES = ("standard", "referral")
 
 CASE_SECTIONS = (
@@ -133,6 +147,7 @@ AUDIT_SESSION_ARCHIVED = "session_archived"
 AUDIT_SESSION_DELETED = "session_deleted"
 AUDIT_ASSESSMENT_DELETED = "assessment_deleted"
 AUDIT_MESSAGE_DELETED = "message_deleted"
+AUDIT_SURVEY_RESET = "survey_reset"
 
 # Storage alert threshold (percent used) - configurable real threshold.
 STORAGE_WARNING_PERCENT = 80.0

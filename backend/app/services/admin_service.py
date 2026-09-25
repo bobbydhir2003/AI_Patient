@@ -26,6 +26,8 @@ from app.models import (
     ConversationTurn,
     InterviewSession,
     Student,
+    SurveyReceipt,
+    SurveyReceiptReset,
     User,
 )
 from app.repositories.audit_repository import AuditRepository
@@ -105,8 +107,33 @@ def _session_has_assessment(db: Session, session_id: str) -> bool:
     )
 
 
-def _session_summary(db: Session, session: InterviewSession) -> SessionSummaryOut:
+def _session_summary(
+    db: Session,
+    session: InterviewSession,
+    *,
+    with_view_time: bool = False,
+    view_map: dict | None = None,
+) -> SessionSummaryOut:
     total, student_turns = _session_counts(db, session.id)
+    # Admin-only active assessment viewing time; never attached to student paths.
+    view_seconds: int | None = None
+    view_count: int | None = None
+    first_viewed_at = None
+    last_viewed_at = None
+    if with_view_time:
+        if view_map is not None:
+            # Batched path (list): O(1) lookup; a missing key = never viewed.
+            view = view_map.get(session.id)
+        else:
+            # Single-session path (session detail): one row is fine.
+            from app.services import assessment_view_service
+
+            view = assessment_view_service.get_for_session(db, session.id)
+        if view is not None:
+            view_seconds = view.active_seconds
+            view_count = view.view_count
+            first_viewed_at = view.first_viewed_at
+            last_viewed_at = view.last_viewed_at
     return SessionSummaryOut(
         session_id=session.id,
         student_id=session.student_id,
@@ -122,6 +149,10 @@ def _session_summary(db: Session, session: InterviewSession) -> SessionSummaryOu
         overall_level=_latest_level_for_session(db, session.id),
         started_at=session.started_at,
         completed_at=session.completed_at,
+        active_viewing_seconds=view_seconds,
+        view_count=view_count,
+        first_viewed_at=first_viewed_at,
+        last_viewed_at=last_viewed_at,
     )
 
 
@@ -564,6 +595,7 @@ def list_sessions(
     sort: str = "newest",
     page: int = 1,
     page_size: int = 20,
+    with_view_time: bool = False,
 ) -> PaginatedSessions:
     stmt = select(InterviewSession).where(_REAL_SESSION)
     if case_id.strip():
@@ -582,8 +614,18 @@ def list_sessions(
     page_size = min(max(1, page_size), 100)
     stmt = stmt.limit(page_size).offset((page - 1) * page_size)
     rows = list(db.execute(stmt).scalars().all())
+    # One batched query for the whole page's viewing-time rows (no N+1); only
+    # when requested (Admin Assessments), so Sessions/Transcripts are unchanged.
+    view_map: dict | None = None
+    if with_view_time:
+        from app.services import assessment_view_service
+
+        view_map = assessment_view_service.map_for_sessions(db, [s.id for s in rows])
     return PaginatedSessions(
-        items=[_session_summary(db, s) for s in rows],
+        items=[
+            _session_summary(db, s, with_view_time=with_view_time, view_map=view_map)
+            for s in rows
+        ],
         total=total,
         page=page,
         page_size=page_size,
@@ -597,8 +639,12 @@ def _get_session_or_404(db: Session, session_id: str) -> InterviewSession:
     return session
 
 
-def get_session_summary(db: Session, session_id: str) -> SessionSummaryOut:
-    return _session_summary(db, _get_session_or_404(db, session_id))
+def get_session_summary(
+    db: Session, session_id: str, *, with_view_time: bool = False
+) -> SessionSummaryOut:
+    return _session_summary(
+        db, _get_session_or_404(db, session_id), with_view_time=with_view_time
+    )
 
 
 def get_session_transcript(db: Session, session_id: str) -> list[TranscriptMessageOut]:
@@ -677,6 +723,11 @@ def delete_session(db: Session, admin: User, session_id: str, *, archived_note: 
     # Remove assessments (and their evidence, which references turns) BEFORE the
     # turns so no foreign key is ever left dangling.
     _delete_assessment_runs_for_session(db, session_id)
+    # Remove the admin-only viewing-time row for this session (explicit, alongside
+    # the FK's ON DELETE CASCADE) so nothing is orphaned and deletion never blocks.
+    from app.services import assessment_view_service
+
+    assessment_view_service.delete_for_sessions(db, [session_id])
     db.delete(session)  # cascades to conversation_turns via ORM relationship
     _audit(
         db, admin,
@@ -738,24 +789,52 @@ def delete_message(db: Session, admin: User, message_id: str) -> None:
     logger.info("message_deleted message_id=%s by=%s", message_id, admin.id)
 
 
-def delete_student(db: Session, admin: User, student_id: str, *, confirm: str) -> None:
-    if (confirm or "").strip().upper() != "DELETE":
-        raise DeleteConfirmationError()
-    student = _get_student_or_404(db, student_id)
-    if student.user is not None and student.user.id == admin.id:
-        raise SelfDeletionError()
+def purge_student_tree(db: Session, admin: User, student: Student) -> dict:
+    """Permanently delete a student's ENTIRE local data tree in FK-safe order and
+    write the audit row. Does NOT commit and does NOT re-check confirm/self - the
+    caller owns the transaction boundary and the guards. Safe to call inside a
+    per-item SAVEPOINT for batch deletes. Returns counts for logging.
 
+    Deletion order (PostgreSQL with FK enforcement; there are NO DB-level ON
+    DELETE cascades, only ORM ones):
+      1. assessment runs -> domain results -> evidence (ORM cascade). Evidence
+         references conversation_turns, so runs go BEFORE the turns.
+      2. survey receipts + survey-reset snapshots (LOCAL linkage only; REDCap
+         answers are never touched): before sessions (latest_session_id FK) and
+         before the student (student_id NOT NULL FK).
+      3. sessions (ORM-cascade their conversation turns).
+      4. the login account, then the student profile.
+    """
     session_ids = _student_session_ids(db, student.id)
-    # 1. Assessments + evidence + domains for every session.
     for sid in session_ids:
         _delete_assessment_runs_for_session(db, sid)
-    # 2. Sessions (cascades their conversation turns).
+    receipts = list(
+        db.execute(
+            select(SurveyReceipt).where(SurveyReceipt.student_id == student.id)
+        ).scalars().all()
+    )
+    for receipt in receipts:
+        db.delete(receipt)
+    # Admin survey-reset snapshots (local linkage history; student_id FK).
+    resets = list(
+        db.execute(
+            select(SurveyReceiptReset).where(SurveyReceiptReset.student_id == student.id)
+        ).scalars().all()
+    )
+    for reset in resets:
+        db.delete(reset)
+    db.flush()
+    # Admin-only viewing-time rows for these sessions (explicit delete alongside
+    # the FK ON DELETE CASCADE) so a purge never orphans them or gets blocked.
+    from app.services import assessment_view_service
+
+    assessment_view_service.delete_for_sessions(db, session_ids)
     for sid in session_ids:
         s = db.get(InterviewSession, sid)
         if s is not None:
             db.delete(s)
     db.flush()
-    # 3. Login account, then the student profile itself.
+    student_id = student.id
     if student.user is not None:
         db.delete(student.user)
     name = student.name
@@ -765,9 +844,23 @@ def delete_student(db: Session, admin: User, student_id: str, *, confirm: str) -
         db, admin,
         action=constants.AUDIT_STUDENT_DELETED, record_type="student", record_id=student_id,
         description=(
-            f"Student '{name}' permanently deleted with {len(session_ids)} session(s) "
-            "and all connected transcripts and assessments."
+            f"Student '{name}' permanently deleted with {len(session_ids)} session(s), "
+            f"{len(receipts)} survey record(s), and all connected transcripts and assessments."
         ),
     )
+    db.flush()
+    logger.info(
+        "student_purged student_id=%s sessions=%d receipts=%d by=%s",
+        student_id, len(session_ids), len(receipts), admin.id,
+    )
+    return {"sessions": len(session_ids), "receipts": len(receipts)}
+
+
+def delete_student(db: Session, admin: User, student_id: str, *, confirm: str) -> None:
+    if (confirm or "").strip().upper() != "DELETE":
+        raise DeleteConfirmationError()
+    student = _get_student_or_404(db, student_id)
+    if student.user is not None and student.user.id == admin.id:
+        raise SelfDeletionError()
+    purge_student_tree(db, admin, student)
     db.commit()
-    logger.info("student_deleted student_id=%s sessions=%d by=%s", student_id, len(session_ids), admin.id)

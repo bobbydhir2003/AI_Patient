@@ -152,6 +152,13 @@ class SessionSummaryOut(CamelModel):
     overall_level: str | None = None
     started_at: datetime
     completed_at: datetime | None = None
+    # Admin-only "active assessment viewing time". Populated ONLY on the admin
+    # session-detail path (with_view_time=True); stays None everywhere else so it
+    # is never exposed in a student's own session payloads.
+    active_viewing_seconds: int | None = None
+    view_count: int | None = None
+    first_viewed_at: datetime | None = None
+    last_viewed_at: datetime | None = None
 
 
 class PaginatedSessions(CamelModel):

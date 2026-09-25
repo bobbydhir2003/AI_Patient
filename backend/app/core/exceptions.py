@@ -178,9 +178,10 @@ class AssessmentNotPossibleError(AppError):
 
 
 class NuidMissingError(AppError):
-    """The session's student has no NUID (student_number) on file, so there is no
-    REDCap record_id to submit the survey under. We never substitute a session
-    UUID or send an empty record_id - the student must add their NUID first."""
+    """The session's student has no NUID (student_number) on file. NUID is
+    required research identity and is sent to REDCap in the separate `nuid`
+    field (the primary record_id is a generated UUID, not the NUID). We never
+    send a blank nuid - the student must add their NUID first."""
 
     status_code = 409
     code = "nuid_missing"
@@ -190,6 +191,20 @@ class NuidMissingError(AppError):
             "Your student number (NUID) is missing from your profile. Add it to your "
             "profile before submitting the survey."
         )
+
+
+class RedcapCaseUnsupportedError(AppError):
+    """The session's case has no REDCap case_id mapping (see
+    constants.REDCAP_CASE_ID), so a survey for it cannot be filed under a known
+    case number. We fail loudly rather than silently send a wrong/blank case_id.
+    Server-side integrity condition (the case is derived from the session, never
+    the client), so this should only occur for a case with no survey mapping."""
+
+    status_code = 409
+    code = "survey_case_unsupported"
+
+    def __init__(self, case_id: str) -> None:
+        super().__init__(f"No survey is configured for this case ({case_id}).")
 
 
 class SurveyPreRequiredError(AppError):
@@ -218,6 +233,32 @@ class SurveyAlreadyCompletedError(AppError):
 
     def __init__(self, case_name: str) -> None:
         super().__init__(f"You have already completed the survey for {case_name}.")
+
+
+class SurveyOwnedByOtherCaseError(AppError):
+    """The student's ONE global survey package is already owned by a DIFFERENT
+    case, so this case must never collect its own Pre/Post. The survey is global
+    per student (not per case): the first case whose Pre successfully reaches
+    REDCap becomes the permanent survey owner, and every other case is gated to
+    the "already submitted / skip" state. This is the backend backstop for the
+    frontend gate (a race between two cases), so two owners can never exist."""
+
+    status_code = 409
+    code = "survey_owned_by_other_case"
+
+    def __init__(self) -> None:
+        super().__init__("You have already submitted the survey. Thank you for your feedback.")
+
+
+class SurveyResetNotApplicableError(AppError):
+    """An admin survey reset targeted a stage/package the student does not have
+    (e.g. resetting Post when Post was never completed). Nothing is changed."""
+
+    status_code = 409
+    code = "survey_reset_not_applicable"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
 
 
 class SurveySyncError(AppError):

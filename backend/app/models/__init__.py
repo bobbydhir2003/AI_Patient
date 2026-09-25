@@ -1,6 +1,7 @@
 from app.models.access_request import AccessRequest
 from app.models.ai_usage_event import AiUsageEvent
 from app.models.assessment import AssessmentDomainResult, AssessmentEvidence, AssessmentRun
+from app.models.assessment_view import AssessmentViewSession, AssessmentViewVisit
 from app.models.audit_log import AuditLog
 from app.models.conversation_turn import ConversationTurn
 from app.models.interview_session import InterviewSession
@@ -11,12 +12,13 @@ from app.models.runtime_config import (
     SystemSetting,
 )
 from app.models.student import Student
-from app.models.survey_receipt import SurveyReceipt
+from app.models.survey_receipt import SurveyReceipt, SurveyReceiptReset
 from app.models.user import User
 
 __all__ = [
     "Student",
     "SurveyReceipt",
+    "SurveyReceiptReset",
     "User",
     "AccessRequest",
     "AiUsageEvent",
@@ -27,6 +29,8 @@ __all__ = [
     "AssessmentRun",
     "AssessmentDomainResult",
     "AssessmentEvidence",
+    "AssessmentViewSession",
+    "AssessmentViewVisit",
     "ApiCredential",
     "SystemSetting",
     "ConfigurationHistory",

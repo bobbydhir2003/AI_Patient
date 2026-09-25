@@ -1,5 +1,6 @@
 """Assessment schemas: internal AI-stage outputs and API responses."""
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +12,18 @@ from app.core.constants import (
 )
 from app.schemas.base import CamelModel
 from app.schemas.referral_assessment_schema import ReferralOut
+
+
+class AssessmentViewPingIn(CamelModel):
+    """Silent assessment-view heartbeat body. Carries ONLY an opaque client visit
+    id (a page-mount UUID) and the visit's declared source - never a duration,
+    timestamp, or any identity, which are all resolved server-side. Optional so a version-skewed old client that
+    omits it is tolerated during rollout (mapped to one implicit legacy visit)."""
+
+    visit_id: str | None = Field(default=None, max_length=64)
+    # Where this visit was opened from. Validated enum (anything else -> 422);
+    # honoured ONLY when the visit row is first created, never on later pings.
+    source: Literal["initial_assessment", "student_dashboard"] | None = None
 
 # ---------------- internal AI-stage models (validated, never exposed raw) ---
 
