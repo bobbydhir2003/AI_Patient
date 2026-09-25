@@ -117,6 +117,7 @@ export function AdminAssessmentsPage() {
                   <th scope="col">Active viewing time</th>
                   <th scope="col">Views</th>
                   <th scope="col">First viewed</th>
+                  <th scope="col">Last viewed</th>
                   <th scope="col">Actions</th>
                 </tr>
               </thead>
@@ -132,6 +133,7 @@ export function AdminAssessmentsPage() {
                     <td>{s.activeViewingSeconds != null ? fmtDuration(s.activeViewingSeconds) : "—"}</td>
                     <td className="pt-muted">{s.viewCount ?? "—"}</td>
                     <td>{s.firstViewedAt ? fmtDateTime(s.firstViewedAt) : "—"}</td>
+                    <td>{s.lastViewedAt ? fmtDateTime(s.lastViewedAt) : "—"}</td>
                     <td>
                       <div className="pt-actions-cell">
                         <button
