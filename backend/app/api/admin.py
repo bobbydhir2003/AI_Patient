@@ -1,5 +1,10 @@
-from fastapi import APIRouter, Depends, Query
+import os
+from datetime import date
+
+from fastapi import APIRouter, Depends, Path, Query
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from app.assessment import assessment_service
 from app.core.exceptions import AssessmentNotFoundError
@@ -21,7 +26,7 @@ from app.schemas.admin import (
 )
 from app.schemas.assessment_schema import AssessmentOut
 from app.schemas.notification_schema import NotificationListOut
-from app.services import admin_service, notification_service
+from app.services import admin_service, notification_service, transcript_export_service
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
@@ -90,6 +95,74 @@ def get_session(session_id: str, db: Session = Depends(get_db)) -> SessionSummar
 @router.get("/sessions/{session_id}/transcript", response_model=list[TranscriptMessageOut])
 def session_transcript(session_id: str, db: Session = Depends(get_db)) -> list[TranscriptMessageOut]:
     return admin_service.get_session_transcript(db, session_id)
+
+
+# ---------------- transcript downloads ----------------
+# Filters mirror the Transcripts page. `tz` is the admin's browser time zone
+# (IANA name) so dates/times in the files match what the page displays.
+_CASE_ID = Query("", max_length=50, pattern=r"^[a-z0-9_]*$")
+_SEARCH = Query("", max_length=120)
+_TZ = Query("", max_length=64, pattern=r"^[A-Za-z0-9_+\-/]*$")
+
+
+def _export_filters(case_id: str, on_date: date | None, search: str):
+    return transcript_export_service.ExportFilters(
+        case_id=case_id.strip(), on_date=on_date, search=search.strip()
+    )
+
+
+@router.get("/transcripts/export/count")
+def transcript_export_count(
+    case_id: str = _CASE_ID,
+    date: date | None = Query(None),
+    search: str = _SEARCH,
+    tz: str = _TZ,
+    db: Session = Depends(get_db),
+) -> dict:
+    zone = transcript_export_service.resolve_timezone(tz)
+    return {"count": transcript_export_service.count_transcripts(db, _export_filters(case_id, date, search), zone)}
+
+
+@router.get("/transcripts/export")
+def transcript_export(
+    case_id: str = _CASE_ID,
+    date: date | None = Query(None),
+    search: str = _SEARCH,
+    tz: str = _TZ,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """ZIP of every transcript matching the filters (not just one page): one
+    PDF per session in per-case folders, plus CSV indexes. Built in a temp
+    file that is deleted once the response has been sent."""
+    zone = transcript_export_service.resolve_timezone(tz)
+    filters = _export_filters(case_id, date, search)
+    path = transcript_export_service.build_export_zip(db, filters, zone)
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=transcript_export_service.export_zip_filename(filters, zone),
+        headers={"Cache-Control": "no-store"},
+        background=BackgroundTask(os.unlink, path),
+    )
+
+
+@router.get("/transcripts/{session_id}/download")
+def transcript_download(
+    session_id: str = Path(..., max_length=64, pattern=r"^[A-Za-z0-9_-]+$"),
+    tz: str = _TZ,
+    db: Session = Depends(get_db),
+) -> Response:
+    """PDF of exactly one session's complete transcript."""
+    zone = transcript_export_service.resolve_timezone(tz)
+    pdf, filename = transcript_export_service.build_session_pdf(db, session_id, zone)
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get("/sessions/{session_id}/assessment", response_model=AssessmentOut | None)
