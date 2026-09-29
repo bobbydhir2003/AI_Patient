@@ -228,6 +228,8 @@ function sessionSurveyBadge(status: string, ownerCaseName: string | null) {
       return <span className="pt-badge pt-badge-green">Completed</span>;
     case "pre_completed":
       return <span className="pt-badge pt-badge-amber">Pre only</span>;
+    case "post_completed":
+      return <span className="pt-badge pt-badge-amber">Post only</span>;
     case "other_case":
       return (
         <span
@@ -571,18 +573,24 @@ function StageCard({
   canReset,
   onReset,
   showReset,
+  caseName,
+  reopened = false,
 }: {
   label: string;
   stage: SurveyStage;
   canReset: boolean;
   onReset: () => void;
   showReset: boolean;
+  caseName?: string | null;
+  reopened?: boolean;
 }) {
   return (
     <div className={styles.stage}>
       <div className={styles.stageTitle}>{label}</div>
       {stage.completed ? (
         <span className="pt-badge pt-badge-green">Completed</span>
+      ) : reopened ? (
+        <span className="pt-badge pt-badge-amber">Reopened</span>
       ) : stage.syncStatus === "failed" ? (
         <span className="pt-badge pt-badge-red">Not completed (sync failed)</span>
       ) : (
@@ -590,6 +598,8 @@ function StageCard({
       )}
       <div className={styles.stageDate}>
         {stage.completed ? fmtDateTime(stage.completedAt) : "—"}
+        {stage.completed && caseName && <div className="pt-muted">Case: {caseName}</div>}
+        {!stage.completed && reopened && <div className="pt-muted">Any case</div>}
         {stage.syncStatus === "skipped" && (
           <div className="pt-muted">Recorded locally (REDCap not configured)</div>
         )}
@@ -651,8 +661,8 @@ function SurveyControls({
           : "One survey per student — not started yet."}
       </p>
       <div className={styles.stages}>
-        <StageCard label="Pre Survey" stage={survey.pre} canReset={survey.canResetPre} onReset={() => setConfirm("pre")} showReset={isSuperAdmin} />
-        <StageCard label="Post Survey" stage={survey.post} canReset={survey.canResetPost} onReset={() => setConfirm("post")} showReset={isSuperAdmin} />
+        <StageCard label="Pre Survey" stage={survey.pre} canReset={survey.canResetPre} onReset={() => setConfirm("pre")} showReset={isSuperAdmin} caseName={survey.preCaseName} />
+        <StageCard label="Post Survey" stage={survey.post} canReset={survey.canResetPost} onReset={() => setConfirm("post")} showReset={isSuperAdmin} caseName={survey.postCaseName} reopened={!!survey.postReopened} />
       </div>
       {isSuperAdmin ? (
         <>
@@ -668,7 +678,7 @@ function SurveyControls({
             This allows the student to complete the survey again. Earlier answers stay in REDCap under
             their original record; the retake is saved as a new record. Sessions, transcripts and
             assessments are not changed.
-            {survey.ownerCaseId && ` Pre/Post resets are retaken in ${caseName}; "Reset both" lets the student take the survey in any case.`}
+            {survey.ownerCaseId && ` A Pre reset is retaken in ${caseName}; a Post reset can be retaken in any case; "Reset both" lets the student start the survey again in any case.`}
           </p>
         </>
       ) : (

@@ -258,14 +258,135 @@ def _release_ownership_if_unestablished(db: Session, session: InterviewSession) 
     db.commit()
 
 
-def _finalize_completion(student: Student, receipt: SurveyReceipt) -> None:
-    """Mirror the owning package's completion onto the student-level pointer.
-    Only ever SETS the timestamp once (COMPLETED is terminal), so the global
-    state can never downgrade."""
-    if (
-        receipt.overall_status == SURVEY_OVERALL_COMPLETED
-        and student.survey_completed_at is None
-    ):
+# ---------------------------------------------------------------------------
+# Independent Post stage. Normally the Post stage belongs to the Pre owner case
+# (survey_owner_case_id), exactly as before. An admin "Reset Post" sets
+# Student.survey_post_reopened_at: while set (and Pre is done) Post may be
+# collected from ANY case, and the first successful Post claims
+# Student.survey_post_case_id. Pre ownership is never changed by this.
+# ---------------------------------------------------------------------------
+def current_post_case_id(student: Student) -> str | None:
+    """The case whose receipt holds (or will hold) the student's current Post.
+    Legacy/normal fallback: the Pre owner. A reopened, unclaimed Post has none."""
+    if student.survey_post_case_id:
+        return student.survey_post_case_id
+    if student.survey_post_reopened_at is not None:
+        return None
+    return student.survey_owner_case_id
+
+
+def _stage_receipts(
+    db: Session, student: Student
+) -> tuple[SurveyReceipt | None, SurveyReceipt | None]:
+    """(Pre-owner receipt, current-Post receipt) for this student."""
+    owner = student.survey_owner_case_id
+    pre_r = _get_receipt(db, student.id, owner) if owner else None
+    post_case = current_post_case_id(student)
+    if post_case is None:
+        post_r = None
+    elif post_case == owner:
+        post_r = pre_r
+    else:
+        post_r = _get_receipt(db, student.id, post_case)
+    return pre_r, post_r
+
+
+def _stage_done(receipt: SurveyReceipt | None, phase: str) -> bool:
+    return receipt is not None and _stage_status(receipt, phase) in SURVEY_SYNC_DONE
+
+
+def _pre_gate(student: Student, case_id: str, pre_done: bool) -> str:
+    """Server-authoritative Pre-screen decision (identical to the frontend's
+    globalPreGate): collect | continue | skip."""
+    owner = student.survey_owner_case_id
+    if owner is None:
+        return "collect"
+    if owner == case_id:
+        return "continue" if pre_done else "collect"
+    return "skip"
+
+
+def _post_gate(
+    db: Session, student: Student, case_id: str, pre_done: bool, post_done: bool
+) -> str:
+    """Server-authoritative Post-screen decision: collect | skip. Mirrors exactly
+    what submit_post would accept, so the UI never collects answers the backend
+    would silently drop."""
+    if student.survey_completed_at is not None or post_done:
+        return "skip"
+    owner = student.survey_owner_case_id
+    if student.survey_post_reopened_at is not None:
+        claimed = student.survey_post_case_id
+        if claimed is not None and claimed != case_id:
+            return "skip"  # another case is mid-submission of the reopened Post
+        here = _get_receipt(db, student.id, case_id)
+        if here is not None and here.post_sync_status in SURVEY_SYNC_DONE:
+            return "skip"  # legacy per-case package: never overwrite its Post
+        return "collect" if (pre_done or case_id == owner) else "skip"
+    return "collect" if owner is not None and case_id == owner else "skip"
+
+
+def _claim_post(db: Session, session: InterviewSession) -> SurveyReceipt:
+    """Atomically claim the Post stage for this session's case BEFORE any REDCap
+    call, serialised by the same Student row lock as the Pre ownership claim.
+
+    Normal flow: only the Pre owner case may claim (as before). Reopened Post
+    (admin reset): any case may claim once Pre is done; a second case racing it
+    observes the claim and is rejected, so exactly one case can win. Commits
+    before the network call; raises (after releasing the lock) when rejected."""
+    case_id = session.case_id
+    student = db.execute(
+        select(Student).where(Student.id == session.student_id).with_for_update()
+    ).scalar_one()
+    owner = student.survey_owner_case_id
+    reopened = student.survey_post_reopened_at is not None
+    claimed = student.survey_post_case_id
+
+    if not (reopened or case_id == owner or case_id == claimed):
+        db.commit()
+        if owner is not None:
+            raise SurveyOwnedByOtherCaseError()
+        raise SurveyPreRequiredError()
+    pre_r = _get_receipt(db, student.id, owner) if owner else None
+    if not _stage_done(pre_r, SURVEY_PHASE_PRE):
+        db.commit()
+        raise SurveyPreRequiredError()
+    if claimed is not None and claimed != case_id:
+        db.commit()
+        raise SurveyOwnedByOtherCaseError()
+    if reopened and _stage_done(_get_receipt(db, student.id, case_id), SURVEY_PHASE_POST):
+        # A legacy per-case package already holds a Post for this case; its
+        # REDCap answers must never be overwritten.
+        db.commit()
+        raise SurveyOwnedByOtherCaseError()
+
+    receipt = _get_or_create_receipt(db, session)
+    student.survey_post_case_id = case_id
+    db.commit()
+    return receipt
+
+
+def _release_post_if_unestablished(db: Session, session: InterviewSession) -> None:
+    """Undo a Post claim whose REDCap import FAILED, so the failed case never
+    keeps the Post (retry from the same or, when reopened, another case)."""
+    student = db.execute(
+        select(Student).where(Student.id == session.student_id).with_for_update()
+    ).scalar_one()
+    if student.survey_post_case_id == session.case_id:
+        receipt = _get_receipt(db, session.student_id, session.case_id)
+        if not _stage_done(receipt, SURVEY_PHASE_POST):
+            student.survey_post_case_id = None
+    db.commit()
+
+
+def _finalize_completion(db: Session, student: Student) -> None:
+    """Student-level completion: Pre done on the Pre-owner receipt AND Post done
+    on the current-Post receipt (the same receipt in the normal flow; different
+    receipts after an admin Post reset). Only ever SETS the timestamp."""
+    if student.survey_completed_at is not None:
+        return
+    pre_r, post_r = _stage_receipts(db, student)
+    if _stage_done(pre_r, SURVEY_PHASE_PRE) and _stage_done(post_r, SURVEY_PHASE_POST):
         student.survey_completed_at = _now()
 
 
@@ -281,6 +402,25 @@ def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut
     global_status = _global_survey_status(student)
     is_owner_case = owner_case_id is not None and owner_case_id == session.case_id
     global_completed = global_status == SURVEY_OVERALL_COMPLETED
+
+    # Independent stage state (Pre on the owner receipt, Post on the current
+    # Post receipt) + the server-authoritative per-screen gates.
+    pre_r, post_r = _stage_receipts(db, student)
+    pre_done = _stage_done(pre_r, SURVEY_PHASE_PRE)
+    post_done = _stage_done(post_r, SURVEY_PHASE_POST)
+    post_case_id = current_post_case_id(student) if post_done else None
+    stage_fields = dict(
+        pre_completed=pre_done,
+        post_completed=post_done,
+        pre_case_id=owner_case_id if pre_done else None,
+        pre_case_name=owner_case_name if pre_done else None,
+        post_case_id=post_case_id,
+        post_case_name=_case_name(post_case_id) if post_case_id else None,
+        post_reopened=student.survey_post_reopened_at is not None,
+        pre_gate=_pre_gate(student, session.case_id, pre_done),
+        post_gate=_post_gate(db, student, session.case_id, pre_done, post_done),
+    )
+
     receipt = _get_receipt(db, session.student_id, session.case_id)
     if receipt is None:
         return SurveyStatusOut(
@@ -297,6 +437,7 @@ def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut
             survey_owner_case_name=owner_case_name,
             is_survey_owner_case=is_owner_case,
             global_survey_completed=global_completed,
+            **stage_fields,
         )
     return SurveyStatusOut(
         session_id=session.id,
@@ -314,6 +455,7 @@ def get_survey_status(db: Session, session: InterviewSession) -> SurveyStatusOut
         survey_owner_case_name=owner_case_name,
         is_survey_owner_case=is_owner_case,
         global_survey_completed=global_completed,
+        **stage_fields,
     )
 
 
@@ -382,14 +524,32 @@ def _mark_stage(receipt: SurveyReceipt, phase: str, status: str) -> None:
     """Record a stage's sync outcome, then recompute the case-level lifecycle
     from BOTH stages. A DONE Pre alone leaves the package IN_PROGRESS; only
     pre_done AND post_done makes it COMPLETED; a FAILED stage advances nothing."""
-    done_at = _now() if status in SURVEY_SYNC_DONE else None
+    done = status in SURVEY_SYNC_DONE
+    done_at = _now() if done else None
+    # Track the record that actually holds this stage's answers.
+    record_id = receipt.redcap_record_id if done else None
     if phase == SURVEY_PHASE_PRE:
         receipt.pre_sync_status = status
         receipt.pre_synced_at = done_at
+        receipt.pre_redcap_record_id = record_id
     else:
         receipt.post_sync_status = status
         receipt.post_synced_at = done_at
+        receipt.post_redcap_record_id = record_id
     _recompute_overall(receipt)
+
+
+def _complete_stage(
+    db: Session, student: Student, receipt: SurveyReceipt, phase: str, status: str
+) -> None:
+    """A stage reached REDCap (or was skipped): record it, settle a reopened
+    Post onto this case, then recompute student-level completion."""
+    _mark_stage(receipt, phase, status)
+    if phase == SURVEY_PHASE_POST:
+        student.survey_post_case_id = receipt.case_id
+        student.survey_post_reopened_at = None
+    db.flush()
+    _finalize_completion(db, student)
 
 
 def _submit(
@@ -406,14 +566,22 @@ def _submit(
     # is the backend backstop for the frontend "already submitted / skip" gate;
     # checked first so a non-owner submission has zero side effect (no receipt,
     # no REDCap call). A completed owner also lands here for other cases.
-    if student.survey_owner_case_id is not None and student.survey_owner_case_id != case_id:
+    # Exception (Post only): an admin-reopened Post may come from any case, and
+    # the case that already claimed the current Post is not a "non-owner".
+    owner = student.survey_owner_case_id
+    post_allowed_here = phase == SURVEY_PHASE_POST and (
+        student.survey_post_reopened_at is not None or student.survey_post_case_id == case_id
+    )
+    if owner is not None and owner != case_id and not post_allowed_here:
         raise SurveyOwnedByOtherCaseError()
 
-    # (1) A completed package (for THIS owning case) is immutable. Checked before
-    # resolving the NUID / touching latest_session_id so even a stale/racing
-    # client cannot alter the authoritative receipt (and can never reach REDCap).
+    # (1) A completed package is immutable. Checked before resolving the NUID /
+    # touching latest_session_id so even a stale/racing client cannot alter the
+    # authoritative receipt (and can never reach REDCap).
     existing = _get_receipt(db, session.student_id, case_id)
-    if existing is not None and existing.overall_status == SURVEY_OVERALL_COMPLETED:
+    if student.survey_completed_at is not None or (
+        existing is not None and existing.overall_status == SURVEY_OVERALL_COMPLETED
+    ):
         raise SurveyAlreadyCompletedError(_case_name(case_id))
 
     # Identity fields, resolved server-side (never from the client). NUID stays
@@ -432,13 +600,10 @@ def _submit(
     # slot BEFORE any REDCap call (serialised by a Student row lock), so two cases
     # can never both establish a package.
     if phase == SURVEY_PHASE_POST:
-        receipt = _get_receipt(db, session.student_id, case_id)
-        if (
-            student.survey_owner_case_id != case_id
-            or receipt is None
-            or receipt.pre_sync_status not in SURVEY_SYNC_DONE
-        ):
-            raise SurveyPreRequiredError()
+        # Post requires a completed Pre on the student's Pre-owner receipt (not
+        # necessarily this case's, when Post was reopened by an admin) and
+        # atomically claims the Post stage for this case (see _claim_post).
+        receipt = _claim_post(db, session)
         receipt.latest_session_id = session.id
     else:
         claim = _claim_ownership(db, session)
@@ -472,8 +637,7 @@ def _submit(
     fields = _build_fields(record_id, nuid, case_number, case_id, phase, answers)
 
     if not redcap_client.is_configured():
-        _mark_stage(receipt, phase, SURVEY_SYNC_SKIPPED)
-        _finalize_completion(student, receipt)
+        _complete_stage(db, student, receipt, phase, SURVEY_SYNC_SKIPPED)
         db.commit()
         logger.info(
             "survey_submit_skipped_unconfigured session_id=%s case_id=%s phase=%s",
@@ -486,8 +650,7 @@ def _submit(
     try:
         redcap_client.import_record(fields)
     except RedcapNotConfiguredError:
-        _mark_stage(receipt, phase, SURVEY_SYNC_SKIPPED)
-        _finalize_completion(student, receipt)
+        _complete_stage(db, student, receipt, phase, SURVEY_SYNC_SKIPPED)
         db.commit()
         return SurveySubmitResult(
             phase=phase, sync_status=SURVEY_SYNC_SKIPPED, overall_status=receipt.overall_status
@@ -502,14 +665,15 @@ def _submit(
         # release the ownership claim so retry (same or another case) is possible.
         if phase == SURVEY_PHASE_PRE:
             _release_ownership_if_unestablished(db, session)
+        else:
+            _release_post_if_unestablished(db, session)
         logger.warning(
             "survey_submit_failed session_id=%s case_id=%s phase=%s",
             session.id, case_id, phase,
         )
         raise SurveySyncError()
 
-    _mark_stage(receipt, phase, SURVEY_SYNC_SYNCED)
-    _finalize_completion(student, receipt)
+    _complete_stage(db, student, receipt, phase, SURVEY_SYNC_SYNCED)
     db.commit()
     logger.info(
         "survey_submit_ok session_id=%s case_id=%s phase=%s overall=%s global=%s",

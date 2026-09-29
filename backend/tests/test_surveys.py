@@ -76,6 +76,7 @@ POST_ANSWERS = {
     "post_oe_one_change": "More cases.",
     "post_oe_feedback_type": "Specific examples.",
     "post_oe_feedback_missing": "Nothing was missing.",
+    "post_feedback_add": "  Example phrasing for follow-up questions.  ",
 }
 
 
@@ -215,6 +216,7 @@ def test_post_survey_maps_all_fields(student_api, captured):
     assert fields["post_use_again"] == 5
     assert fields["post_oe_most_helpful"] == "Practicing open-ended questions."  # sanitised
     assert fields["post_oe_feedback_missing"] == "Nothing was missing."
+    assert fields["post_feedback_add"] == "Example phrasing for follow-up questions."  # sanitised
 
 
 @pytest.mark.parametrize("bad", [0, 6, -1, 99])
@@ -282,16 +284,19 @@ def test_post_missing_likert_rejected(student_api, captured):
     assert captured == []
 
 
-def test_post_open_ended_required_when_missing(student_api, captured):
+@pytest.mark.parametrize("field", ["post_oe_feedback_missing", "post_feedback_add"])
+def test_post_open_ended_required_when_missing(student_api, captured, field):
     """Every visible post open-ended item is required: omitting one -> 422."""
     sid = _new_session(student_api)
     payload = dict(POST_ANSWERS)
-    del payload["post_oe_feedback_missing"]
+    del payload[field]
     assert student_api.post(f"/api/interviews/{sid}/surveys/post", json=payload).status_code == 422
     assert captured == []
 
 
-@pytest.mark.parametrize("field", ["post_oe_most_helpful", "post_oe_feedback_missing"])
+@pytest.mark.parametrize(
+    "field", ["post_oe_most_helpful", "post_oe_feedback_missing", "post_feedback_add"]
+)
 @pytest.mark.parametrize("blank", ["", "   ", "\n\t "])
 def test_post_open_ended_blank_rejected(student_api, captured, field, blank):
     """Empty or whitespace-only post open-ended answers are rejected."""
@@ -785,6 +790,7 @@ def test_no_answers_persisted_locally(student_api, captured, engine):
     cols = {c.name for c in sa_inspect(SurveyReceipt).columns}
     assert cols == {
         "id", "student_id", "case_id", "latest_session_id", "redcap_record_id",
+        "pre_redcap_record_id", "post_redcap_record_id",
         "pre_sync_status", "pre_synced_at", "post_sync_status", "post_synced_at",
         "overall_status", "created_at", "updated_at",
     }

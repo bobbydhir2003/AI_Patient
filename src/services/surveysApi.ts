@@ -64,6 +64,19 @@ export interface SurveyStatus {
   isSurveyOwnerCase: boolean;
   /** Convenience flag: the whole global package is completed. */
   globalSurveyCompleted: boolean;
+  /** Independent stage state (optional: absent on an older backend). Pre lives
+   * on the owner case; Post on the current Post case, which can differ after an
+   * admin "Reset Post" reopened Post to any case. */
+  preCompleted?: boolean;
+  postCompleted?: boolean;
+  preCaseId?: string | null;
+  preCaseName?: string | null;
+  postCaseId?: string | null;
+  postCaseName?: string | null;
+  postReopened?: boolean;
+  /** Server-authoritative screen decisions for THIS session's case. */
+  preGate?: "collect" | "continue" | "skip";
+  postGate?: "collect" | "skip";
 }
 
 export interface SurveySubmitResult {
@@ -91,7 +104,7 @@ export function submitPreSurvey(
   );
 }
 
-/** answers keyed by exact REDCap variable names (12 Likert ints + 5 OE strings). */
+/** answers keyed by exact REDCap variable names (Likert ints + 6 OE strings). */
 export function submitPostSurvey(
   sessionId: string,
   answers: Record<string, number | string>,

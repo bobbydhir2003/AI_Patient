@@ -266,6 +266,12 @@ def _stage(status: str | None, at: datetime | None) -> SurveyStageOut:
     return SurveyStageOut(completed=done, sync_status=status, completed_at=at if done else None)
 
 
+def _current_post_case_id(student: Student) -> str | None:
+    from app.services.survey_service import current_post_case_id
+
+    return current_post_case_id(student)
+
+
 def _primary_receipt(student: Student, receipts: list[SurveyReceipt]) -> SurveyReceipt | None:
     """The receipt whose stages represent the student's survey: the owner case's
     when ownership is set, otherwise the most recently touched one (pre-global
@@ -308,8 +314,20 @@ def survey_state_from(
         global_status = SURVEY_OVERALL_IN_PROGRESS
     primary = _primary_receipt(student, receipts)
     pre = _stage(primary.pre_sync_status, primary.pre_synced_at) if primary else _stage(None, None)
-    post = _stage(primary.post_sync_status, primary.post_synced_at) if primary else _stage(None, None)
     owner_receipt = primary if (primary is not None and primary.case_id == owner) else None
+    # Post is tracked independently: the current Post case's receipt (the owner
+    # normally; another case after an admin Post reset). Legacy/no-owner data
+    # keeps reading both stages from the primary receipt.
+    reopened = student.survey_post_reopened_at is not None
+    if owner is None and not student.survey_post_case_id:
+        post_receipt = primary
+    else:
+        post_case = _current_post_case_id(student)
+        post_receipt = next((r for r in receipts if post_case and r.case_id == post_case), None)
+    post = (
+        _stage(post_receipt.post_sync_status, post_receipt.post_synced_at)
+        if post_receipt else _stage(None, None)
+    )
     return SurveyStateOut(
         global_status=global_status,
         owner_case_id=owner,
@@ -322,9 +340,17 @@ def survey_state_from(
         last_response_at=_latest(
             *(r.pre_synced_at for r in receipts), *(r.post_synced_at for r in receipts)
         ),
-        # Stage resets act on the OWNER package only (the one that gates surveys).
+        pre_case_id=primary.case_id if (primary is not None and pre.completed) else None,
+        pre_case_name=_case_name(primary.case_id) if (primary is not None and pre.completed) else None,
+        post_case_id=post_receipt.case_id if (post_receipt is not None and post.completed) else None,
+        post_case_name=(
+            _case_name(post_receipt.case_id) if (post_receipt is not None and post.completed) else None
+        ),
+        post_reopened=reopened,
+        # Pre resets act on the OWNER package; Post resets on the current Post
+        # receipt (see apply_survey_reset).
         can_reset_pre=owner_receipt is not None and pre.completed,
-        can_reset_post=owner_receipt is not None and post.completed,
+        can_reset_post=owner is not None and post_receipt is not None and post.completed,
         can_reset_both=owner is not None or bool(receipts),
         reset_count=reset_count,
         last_reset_at=_utc(last_reset_at),
@@ -356,6 +382,9 @@ def _session_survey_status(
             return "completed"
         if pre_done:
             return "pre_completed"
+        if post_done:
+            # Post-only receipt: a Post reopened by an admin reset was taken here.
+            return "post_completed"
         return "not_completed"
     if owner is not None and owner != case_id:
         return "other_case"
@@ -621,10 +650,15 @@ def apply_survey_reset(db: Session, admin: User, student_id: str, *, scope: str)
             db.delete(r)
         student.survey_owner_case_id = None
         student.survey_completed_at = None
+        student.survey_post_case_id = None
+        student.survey_post_reopened_at = None
         case_for_log = owner or (receipts[0].case_id if receipts else "")
         old_ids = ", ".join(r.redcap_record_id for r in receipts) or "none"
     else:
-        target = next((r for r in receipts if owner and r.case_id == owner), None)
+        # Pre: the owner receipt (unchanged semantics). Post: the CURRENT Post
+        # receipt - survey_post_case_id, else the owner (legacy fallback).
+        target_case = owner if scope == SURVEY_RESET_PRE else _current_post_case_id(student)
+        target = next((r for r in receipts if owner and target_case and r.case_id == target_case), None)
         stage_status = (
             None if target is None
             else target.pre_sync_status if scope == SURVEY_RESET_PRE
@@ -643,9 +677,15 @@ def apply_survey_reset(db: Session, admin: User, student_id: str, *, scope: str)
         if scope == SURVEY_RESET_PRE:
             target.pre_sync_status = SURVEY_SYNC_PENDING
             target.pre_synced_at = None
+            target.pre_redcap_record_id = None
         else:
             target.post_sync_status = SURVEY_SYNC_PENDING
             target.post_synced_at = None
+            target.post_redcap_record_id = None
+            # Reopen Post to ANY case: the first successful Post claims it.
+            # Pre (and its owner case) is untouched.
+            student.survey_post_case_id = None
+            student.survey_post_reopened_at = now
         target.overall_status = SURVEY_OVERALL_IN_PROGRESS
         student.survey_completed_at = None
         case_for_log = target.case_id

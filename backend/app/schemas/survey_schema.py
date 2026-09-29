@@ -65,12 +65,14 @@ class PostSurveyIn(_StrictSurveyModel):
     post_feedback_accurate: Likert
     post_feedback_actionable: Likert
     post_use_again: Likert
-    # 5 open-ended items (all visible -> all required, non-blank)
+    # 6 open-ended items (all visible -> all required, non-blank)
     post_oe_most_helpful: RequiredOpenEnded
     post_oe_unrealistic: RequiredOpenEnded
     post_oe_one_change: RequiredOpenEnded
     post_oe_feedback_type: RequiredOpenEnded
     post_oe_feedback_missing: RequiredOpenEnded
+    # Last question: feedback that would have made the AI assessment more helpful.
+    post_feedback_add: RequiredOpenEnded
 
 
 class SurveyStatusOut(CamelModel):
@@ -115,6 +117,22 @@ class SurveyStatusOut(CamelModel):
     is_survey_owner_case: bool = False
     # Convenience flag: the whole global package is completed.
     global_survey_completed: bool = False
+    # ---- Independent stage state (student-level, not this case's receipt) ----
+    # Pre lives on the owner case's receipt; Post on the current Post case's
+    # receipt (the same case normally; possibly another case after an admin
+    # "Reset Post", which reopens Post to any case until one submits it).
+    pre_completed: bool = False
+    post_completed: bool = False
+    pre_case_id: str | None = None
+    pre_case_name: str | None = None
+    post_case_id: str | None = None
+    post_case_name: str | None = None
+    post_reopened: bool = False
+    # Server-authoritative screen decisions for THIS session's case - exactly
+    # what the submit endpoints will accept. pre: collect | continue | skip;
+    # post: collect | skip.
+    pre_gate: str = "collect"
+    post_gate: str = "skip"
 
 
 class SurveySubmitResult(CamelModel):

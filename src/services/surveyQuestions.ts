@@ -133,6 +133,11 @@ export const POST_OPEN_ENDED: OpenEndedQuestion[] = [
     prompt:
       "What differences, if any, did you notice between practicing with the AI standardized patient and practicing simulated patient interactions with classmates or instructors?",
   },
+  {
+    name: "post_feedback_add",
+    prompt:
+      "What additional information or type of feedback would have made the AI-generated assessment more helpful for improving your future patient interactions?",
+  },
 ];
 
 /** Matches backend MAX_OPEN_ENDED_LEN — keeps payloads bounded. */

@@ -337,7 +337,17 @@ export function AdminSurveyResetsPage() {
                       <td className={styles.nowrap}>{s.studentNumber || "—"}</td>
                       <td>{s.surveyCaseName ?? <span className="pt-muted">—</span>}</td>
                       <td><StagePill status={s.preStatus} at={s.preCompletedAt} /></td>
-                      <td><StagePill status={s.postStatus} at={s.postCompletedAt} /></td>
+                      <td>
+                        <StagePill status={s.postStatus} at={s.postCompletedAt} />
+                        {s.postReopened ? (
+                          <div className="pt-uac-usersub">Reopened · any case</div>
+                        ) : (
+                          s.postCaseName &&
+                          s.postCaseName !== s.surveyCaseName && (
+                            <div className="pt-uac-usersub">Case: {s.postCaseName}</div>
+                          )
+                        )}
+                      </td>
                       <td className={styles.when}>
                         {s.lastActivityAt ? fmtDateTime(s.lastActivityAt) : <span className="pt-muted">—</span>}
                       </td>

@@ -46,6 +46,16 @@ class Student(Base):
     survey_completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Case whose receipt holds the student's CURRENT Post stage. NULL falls back
+    # to survey_owner_case_id (legacy / normal flow) unless Post was reopened.
+    # Set when a Post claim is made (released again if that Post fails).
+    survey_post_case_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Set ONLY by an admin "Reset Post": while non-NULL (and Pre is done) the
+    # Post stage may be collected from ANY case, and the first successful Post
+    # claims survey_post_case_id. Cleared on that successful Post.
+    survey_post_reopened_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
 
     sessions = relationship("InterviewSession", back_populates="student")

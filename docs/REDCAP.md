@@ -95,6 +95,22 @@ post_oe_* ...        = <sanitised open-ended text>
 post_experience_survey_complete = 2
 ```
 
+## Admin "Reset Post": Pre and Post on different cases
+
+Normally Pre and Post belong to the same (owner) case, as above. An admin
+**Reset Post** reopens the Post stage to *any* case while the completed Pre (and
+its owner case) is untouched. The first successful Post is filed through that
+case's own `(student, case)` receipt, i.e. its own `record_id`, its own event and
+its own `case_id` — e.g. Pre in `carly_arm_1` (`case_id=2`), Post in
+`sofia_arm_1` (`case_id=3`), both carrying the same `nuid`. No REDCap variables
+were added.
+
+Resets never modify REDCap: the earlier Post stays on its original record (with
+`post_experience_survey_complete=2`). Which response is *current* is tracked
+locally: `survey_receipts.pre_redcap_record_id` / `post_redcap_record_id` (the
+record holding each stage's current answers), `students.survey_post_case_id`,
+and the `survey_receipt_resets` snapshots (superseded record ids).
+
 ## Flat (single-case) fallback
 
 If `REDCAP_LONGITUDINAL=false`, no `redcap_event_name` is sent (flat project).

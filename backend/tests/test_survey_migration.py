@@ -164,7 +164,10 @@ def test_targeted_0020_upgrade_and_downgrade_touch_only_survey_schema(
         assert "patient_voice_settings" in inspector.get_table_names()
 
         database_columns = {column["name"] for column in inspector.get_columns("survey_receipts")}
-        model_columns = {column.name for column in SurveyReceipt.__table__.columns}
+        # Columns added later by 0027 (per-stage REDCap linkage) are not part of 0020.
+        model_columns = {column.name for column in SurveyReceipt.__table__.columns} - {
+            "pre_redcap_record_id", "post_redcap_record_id",
+        }
         assert database_columns == model_columns
 
         nullable = {

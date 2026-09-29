@@ -116,6 +116,14 @@ class SurveyStateOut(CamelModel):
     completed_at: datetime | None = None
     pre: SurveyStageOut
     post: SurveyStageOut
+    # Case each completed stage belongs to (they differ after an admin Post
+    # reset when the retake came from another case).
+    pre_case_id: str | None = None
+    pre_case_name: str | None = None
+    post_case_id: str | None = None
+    post_case_name: str | None = None
+    # Post was reset by an admin and not yet resubmitted: any case may collect it.
+    post_reopened: bool = False
     last_response_at: datetime | None = None
     can_reset_pre: bool
     can_reset_post: bool

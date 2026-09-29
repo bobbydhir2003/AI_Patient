@@ -137,6 +137,28 @@ export function globalPostGate(
   return isOwnerCase && globalStatus !== "completed" ? "collect" : "skip";
 }
 
+/**
+ * Prefer the backend's authoritative gate (`preGate` / `postGate` on the survey
+ * status — exactly what the submit endpoints accept, including an admin-reopened
+ * Post that any case may collect). Falls back to the locally derived gate when
+ * an older backend omits it or sends an unknown value.
+ */
+export function resolvePreGate(
+  serverGate: string | null | undefined,
+  fallback: GlobalPreGate,
+): GlobalPreGate {
+  return serverGate === "collect" || serverGate === "continue" || serverGate === "skip"
+    ? serverGate
+    : fallback;
+}
+
+export function resolvePostGate(
+  serverGate: string | null | undefined,
+  fallback: GlobalPostGate,
+): GlobalPostGate {
+  return serverGate === "collect" || serverGate === "skip" ? serverGate : fallback;
+}
+
 // ---------------------------------------------------------------------------
 // Centralized interview flow resolution. One place decides where a session
 // belongs so NEW, RESUME, refresh and dashboard-continue all agree instead of

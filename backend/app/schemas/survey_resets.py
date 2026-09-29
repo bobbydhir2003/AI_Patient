@@ -42,6 +42,11 @@ class SurveyResetStudentRow(CamelModel):
     # Case whose receipt the stage statuses describe (the survey owner case when set).
     survey_case_id: str | None = None
     survey_case_name: str | None = None
+    # Case of each completed stage (may differ after a Post reset).
+    pre_case_name: str | None = None
+    post_case_name: str | None = None
+    # Post reset and awaiting resubmission from any case.
+    post_reopened: bool = False
     pre_status: SurveyStageStatus
     post_status: SurveyStageStatus
     pre_completed_at: datetime | None = None

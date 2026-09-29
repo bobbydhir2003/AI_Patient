@@ -86,6 +86,12 @@ class SurveyReceipt(Base):
     # Pre, Post, retries and any later session for this (student, case). NOT the
     # NUID/email/session id (the NUID is a separate REDCap field). Never PII.
     redcap_record_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    # The REDCap record that actually holds each stage's CURRENT answers, set
+    # when that stage syncs. redcap_record_id is the write target for pending
+    # stages and is rotated by admin resets, so it alone cannot say where an
+    # already-synced stage lives.
+    pre_redcap_record_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    post_redcap_record_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     pre_sync_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=SURVEY_SYNC_PENDING

@@ -7,6 +7,7 @@ import { PRE_LIKERT, PRE_OPEN_ENDED, OPEN_ENDED_MAX_LEN } from "../services/surv
 import { getSurveyStatus, submitPreSurvey } from "../services/surveysApi";
 import {
   globalPreGate,
+  resolvePreGate,
   resolveInterviewDestination,
   destinationToPath,
   isSessionNotFound,
@@ -63,6 +64,10 @@ export function PreSurveyPage() {
   // whether the global package is IN_PROGRESS vs COMPLETED).
   const [ownerName, setOwnerName] = useState<string | null>(null);
   const [globalStatus, setGlobalStatus] = useState<string>("not_started");
+  // Admin "Reset Post": Pre stays done (with its original case) and the Post is
+  // reopened to any case, so this case's skip banner must not say only the
+  // owner case collects responses.
+  const [postReopened, setPostReopened] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const initRef = useRef(false);
@@ -135,8 +140,12 @@ export function PreSurveyPage() {
         if (!status.nuidOnFile) setNuidMissing(true);
         setOwnerName(status.surveyOwnerCaseName);
         setGlobalStatus(status.globalSurveyStatus);
+        setPostReopened(!!status.postReopened);
         setGateMode(
-          globalPreGate(status.globalSurveyStatus, status.isSurveyOwnerCase, status.preSubmitted),
+          resolvePreGate(
+            status.preGate,
+            globalPreGate(status.globalSurveyStatus, status.isSurveyOwnerCase, status.preSubmitted),
+          ),
         );
       } catch (err) {
         if (cancelled) return;
@@ -308,10 +317,10 @@ export function PreSurveyPage() {
           const status = await getSurveyStatus(session.sessionId);
           setGlobalStatus(status.globalSurveyStatus);
           setOwnerName(status.surveyOwnerCaseName);
-          const gate = globalPreGate(
-            status.globalSurveyStatus,
-            status.isSurveyOwnerCase,
-            status.preSubmitted,
+          setPostReopened(!!status.postReopened);
+          const gate = resolvePreGate(
+            status.preGate,
+            globalPreGate(status.globalSurveyStatus, status.isSurveyOwnerCase, status.preSubmitted),
           );
           setGateMode(gate);
           setError(null);
@@ -369,7 +378,15 @@ export function PreSurveyPage() {
   const isCompleted = globalStatus === "completed";
 
   let banner: { title: string; message: string; button: string } | null = null;
-  if (isContinue) {
+  if (readOnly && postReopened && !isCompleted) {
+    // Admin reset the Post only: Pre stays completed with its original case and
+    // the Post-Survey will be collected after THIS interview.
+    banner = {
+      title: "Pre-Survey already completed",
+      message: `You already completed the Pre-Survey with ${ownerLabel}. Continue to the interview — you'll complete the Post-Survey for ${currentCaseName} afterward.`,
+      button: "Continue to Interview",
+    };
+  } else if (isContinue) {
     // Owner case, Pre already submitted.
     banner = isCompleted
       ? {

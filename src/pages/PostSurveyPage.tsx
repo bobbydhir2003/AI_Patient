@@ -5,7 +5,12 @@ import { SurveyLikert } from "../components/survey/SurveyLikert";
 import { POST_LIKERT, POST_OPEN_ENDED, OPEN_ENDED_MAX_LEN } from "../services/surveyQuestions";
 import { getSurveyStatus, submitPostSurvey } from "../services/surveysApi";
 import { ApiError, getAssessmentStatus } from "../services/api";
-import { postSurveyDestination, globalPostGate, isSessionNotFound } from "../services/surveyFlow";
+import {
+  postSurveyDestination,
+  globalPostGate,
+  resolvePostGate,
+  isSessionNotFound,
+} from "../services/surveyFlow";
 import { useAppContext } from "../state/AppContext";
 import { useAuth } from "../state/AuthContext";
 import { caseHubPath } from "../services/authRouting";
@@ -61,13 +66,19 @@ export function PostSurveyPage() {
         const status = await getSurveyStatus(sessionId);
         if (cancelled) return;
         if (!status.nuidOnFile) setNuidMissing(true);
-        setOwnerName(status.surveyOwnerCaseName);
+        // Name the case that actually holds the Post (it can differ from the Pre
+        // owner after an admin Post reset); fall back to the owner.
+        setOwnerName(status.postCaseName || status.surveyOwnerCaseName);
         setGlobalStatus(status.globalSurveyStatus);
         if (status.caseName) setCurrentCaseName(status.caseName);
-        // GLOBAL gate: only the owning case whose package is not yet completed
-        // collects Post. Every other case (and a completed package) shows the
-        // "already submitted / skip" state.
-        if (globalPostGate(status.globalSurveyStatus, status.isSurveyOwnerCase) === "skip") {
+        // Server-authoritative gate (an admin-reopened Post may be collected by
+        // any case; a Post that is already done is never re-collected). Falls
+        // back to the GLOBAL gate: only the owning, not-yet-completed case.
+        const gate = resolvePostGate(
+          status.postGate,
+          globalPostGate(status.globalSurveyStatus, status.isSurveyOwnerCase),
+        );
+        if (gate === "skip") {
           setAlreadyCompleted(true);
         }
         setCheckingStatus(false);

@@ -541,7 +541,7 @@ export interface StudentDataSession {
   viewCount: number | null;
   firstViewedAt: string | null;
   lastViewedAt: string | null;
-  /** completed | pre_completed | not_completed | other_case */
+  /** completed | pre_completed | post_completed | not_completed | other_case */
   surveyStatus: string;
   visits: AssessmentVisit[];
 }
@@ -561,6 +561,13 @@ export interface StudentSurveyState {
   completedAt: string | null;
   pre: SurveyStage;
   post: SurveyStage;
+  /** Case each completed stage belongs to (can differ after a Post reset). */
+  preCaseId?: string | null;
+  preCaseName?: string | null;
+  postCaseId?: string | null;
+  postCaseName?: string | null;
+  /** Post reset by an admin and not yet resubmitted: any case may collect it. */
+  postReopened?: boolean;
   lastResponseAt: string | null;
   canResetPre: boolean;
   canResetPost: boolean;
@@ -663,6 +670,11 @@ export interface SurveyResetRow {
   isActive: boolean;
   surveyCaseId: string | null;
   surveyCaseName: string | null;
+  /** Case of each completed stage (may differ after a Post reset). */
+  preCaseName?: string | null;
+  postCaseName?: string | null;
+  /** Post reset and awaiting resubmission from any case. */
+  postReopened?: boolean;
   preStatus: SurveyStageStatus;
   postStatus: SurveyStageStatus;
   preCompletedAt: string | null;

@@ -20,6 +20,8 @@ import {
   postSurveyGate,
   globalPreGate,
   globalPostGate,
+  resolvePreGate,
+  resolvePostGate,
   isResumableSession,
   resumeEntryDestination,
   resolveInterviewDestination,
@@ -111,6 +113,27 @@ test("globalPostGate: only the owning, not-yet-completed case collects Post", ()
   assert.equal(globalPostGate("in_progress", false), "skip");
   assert.equal(globalPostGate("completed", false), "skip");
   assert.equal(globalPostGate("not_started", false), "skip");
+});
+
+test("resolvePreGate / resolvePostGate: server gate wins, local gate is the fallback", () => {
+  // Admin Post reset: Pre skipped on a non-owner case, Post collected there.
+  assert.equal(resolvePreGate("skip", "collect"), "skip");
+  assert.equal(resolvePostGate("collect", globalPostGate("in_progress", false)), "collect");
+  // Post already done (e.g. after a Pre reset): never collect again.
+  assert.equal(resolvePostGate("skip", globalPostGate("in_progress", true)), "skip");
+  // Older backend (no gate) or unknown value -> existing local logic.
+  assert.equal(resolvePreGate(undefined, "continue"), "continue");
+  assert.equal(resolvePreGate("weird", "collect"), "collect");
+  assert.equal(resolvePostGate(null, "skip"), "skip");
+});
+
+test("Survey pages consume the server-authoritative gates", () => {
+  const pre = read("src/pages/PreSurveyPage.tsx");
+  const post = read("src/pages/PostSurveyPage.tsx");
+  assert.match(pre, /resolvePreGate\(\s*status\.preGate/);
+  assert.match(post, /resolvePostGate\(\s*status\.postGate/);
+  assert.match(pre, /Pre-Survey already completed/);
+  assert.match(post, /status\.postCaseName \|\| status\.surveyOwnerCaseName/);
 });
 
 // ---------------------------------------------------------------------------

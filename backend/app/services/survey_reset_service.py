@@ -158,9 +158,13 @@ def list_survey_resets(
     summary = _summary(entries)
     case_options = sorted(
         {
-            (e.state.case_id, e.state.case_name or e.state.case_id)
+            (cid, name or cid)
             for e in entries
-            if e.state.case_id
+            for cid, name in (
+                (e.state.case_id, e.state.case_name),
+                (e.state.post_case_id, e.state.post_case_name),
+            )
+            if cid
         },
         key=lambda c: c[1].lower(),
     )
@@ -179,7 +183,7 @@ def list_survey_resets(
         and (
             not case_id
             or (case_id == NO_CASE and e.state.case_id is None)
-            or e.state.case_id == case_id
+            or case_id in (e.state.case_id, e.state.post_case_id)
         )
     ]
     rows.sort(key=lambda e: (e.student.name.lower(), e.student.id))
@@ -199,6 +203,9 @@ def list_survey_resets(
             is_active=e.student.is_active,
             survey_case_id=e.state.case_id,
             survey_case_name=e.state.case_name,
+            pre_case_name=e.state.pre_case_name,
+            post_case_name=e.state.post_case_name,
+            post_reopened=e.state.post_reopened,
             pre_status=e.pre_status,
             post_status=e.post_status,
             pre_completed_at=e.state.pre.completed_at,
