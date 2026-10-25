@@ -86,6 +86,7 @@ export function LtiCoursePage() {
                     type="button"
                     className="pt-btn pt-btn-secondary pt-btn-sm"
                     disabled={simulating !== null}
+                    aria-label={`Run simulated interview for ${c.name}`}
                     onClick={() => void runSimulated(c.id)}
                   >
                     {simulating === c.id ? "Simulating…" : "Run simulated interview"}

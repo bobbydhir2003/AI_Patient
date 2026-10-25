@@ -78,17 +78,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  /** End a course session only: the direct-login token (if any) is untouched. */
-  const endLtiSession = useCallback(
-    (reason: "ended" | "expired") => {
-      clearLtiSession();
-      setLti(null);
-      setToken(null);
-      setUser(null);
-      navigate(`${LTI_ENDED_ROUTE}?reason=${reason}`, { replace: true });
-    },
-    [navigate],
-  );
+  /** End a course session only: the direct-login token (if any) is untouched.
+   * A full page load (not a client-side navigation) drops every bit of
+   * in-memory course state and cannot race the route guards. */
+  const endLtiSession = useCallback((reason: "ended" | "expired") => {
+    clearLtiSession();
+    window.location.replace(`${LTI_ENDED_ROUTE}?reason=${reason}`);
+  }, []);
 
   const beginLtiSession = useCallback((session: LtiSession) => {
     saveLtiSession(session);
