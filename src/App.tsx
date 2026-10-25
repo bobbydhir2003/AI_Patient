@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AppHeader } from "./components/layout/AppHeader";
 import { AppFooter } from "./components/layout/AppFooter";
@@ -40,6 +41,20 @@ import { ApiCredentialsPage } from "./pages/admin/system/ApiCredentialsPage";
 import { SystemHealthPage } from "./pages/admin/system/subpages";
 import { LiveKitTestPage } from "./pages/admin/system/LiveKitTestPage";
 import { ProtectedRoute } from "./portal/ProtectedRoute";
+import { LtiBanner } from "./pages/lti/LtiBanner";
+import { LtiCallbackPage } from "./pages/lti/LtiCallbackPage";
+import { LtiCoursePage } from "./pages/lti/LtiCoursePage";
+import { LtiInstructorPage } from "./pages/lti/LtiInstructorPage";
+import { LtiMessagePage } from "./pages/lti/LtiMessagePage";
+import { useAuth } from "./state/AuthContext";
+
+/** A launched (course) student's case hub is the course page, which lists only
+ * the cases assigned to that course; direct-login users are unaffected. */
+function CaseHub({ children }: { children: ReactNode }) {
+  const { lti } = useAuth();
+  if (lti) return <Navigate to={lti.role === "instructor" ? "/course/instructor" : "/course"} replace />;
+  return <>{children}</>;
+}
 
 function App() {
   const location = useLocation();
@@ -49,6 +64,7 @@ function App() {
   return (
     <>
       {!isAdminArea && <AppHeader />}
+      <LtiBanner />
       <Routes>
         {/* Existing patient interview workflow (unchanged) */}
         <Route path="/" element={<WelcomePage />} />
@@ -68,6 +84,28 @@ function App() {
         <Route path="/login" element={<Navigate to="/" replace />} />
         <Route path="/register" element={<RegisterPage />} />
 
+        {/* AI iEXCEL course launches (LTI 1.3). The backend issues the code and
+            enforces every course-scoping rule; these pages only present it. */}
+        <Route path="/lti/callback" element={<LtiCallbackPage />} />
+        <Route path="/lti/error" element={<LtiMessagePage kind="error" />} />
+        <Route path="/lti/ended" element={<LtiMessagePage kind="ended" />} />
+        <Route
+          path="/course"
+          element={
+            <ProtectedRoute>
+              <LtiCoursePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/course/instructor"
+          element={
+            <ProtectedRoute>
+              <LtiInstructorPage />
+            </ProtectedRoute>
+          }
+        />
+
         {/* Patient Simulator portal. Open to any authenticated account: students
             for coursework, and promoted admins/professors for practice. The
             backend still enforces per-session ownership, so users only ever see
@@ -79,8 +117,8 @@ function App() {
             </ProtectedRoute>
           }
         >
-          <Route path="/student/dashboard" element={<StudentDashboardPage />} />
-          <Route path="/student/cases" element={<StudentCasesPage />} />
+          <Route path="/student/dashboard" element={<CaseHub><StudentDashboardPage /></CaseHub>} />
+          <Route path="/student/cases" element={<CaseHub><StudentCasesPage /></CaseHub>} />
           <Route path="/student/assessments" element={<StudentAssessmentsPage />} />
           <Route path="/student/activity" element={<StudentActivityPage />} />
           <Route path="/student/profile" element={<StudentProfilePage />} />

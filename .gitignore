@@ -28,6 +28,9 @@ dist-ssr
 .env
 .env.local
 backend/.env
+# Development LTI tool keys (scripts/generate_lti_tool_key.py)
+backend/.lti/
+.lti/
 
 # Local databases
 backend/ptai.db
