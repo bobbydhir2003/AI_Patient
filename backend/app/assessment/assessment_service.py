@@ -52,8 +52,18 @@ def generate_assessment(db: Session, session_id: str, client: OpenAIPatientClien
     if session is None:
         raise SessionNotFoundError(session_id)
     if session.case_category == "referral":
-        return referral_assessment_service.generate(db, session_id, client, retry=retry)
-    return standard_assessment_service.generate_assessment(db, session_id, client, retry=retry)
+        result = referral_assessment_service.generate(db, session_id, client, retry=retry)
+    else:
+        result = standard_assessment_service.generate_assessment(db, session_id, client, retry=retry)
+    _report_assessment(db, session_id)
+    return result
+
+
+def _report_assessment(db: Session, session_id: str) -> None:
+    """AI iEXCEL course sessions only: queue assessment.completed (never raises)."""
+    from app.services import platform_events
+
+    platform_events.record_assessment_finished(db, session_id)
 
 
 def enqueue_assessment(db: Session, session_id: str, retry: bool = False) -> dict:
@@ -110,8 +120,11 @@ def execute_run(db: Session, run, client: OpenAIPatientClient):
     """Run the pipeline for an already-created run (called by the worker)."""
     session = SessionRepository(db).get(run.session_id)
     if session is not None and session.case_category == "referral":
-        return referral_assessment_service.execute_existing(db, run, client)
-    return standard_assessment_service.execute_existing(db, run, client)
+        result = referral_assessment_service.execute_existing(db, run, client)
+    else:
+        result = standard_assessment_service.execute_existing(db, run, client)
+    _report_assessment(db, run.session_id)
+    return result
 
 
 def queue_stats(db: Session) -> dict:

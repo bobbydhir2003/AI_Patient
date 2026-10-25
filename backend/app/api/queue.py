@@ -7,7 +7,7 @@ waiting entry — it never affects sessions, transcripts, assessments or grading
 from fastapi import APIRouter, Depends
 
 from app.database.connection import get_db
-from app.dependencies.auth import get_current_user
+from app.dependencies.auth import get_current_user, require_simulator_access
 from app.models import User
 from app.schemas.base import CamelModel
 from app.services import interview_queue
@@ -26,7 +26,7 @@ def _holder(user: User) -> str:
 
 
 @router.post("/join")
-def join_queue(payload: QueueJoinRequest, user: User = Depends(get_current_user), db=Depends(get_db)) -> dict:
+def join_queue(payload: QueueJoinRequest, user: User = Depends(require_simulator_access), db=Depends(get_db)) -> dict:
     return interview_queue.join(db, _holder(user), payload.case_id)
 
 

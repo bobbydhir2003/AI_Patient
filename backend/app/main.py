@@ -21,6 +21,7 @@ from app.api import (
     health,
     interviews,
     livekit,
+    lti,
     queue as queue_api,
     sessions,
     students,
@@ -48,6 +49,10 @@ async def _lifespan(_: FastAPI):
         if settings.assessment_queue_enabled:
             get_assessment_worker().start()
         get_heartbeat().start()  # no-op when Redis is not configured
+        if settings.lti_reporting_ready:
+            from app.services.platform_events import get_platform_event_worker
+
+            get_platform_event_worker().start()  # AI iEXCEL progress outbox
     yield
     # Shutdown: stop background workers.
     if workers_on:
@@ -58,6 +63,10 @@ async def _lifespan(_: FastAPI):
         get_assessment_worker().stop()
         get_telemetry().stop_sampler()
         get_heartbeat().stop()  # deletes this worker's Redis record immediately
+        if settings.lti_reporting_ready:
+            from app.services.platform_events import get_platform_event_worker
+
+            get_platform_event_worker().stop()
 
 
 def _install_telemetry_middleware(_app: FastAPI) -> None:
@@ -127,6 +136,10 @@ def create_app() -> FastAPI:
     # Phase 1 LiveKit POC only (admin-gated) - additive, does not alter any
     # route above. See app/api/livekit.py.
     _app.include_router(livekit.router, prefix="/api")
+    # AI iEXCEL Course 1 (LTI 1.3 tool). Every route answers 404 unless
+    # AI_SP_LTI_ENABLED is on; see app/api/lti.py.
+    _app.include_router(lti.router, prefix="/api")
+    _app.include_router(lti.dev_router, prefix="/api")
 
     if settings.auto_create_tables:
         from app.database.base import Base

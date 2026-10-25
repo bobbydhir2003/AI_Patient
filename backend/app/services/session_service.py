@@ -64,6 +64,18 @@ def create_session(
     import json as _json
 
     case = load_case(payload.case_id)  # raises CaseNotFoundError for unknown ids
+    # AI iEXCEL course launch: the session belongs to the launched offering and
+    # only that offering's assigned cases may be started. Direct-login sessions
+    # are unaffected (context_id stays NULL).
+    context_id = None
+    lti_claims = getattr(current_user, "lti_claims", None)
+    if lti_claims is not None:
+        from app.core.exceptions import CaseNotAssignedError
+        from app.services import lti_service
+
+        context_id = lti_claims["ctx"]
+        if payload.case_id not in lti_service.assigned_case_ids(db, context_id):
+            raise CaseNotAssignedError()
     # A3: the session owner is ALWAYS the authenticated account's linked profile.
     # Any student_name / student_id in the request body is display-only and is
     # never used to decide ownership, so a caller cannot create a session under
@@ -98,6 +110,7 @@ def create_session(
         # Admin/professor sessions are practice ("admin_test") and never counted
         # in student completion stats or academic analytics.
         is_practice=is_admin,
+        context_id=context_id,
     )
     # Freeze the active (non-secret) config this interview should keep using, so
     # an admin editing the model/voice mid-way cannot alter an in-progress
@@ -107,6 +120,9 @@ def create_session(
         session.config_snapshot = runtime_config_service.session_snapshot(db, payload.case_id)
     except Exception:  # snapshot is best-effort; never block starting an interview
         logger.warning("config_snapshot_failed case_id=%s", payload.case_id)
+    from app.services import platform_events
+
+    platform_events.record_session_started(db, session)
     db.commit()
     # B2: register the session in the live-activity registry (in-memory only).
     try:
@@ -151,6 +167,9 @@ def complete_session(db: Session, session_id: str) -> SessionResponse:
         raise TranscriptEmptyError()
 
     repo.complete_and_lock(session)
+    from app.services import platform_events
+
+    platform_events.record_session_completed(db, session)
     db.commit()
     try:
         from app.core.telemetry import get_telemetry
