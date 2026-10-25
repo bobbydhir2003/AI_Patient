@@ -4,7 +4,7 @@ Every route answers 404 unless AI_SP_LTI_ENABLED is on and configured.
 
 Browser-facing (no AI SP session):
 - GET|POST /api/lti/login   OIDC third-party-initiated login from the platform
-- POST     /api/lti/launch  id_token form post; redirects to the web app with a
+- POST     /api/lti/launch  id_token form post; continues to the web app with a
                             one-time code in the URL fragment
 - POST     /api/lti/session/exchange  one-time code -> course-scoped session token
 
@@ -18,11 +18,12 @@ Development only (ENVIRONMENT=development and AI_SP_DEV_FAKE_AI=true):
 - POST /api/dev/sessions/{id}/simulate-interview  seeds a synthetic transcript
   in place of the LiveKit voice interview.
 """
+import html
 from datetime import datetime
 from urllib.parse import parse_qsl, quote
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -121,12 +122,37 @@ class SimulatedInterviewOut(CamelModel):
 # ------------------------------------------------------------- launch flow
 
 
-def _error_redirect(reason: str) -> RedirectResponse:
+def _error_url(reason: str) -> str:
     frontend = get_settings().lti_frontend_url.rstrip("/")
     if not frontend:
         raise LtiDisabledError()
-    return RedirectResponse(
-        f"{frontend}/lti/error?reason={quote(reason)}", status_code=303, headers=_NO_STORE
+    return f"{frontend}/lti/error?reason={quote(reason)}"
+
+
+def _error_redirect(reason: str) -> RedirectResponse:
+    return RedirectResponse(_error_url(reason), status_code=303, headers=_NO_STORE)
+
+
+def _navigate_page(url: str) -> HTMLResponse:
+    """Continue to the web app from the launch POST.
+
+    A 303 is not used here: browsers enforce the platform form-post page's CSP
+    form-action on redirects that follow the form submission, and the web app
+    is a different origin from this API. A script-free meta refresh starts a
+    new navigation instead. The page itself runs nothing and loads nothing."""
+    target = html.escape(url, quote=True)
+    page = (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        f'<meta http-equiv="refresh" content="0;url={target}">'
+        "<title>Opening your course</title></head><body>"
+        f'<p><a href="{target}">Continue to your course</a></p></body></html>'
+    )
+    return HTMLResponse(
+        page,
+        headers={
+            **_NO_STORE,
+            "Content-Security-Policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        },
     )
 
 
@@ -170,13 +196,11 @@ async def lti_launch(request: Request, db: Session = Depends(get_db)):
     except LtiLaunchError as exc:
         db.rollback()
         logger.warning("lti_launch_rejected reason=%s", exc.reason)
-        response = _error_redirect(exc.reason)
+        response = _navigate_page(_error_url(exc.reason))
     else:
         frontend = settings.lti_frontend_url.rstrip("/")
         # A fragment never reaches a server or a Referer header.
-        response = RedirectResponse(
-            f"{frontend}/lti/callback#code={quote(code)}", status_code=303, headers=_NO_STORE
-        )
+        response = _navigate_page(f"{frontend}/lti/callback#code={quote(code)}")
     response.delete_cookie(
         lti_service.STATE_COOKIE,
         path=lti_service.STATE_COOKIE_PATH,

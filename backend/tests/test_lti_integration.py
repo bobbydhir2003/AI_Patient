@@ -2,7 +2,9 @@
 mapping, course isolation, case assignment, instructor scope, and progress
 reporting. The platform is simulated with a locally generated RSA key; no
 network, no production configuration, synthetic users only."""
+import html
 import json
+import re
 import time
 import uuid
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -154,6 +156,16 @@ def _post_launch(client, state, id_token, cookie_state=None):
     )
 
 
+def _landing(response):
+    """Where the launch response sends the browser (a meta-refresh page)."""
+    assert response.status_code == 200, response.text
+    assert response.headers["cache-control"] == "no-store"
+    assert "<script" not in response.text
+    match = re.search(r'http-equiv="refresh" content="0;url=([^"]+)"', response.text)
+    assert match, response.text
+    return html.unescape(match.group(1))
+
+
 def _sign(claims, key=PLATFORM_KEY, kid="platform-1"):
     return jwt.encode(claims, key, algorithm="RS256", headers={"kid": kid})
 
@@ -161,8 +173,7 @@ def _sign(claims, key=PLATFORM_KEY, kid="platform-1"):
 def _launch_code(client, **claim_over):
     state, nonce = _start(client)
     r = _post_launch(client, state, _sign(_claims(nonce, **claim_over)))
-    assert r.status_code == 303, r.text
-    location = r.headers["location"]
+    location = _landing(r)
     assert location.startswith(f"{TOOL}/lti/callback#code="), location
     assert "?" not in location  # nothing in a query string
     return location.split("#code=", 1)[1]
@@ -251,8 +262,7 @@ def test_launch_rejections(api, over, key, reason):
     claims.update(over)
     claims = {k: v for k, v in claims.items() if v is not None}
     r = _post_launch(api, state, _sign(claims, key=key or PLATFORM_KEY))
-    assert r.status_code == 303
-    assert r.headers["location"] == f"{TOOL}/lti/error?reason={reason}"
+    assert _landing(r) == f"{TOOL}/lti/error?reason={reason}"
     with _db(api._test_engine) as db:
         assert db.execute(select(func.count()).select_from(PlatformIdentity)).scalar_one() == 0
 
@@ -260,17 +270,17 @@ def test_launch_rejections(api, over, key, reason):
 def test_unknown_signing_key_is_rejected(api):
     state, nonce = _start(api)
     r = _post_launch(api, state, _sign(_claims(nonce), key=OTHER_KEY, kid="forged"))
-    assert r.headers["location"].endswith("reason=unknown_signing_key")
+    assert _landing(r).endswith("reason=unknown_signing_key")
 
 
 def test_state_must_match_cookie_and_is_single_use(api):
     state, nonce = _start(api)
     token = _sign(_claims(nonce))
     r = _post_launch(api, state, token, cookie_state="another-browser")
-    assert r.headers["location"].endswith("reason=state_mismatch")
-    assert _post_launch(api, state, token).status_code == 303  # first real use
+    assert _landing(r).endswith("reason=state_mismatch")
+    assert "/lti/callback#code=" in _landing(_post_launch(api, state, token))  # first real use
     replay = _post_launch(api, state, token)
-    assert replay.headers["location"].endswith("reason=state_replayed")
+    assert _landing(replay).endswith("reason=state_replayed")
 
 
 def test_login_rejects_unknown_platform_and_foreign_target(api):
