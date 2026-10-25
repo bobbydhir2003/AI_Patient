@@ -53,7 +53,8 @@ def test_survey_revision_is_an_independent_branch_from_0018():
 
     assert survey.down_revision == "0018"
     assert set(merge.down_revision) == {"0019", "0020"}
-    assert scripts.get_heads() == ["0021"]
+    # iexcel_lti_02 merges 0021 with the independent AI iEXCEL LTI branch.
+    assert scripts.get_heads() == ["iexcel_lti_02"]
 
 
 def test_targeted_0020_upgrade_and_downgrade_touch_only_survey_schema(
