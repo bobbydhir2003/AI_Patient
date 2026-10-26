@@ -32,9 +32,17 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
 
 
 def create_access_token(
-    *, subject: str, role: str, expires_minutes: int | None = None
+    *,
+    subject: str,
+    role: str,
+    expires_minutes: int | None = None,
+    lti: dict | None = None,
 ) -> str:
-    """Signed JWT carrying the user id (sub) and role. Short-lived by default."""
+    """Signed JWT carrying the user id (sub) and role. Short-lived by default.
+
+    `lti` is set only for sessions started by an AI iEXCEL launch
+    ({"ctx": offering id, "role": learner|instructor}); it scopes the token to
+    that course offering (enforced in app.dependencies.auth)."""
     settings = get_settings()
     minutes = expires_minutes if expires_minutes is not None else settings.access_token_expire_minutes
     now = datetime.now(timezone.utc)
@@ -44,6 +52,8 @@ def create_access_token(
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=minutes)).timestamp()),
     }
+    if lti is not None:
+        payload["lti"] = lti
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 

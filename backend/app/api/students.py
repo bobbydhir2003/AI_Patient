@@ -33,13 +33,10 @@ def my_sessions(
 ) -> list[SessionSummaryOut]:
     if not current_user.student_id:
         return []
-    rows = list(
-        db.execute(
-            select(InterviewSession)
-            .where(InterviewSession.student_id == current_user.student_id)
-            .order_by(InterviewSession.started_at.desc())
-        ).scalars().all()
-    )
+    stmt = select(InterviewSession).where(InterviewSession.student_id == current_user.student_id)
+    if current_user.lti_claims is not None:  # a course launch sees that course only
+        stmt = stmt.where(InterviewSession.context_id == current_user.lti_claims["ctx"])
+    rows = list(db.execute(stmt.order_by(InterviewSession.started_at.desc())).scalars().all())
     return [admin_service.session_summary(db, s) for s in rows]
 
 

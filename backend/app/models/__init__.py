@@ -6,6 +6,15 @@ from app.models.audit_log import AuditLog
 from app.models.conversation_turn import ConversationTurn
 from app.models.interview_session import InterviewSession
 from app.models.load_test_job import LoadTestJob
+from app.models.lti import (
+    ContextCaseAssignment,
+    ContextMember,
+    CourseContext,
+    LtiLoginCode,
+    LtiLoginState,
+    PlatformEventOutbox,
+    PlatformIdentity,
+)
 from app.models.runtime_config import (
     ApiCredential,
     ConfigurationHistory,
@@ -16,6 +25,13 @@ from app.models.survey_receipt import SurveyReceipt, SurveyReceiptReset
 from app.models.user import User
 
 __all__ = [
+    "ContextCaseAssignment",
+    "ContextMember",
+    "CourseContext",
+    "LtiLoginCode",
+    "LtiLoginState",
+    "PlatformEventOutbox",
+    "PlatformIdentity",
     "Student",
     "SurveyReceipt",
     "SurveyReceiptReset",

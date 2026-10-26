@@ -352,6 +352,10 @@ _default_client: OpenAIPatientClient | None = None
 
 def get_openai_client() -> OpenAIPatientClient:
     global _default_client
+    if get_settings().dev_fake_ai_active:  # development only; refused elsewhere
+        from app.patient_engine.dev_fake_ai import DevFakeAIClient
+
+        return DevFakeAIClient()  # type: ignore[return-value]
     if _default_client is None:
         _default_client = OpenAIPatientClient()
     return _default_client

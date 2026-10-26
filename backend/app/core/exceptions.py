@@ -485,3 +485,34 @@ class AssessmentUnavailableError(AppError):
 
     def __init__(self) -> None:
         super().__init__("The AI assessment could not be generated. Please try again.")
+
+
+class LtiDisabledError(AppError):
+    """AI iEXCEL course launches are switched off (AI_SP_LTI_ENABLED=false) or
+    not fully configured. Answers 404 so the integration surface is invisible."""
+
+    status_code = 404
+    code = "not_found"
+
+    def __init__(self) -> None:
+        super().__init__("Not found.")
+
+
+class LtiLaunchError(AppError):
+    """A course launch or launch-code exchange was refused. `reason` is a short,
+    fixed code (never token contents) shown to the user and logged."""
+
+    status_code = 400
+    code = "lti_launch_rejected"
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("This course launch could not be completed. Please open the course again.")
+        self.reason = reason
+
+
+class CaseNotAssignedError(AppError):
+    status_code = 403
+    code = "case_not_assigned"
+
+    def __init__(self) -> None:
+        super().__init__("This patient case is not assigned to your course.")

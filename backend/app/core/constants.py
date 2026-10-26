@@ -246,3 +246,10 @@ REFERRAL_CONFIDENCE = ("high", "medium", "low")
 ASSESSABILITY = ("assessable", "insufficient_evidence", "not_assessed")
 SECTION_STANDARD = "standard"
 SECTION_REFERRAL = "advanced_referral"
+
+# AI iEXCEL Course 1 integration: the course role an LTI launch grants inside
+# ONE course offering. Not an AI SP account role (launched users are always
+# role "student"), and never administrator access.
+LTI_ROLE_LEARNER = "learner"
+LTI_ROLE_INSTRUCTOR = "instructor"
+LTI_CASE_IDS = ("camden", "carly", "sofia", "jayden")  # Course 1 assignable cases

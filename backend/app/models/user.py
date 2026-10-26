@@ -23,6 +23,11 @@ class User(Base):
 
     __tablename__ = "users"
 
+    # Set per request (never stored): the "lti" claims of an AI SP session that
+    # an AI iEXCEL launch started ({"ctx": offering id, "role": learner|instructor}).
+    # None for direct-login sessions.
+    lti_claims = None
+
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     full_name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)

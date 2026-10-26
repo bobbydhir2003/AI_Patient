@@ -22,6 +22,17 @@ export const AUTH_TOKEN_STORAGE_KEY = "ptai-auth-token";
  * endpoints (cases, health) simply ignore it.
  */
 export function getStoredAuthToken(): string | null {
+  // An AI iEXCEL course launch (sessionStorage, this tab only) takes precedence
+  // over a direct-login token. Read inline to avoid an import cycle.
+  try {
+    const raw = sessionStorage.getItem("ptai-lti-session");
+    if (raw) {
+      const lti = JSON.parse(raw) as { token?: string; expiresAt?: number };
+      if (lti.token && (lti.expiresAt ?? 0) > Date.now()) return lti.token;
+    }
+  } catch {
+    /* fall through to the direct-login token */
+  }
   try {
     return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
   } catch {

@@ -496,6 +496,82 @@ class Settings(BaseSettings):
             or len(secret) < JWT_MIN_SECRET_LENGTH
         )
 
+    # --- AI iEXCEL Course 1 integration (LTI 1.3 tool) -------------------
+    # OFF by default. When off, the /api/lti endpoints answer 404, LTI-issued
+    # session tokens are refused, and nothing is reported to the platform;
+    # direct AI SP login and all existing data paths are unaffected.
+    ai_sp_lti_enabled: bool = False
+    lti_platform_issuer: str = ""  # e.g. http://localhost:8000 (development)
+    lti_client_id: str = ""  # issued by the platform's application registry
+    lti_deployment_ids: str = ""  # comma-separated; one per bound offering
+    lti_authorization_url: str = ""  # platform OIDC authorization endpoint
+    lti_jwks_url: str = ""  # platform public keys
+    lti_token_url: str = ""  # platform OAuth token endpoint (client assertions)
+    lti_events_url: str = ""  # platform Events API
+    lti_launch_url: str = ""  # this tool's redirect_uri (POST /api/lti/launch)
+    lti_frontend_url: str = ""  # AI SP web app base, for the post-launch redirect
+    lti_tool_key_file: str = ""  # PEM RS256 private key (its public JWK is registered at the platform)
+    lti_tool_key_id: str = ""  # kid of that key
+    lti_session_minutes: int = 60  # lifetime of an AI SP session started by a launch
+    lti_cookie_secure: bool = True  # Secure + SameSite=None state cookie (false only for http dev)
+    lti_event_reporting_enabled: bool = True  # progress events to the platform (needs ai_sp_lti_enabled)
+    lti_instructor_transcripts_enabled: bool = False  # faculty decision D3
+    # Include the qualitative overall level on assessment.completed (needs the
+    # platform's optional "level" field; a level is never converted to a grade).
+    lti_report_assessment_level: bool = True
+    # Cases a newly seen course offering starts with (comma-separated; the
+    # course instructor can change them). Empty: no case until assigned.
+    lti_default_case_ids: str = ""
+    # Development-only stand-in for OpenAI + the LiveKit voice transport, so the
+    # full launch → interview → assessment flow can run without paid services.
+    # Refused in production/staging.
+    ai_sp_dev_fake_ai: bool = False
+
+    @property
+    def lti_deployment_id_list(self) -> list[str]:
+        return [d.strip() for d in self.lti_deployment_ids.split(",") if d.strip()]
+
+    @property
+    def lti_default_case_id_list(self) -> list[str]:
+        return [c.strip() for c in self.lti_default_case_ids.split(",") if c.strip()]
+
+    @property
+    def lti_ready(self) -> bool:
+        """The integration is on AND every required value is configured."""
+        required = (
+            self.lti_platform_issuer, self.lti_client_id, self.lti_authorization_url,
+            self.lti_jwks_url, self.lti_launch_url, self.lti_frontend_url,
+        )
+        return self.ai_sp_lti_enabled and all(v.strip() for v in required) and bool(self.lti_deployment_id_list)
+
+    @property
+    def lti_reporting_ready(self) -> bool:
+        return (
+            self.lti_ready
+            and self.lti_event_reporting_enabled
+            and all(v.strip() for v in (self.lti_token_url, self.lti_events_url, self.lti_tool_key_file, self.lti_tool_key_id))
+        )
+
+    @property
+    def dev_fake_ai_active(self) -> bool:
+        return self.ai_sp_dev_fake_ai and self.environment.strip().lower() == "development"
+
+    @model_validator(mode="after")
+    def _enforce_integration_safety(self) -> "Settings":
+        if self.ai_sp_dev_fake_ai and self.is_strict_environment:
+            raise ConfigError(
+                "AI_SP_DEV_FAKE_AI is a development-only switch and is refused in "
+                f"'{self.environment}'."
+            )
+        if self.lti_session_minutes < 5 or self.lti_session_minutes > 240:
+            raise ConfigError("LTI_SESSION_MINUTES must be between 5 and 240.")
+        from app.core.constants import LTI_CASE_IDS
+
+        unknown = set(self.lti_default_case_id_list) - set(LTI_CASE_IDS)
+        if unknown:
+            raise ConfigError(f"LTI_DEFAULT_CASE_IDS has unknown case ids: {sorted(unknown)}")
+        return self
+
     @model_validator(mode="after")
     def _enforce_production_safety(self) -> "Settings":
         """Fail closed: in production/staging the app refuses to start with an

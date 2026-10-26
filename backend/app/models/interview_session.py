@@ -42,6 +42,9 @@ class InterviewSession(Base):
     active_topic: Mapped[str | None] = mapped_column(String(40), nullable=True)  # follow-up context
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # AI iEXCEL course offering (LTI context) a launched session belongs to.
+    # NULL for every direct-login (legacy) session, which is never reported.
+    context_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
     student = relationship("Student", back_populates="sessions")
     turns = relationship(

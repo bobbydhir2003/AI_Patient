@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.core.constants import (
     ADMIN_ROLES,
+    LTI_ROLE_INSTRUCTOR,
+    LTI_ROLE_LEARNER,
     USER_ROLE_STUDENT,
     USER_ROLES,
 )
@@ -56,12 +58,51 @@ def load_user_from_token(db: Session, token: str) -> User:
         raise NotAuthenticatedError("Account no longer exists.")
     if not user.is_active:
         raise InactiveAccountError()
+    user.lti_claims = _lti_claims(payload)
     return user
+
+
+def _lti_claims(payload: dict) -> dict | None:
+    """The course-offering scope of a token issued by an AI iEXCEL launch, or
+    None for a direct-login token. LTI tokens stop working the moment the
+    integration is switched off."""
+    claims = payload.get("lti")
+    if claims is None:
+        return None
+    from app.core.config import get_settings
+
+    if not get_settings().ai_sp_lti_enabled:
+        raise NotAuthenticatedError("Course launches are not enabled. Please sign in again.")
+    if (
+        not isinstance(claims, dict)
+        or not isinstance(claims.get("ctx"), str)
+        or claims.get("role") not in (LTI_ROLE_LEARNER, LTI_ROLE_INSTRUCTOR)
+    ):
+        raise NotAuthenticatedError("Invalid authentication token.")
+    return {"ctx": claims["ctx"], "role": claims["role"]}
+
+
+def lti_role(user: User) -> str | None:
+    claims = getattr(user, "lti_claims", None)
+    return claims["role"] if claims else None
 
 
 def user_can_access_session(user: User, session: InterviewSession) -> bool:
     """Ownership rule (single source of truth): admins may reach any session; a
-    student may reach only sessions owned by their linked Student profile."""
+    student may reach only sessions owned by their linked Student profile.
+
+    A launched (LTI) learner may reach only their own sessions in the launched
+    course offering. A launched instructor never uses the student routes; the
+    course-scoped instructor routes (app.api.lti) do their own checks."""
+    claims = getattr(user, "lti_claims", None)
+    if claims is not None:
+        if claims["role"] != LTI_ROLE_LEARNER:
+            return False
+        return bool(
+            user.student_id
+            and session.student_id == user.student_id
+            and session.context_id == claims["ctx"]
+        )
     if user.role in ADMIN_ROLES:
         return True
     return bool(user.student_id and session.student_id == user.student_id)
@@ -88,7 +129,7 @@ require_super_admin = require_admin
 
 
 def require_student(current_user: User = Depends(get_current_user)) -> User:
-    if current_user.role != USER_ROLE_STUDENT:
+    if current_user.role != USER_ROLE_STUDENT or lti_role(current_user) == LTI_ROLE_INSTRUCTOR:
         raise ForbiddenError("This resource is only available to student accounts.")
     return current_user
 
@@ -101,8 +142,22 @@ def require_simulator_access(current_user: User = Depends(get_current_user)) -> 
     promoted admin/professor is no longer blocked from running patient cases,
     while remaining strictly authenticated (never public). Admin-created sessions
     are separately flagged as practice so they do not affect student analytics."""
-    if current_user.role not in USER_ROLES:
+    if current_user.role not in USER_ROLES or lti_role(current_user) == LTI_ROLE_INSTRUCTOR:
         raise ForbiddenError("Simulator access is not permitted for this account.")
+    return current_user
+
+
+def require_lti_instructor(current_user: User = Depends(get_current_user)) -> User:
+    """Course-scoped instructor access from an AI iEXCEL launch. Grants only the
+    launched offering (claims["ctx"]); never AI SP administrator access."""
+    if lti_role(current_user) != LTI_ROLE_INSTRUCTOR:
+        raise ForbiddenError("Course instructor access is required.")
+    return current_user
+
+
+def require_lti_session(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.lti_claims is None:
+        raise ForbiddenError("This resource is only available to course launches.")
     return current_user
 
 

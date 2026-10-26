@@ -37,9 +37,10 @@ test("counts come from real session data (no hardcoded 12/7/4)", () => {
   assert.match(dash, /sessions\?\.length/);
   assert.match(dash, /s\.status === "completed"/);
   assert.match(dash, /s\.hasAssessment/);
-  assert.match(dash, /\{total \?\?/);
-  assert.match(dash, /\{completed \?\?/);
-  assert.match(dash, /\{assessments \?\?/);
+  // Stat tiles render the real counts, or a placeholder while loading.
+  assert.match(dash, /total \?\? "—"/);
+  assert.match(dash, /completed \?\? "—"/);
+  assert.match(dash, /assessments \?\? "—"/);
 });
 
 test("no fake progress percentage anywhere", () => {
@@ -50,7 +51,7 @@ test("no fake progress percentage anywhere", () => {
 
 test("continue-session appears only for a real resumable session, with empty state", () => {
   assert.match(dash, /s\.status === "active" && !s\.locked/);
-  assert.match(dash, /No active interview to resume/);
+  assert.match(dash, /resumable \? "Resume" : "No Active Session"/);
 });
 
 test("recent activity is real with an empty state", () => {
@@ -64,8 +65,10 @@ test("no fabricated profile photo (initials avatar only)", () => {
 
 test("referral cases retained and use their existing image", () => {
   assert.match(dash, /Referral &amp; Interprofessional/);
-  assert.match(dash, /referral\.cases\.map/);
-  assert.match(dash, /src=\{c\.image\}/);
+  assert.match(dash, /referral\.cases\.map\(/);
+  // Referral rows now show an icon (the redesign dropped their thumbnails);
+  // case images elsewhere still come from the case data.
+  assert.match(dash, /src=\{currentCase\.image\}/);
   // no hardcoded patient image paths in the dashboard
   assert.ok(!/\/patients?\//i.test(dash));
 });
