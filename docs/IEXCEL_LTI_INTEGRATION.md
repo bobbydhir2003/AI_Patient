@@ -53,9 +53,9 @@ See the `AI iEXCEL Course 1 integration` block in `backend/.env.example`. The pl
 
 ## Migrations
 
-- `iexcel_lti_01` (from `0020`) adds seven tables and one nullable column.
+- `iexcel_lti_01` (from `0018`, the revision production is verified at) adds seven tables and one nullable column.
 - `iexcel_lti_02` merges it with `0021`.
-- An environment at `0020` can target `iexcel_lti_01` without running `0019`.
+- An environment at `0018` can target `iexcel_lti_01` without running `0019`, `0020`, or `0021`. Never run `alembic upgrade head` in production: the `0021` merge pulls in the destructive `0019`.
 - The ids are non-numeric so they cannot collide with `0022`–`0027` on `integrate-realtime-cleanup`.
 
 ## Rollback

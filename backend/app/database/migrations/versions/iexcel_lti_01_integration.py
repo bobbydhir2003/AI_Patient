@@ -1,22 +1,25 @@
 """AI iEXCEL Course 1 integration (LTI 1.3 tool): additive tables + one column.
 
-Branches directly from 0020 (the verified production survey revision), so an
-environment at 0020 can target iexcel_lti_01 explicitly without executing the
-unrelated 0019 cleanup. The revision id is deliberately non-numeric: other AI SP
-branches (e.g. integrate-realtime-cleanup) already use 0022-0027, and a later
-merge revision joins the heads without renumbering anything. Creates only new tables and one NULLABLE column on
-interview_sessions; no existing row, column, or constraint is changed, and every
-existing (direct-login) session keeps context_id = NULL.
+Branches directly from 0018, the revision production is verified at (see
+docs/REDCAP.md), so production can target iexcel_lti_01 explicitly without
+executing the undeployed survey revisions (0020) or the destructive 0019
+cleanup. It references only users and interview_sessions, which exist at 0018.
+Creates only new tables and one NULLABLE column on interview_sessions; no
+existing row, column, or constraint is changed, and every existing
+(direct-login) session keeps context_id = NULL. The revision id is
+deliberately non-numeric: other AI SP branches (e.g. integrate-realtime-cleanup)
+already use 0022-0027, and a later merge revision joins the heads without
+renumbering anything.
 
 Revision ID: iexcel_lti_01
-Revises: 0020
+Revises: 0018
 Create Date: 2026-10
 """
 import sqlalchemy as sa
 from alembic import op
 
 revision = "iexcel_lti_01"
-down_revision = "0020"
+down_revision = "0018"
 branch_labels = ("iexcel_lti",)
 depends_on = None
 

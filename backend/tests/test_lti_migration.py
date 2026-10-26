@@ -24,15 +24,15 @@ NEW_TABLES = {
 }
 
 
-def test_lti_revision_branches_from_production_survey_revision():
+def test_lti_revision_branches_from_the_production_revision():
     scripts = ScriptDirectory.from_config(_alembic_config("sqlite://"))
-    assert scripts.get_revision("iexcel_lti_01").down_revision == "0020"
+    assert scripts.get_revision("iexcel_lti_01").down_revision == "0018"
     assert set(scripts.get_revision("iexcel_lti_02").down_revision) == {"0021", "iexcel_lti_01"}
     assert scripts.get_heads() == ["iexcel_lti_02"]
 
 
 def test_targeted_lti_revision_is_additive_and_reversible(tmp_path, monkeypatch):
-    database_url = f"sqlite:///{tmp_path / 'at-0020.db'}"
+    database_url = f"sqlite:///{tmp_path / 'at-0018.db'}"
     monkeypatch.setenv("DATABASE_URL", database_url)
     get_settings.cache_clear()
     config = _alembic_config(database_url)
@@ -48,11 +48,12 @@ def test_targeted_lti_revision_is_additive_and_reversible(tmp_path, monkeypatch)
         connection.execute(text("INSERT INTO interview_sessions VALUES ('s1', 'camden')"))
         connection.execute(text("INSERT INTO patient_voice_settings VALUES ('preserve-me')"))
     try:
-        command.stamp(config, "0020")
+        command.stamp(config, "0018")
         command.upgrade(config, "iexcel_lti_01")
         inspector = inspect(engine)
         tables = set(inspector.get_table_names())
         assert set(NEW_TABLES) <= tables and "patient_voice_settings" in tables
+        assert "survey_receipts" not in tables  # 0020 was not executed
         for name, model in NEW_TABLES.items():
             assert {c["name"] for c in inspector.get_columns(name)} == {
                 c.name for c in model.__table__.columns
@@ -66,7 +67,7 @@ def test_targeted_lti_revision_is_additive_and_reversible(tmp_path, monkeypatch)
             ).one() == ("s1", "camden", None)
             assert connection.execute(text("SELECT email FROM users")).scalar_one() == "legacy@school.test"
 
-        command.downgrade(config, "0020")
+        command.downgrade(config, "0018")
         inspector = inspect(engine)
         assert not set(NEW_TABLES) & set(inspector.get_table_names())
         assert "context_id" not in {c["name"] for c in inspector.get_columns("interview_sessions")}

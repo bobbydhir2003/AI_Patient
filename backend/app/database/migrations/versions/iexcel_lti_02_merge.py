@@ -1,8 +1,8 @@
 """Merge the AI iEXCEL LTI branch with the existing 0021 head.
 
 No schema operations. An environment that intentionally applies every branch
-reaches a single head; an environment at 0020 can instead target iexcel_lti_01
-directly (which does not execute 0019 or 0021).
+reaches a single head; an environment at 0018 can instead target iexcel_lti_01
+directly (which executes none of 0019, 0020, 0021).
 
 Revision ID: iexcel_lti_02
 Revises: 0021, iexcel_lti_01
