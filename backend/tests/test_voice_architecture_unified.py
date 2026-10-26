@@ -82,6 +82,9 @@ def test_livekit_token_gives_each_interview_an_isolated_room(student_client, mon
     monkeypatch.setattr(settings, "livekit_api_key", "devkey")
     monkeypatch.setattr(settings, "livekit_api_secret", "devsecret-0123456789")
     monkeypatch.setattr(settings, "voice_engine", "livekit")
+    # livekit_configured() also requires the POC switch (default False); without
+    # it this test only passed where a developer .env happened to set it.
+    monkeypatch.setattr(settings, "livekit_poc_enabled", True)
 
     sid = student_client.post(
         "/api/sessions", json={"studentName": "LK", "studentId": "", "caseId": "carly"}

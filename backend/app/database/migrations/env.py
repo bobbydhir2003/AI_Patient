@@ -9,7 +9,10 @@ import app.models  # noqa: F401  (register models with the metadata)
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Keep loggers that already exist (the default disables them, which silenced
+    # the app's loggers for the rest of any process that runs migrations in-process,
+    # e.g. the migration tests). Standalone `alembic upgrade` is unaffected.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 target_metadata = Base.metadata
